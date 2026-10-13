@@ -42,7 +42,6 @@ def get_portfolios():
 
         db.close()
 
-
 @router.post("")
 def create_portfolio(payload: dict):
 
@@ -104,6 +103,35 @@ def create_portfolio(payload: dict):
         return {
             "portfolio_id": portfolio_id,
             "status": "created",
+        }
+
+    finally:
+
+        db.close()
+
+@router.delete("/{portfolio_id}")
+def delete_portfolio(portfolio_id: str):
+
+    db = SessionLocal()
+
+    try:
+
+        result = db.execute(
+            text(
+                """
+                DELETE FROM portfolios
+                WHERE portfolio_id = :portfolio_id
+                """
+            ),
+            {
+                "portfolio_id": portfolio_id
+            }
+        )
+
+        db.commit()
+
+        return {
+            "deleted": result.rowcount > 0
         }
 
     finally:

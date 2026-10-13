@@ -40,7 +40,6 @@ def get_watchlists():
 
         db.close()
 
-
 @router.post("")
 def create_watchlist(payload: dict):
 
@@ -89,6 +88,35 @@ def create_watchlist(payload: dict):
         return {
             "watchlist_id": watchlist_id,
             "status": "created",
+        }
+
+    finally:
+
+        db.close()
+
+@router.delete("/{watchlist_id}")
+def delete_watchlist(watchlist_id: str):
+
+    db = SessionLocal()
+
+    try:
+
+        result = db.execute(
+            text(
+                """
+                DELETE FROM watchlists
+                WHERE watchlist_id = :watchlist_id
+                """
+            ),
+            {
+                "watchlist_id": watchlist_id
+            }
+        )
+
+        db.commit()
+
+        return {
+            "deleted": result.rowcount > 0
         }
 
     finally:
