@@ -1,92 +1,162 @@
 #!/bin/bash
-
 set -e
+
+BACKEND=/opt/mip/mip-backend
+
+echo "[1/3] Patching providers/manager.py"
 
 python3 <<'PY'
 from pathlib import Path
 
-p = Path("providers/ghostfolio.py")
-s = p.read_text()
+f = Path("/opt/mip/mip-backend/providers/manager.py")
+txt = f.read_text()
 
-#
-# aggiunge import re
-#
-
-if "import re" not in s:
-
-    s = s.replace(
-        "import os\n",
-        "import os\nimport re\n"
-    )
-
-#
-# helper clean_url()
-#
-
-anchor = "class GhostfolioProvider:\n"
-
-helper = '''
-class GhostfolioProvider:
-
-    @staticmethod
-    def _clean_url(value):
-
-        if not value:
-            return None
-
-        match = re.search(
-            r'href="([^"]+)"',
-            value
-        )
-
-        if match:
-
-            return match.group(1)
-
-        return value
-'''
-
-if (
-    "def _clean_url(" not in s
-    and
-    anchor in s
-):
-    s = s.replace(
-        anchor,
-        helper,
-        1
-    )
-
-#
-# sostituisce website mapping
-#
-
-old = '''
-            "website":
-                profile.get(
-                    "url"
-                ),
-'''
-
-new = '''
-            "website":
-                self._clean_url(
-                    profile.get(
-                        "url"
-                    )
-                ),
-'''
-
-s = s.replace(
-    old,
-    new
+txt = txt.replace(
+"""def get_profile(
+        self,
+        symbol,
+        **kwargs
+    ):""",
+"""def get_profile(
+        self,
+        symbol,
+        refresh_mode=False,
+        **kwargs
+    ):"""
 )
 
-p.write_text(s)
+txt = txt.replace(
+"""        try:
 
-print("ghostfolio.py patched")
+            metadata = (
+                self.fmp
+                .find_symbol_metadata(
+                    symbol
+                )
+            )
+
+            if metadata:
+
+                profile["exchange"] = (
+                    metadata.get(
+                        "exchange"
+                    )
+                )
+
+                profile["exchangeFullName"] = (
+                    metadata.get(
+                        "exchangeFullName"
+                    )
+                )
+
+        except Exception as ex:
+
+            print(
+                f"FMP enrichment failed: {ex}"
+            )""",
+"""        if not refresh_mode:
+
+            try:
+
+                metadata = (
+                    self.fmp
+                    .find_symbol_metadata(
+                        symbol
+                    )
+                )
+
+                if metadata:
+
+                    profile["exchange"] = (
+                        metadata.get(
+                            "exchange"
+                        )
+                    )
+
+                    profile["exchangeFullName"] = (
+                        metadata.get(
+                            "exchangeFullName"
+                        )
+                    )
+
+            except Exception as ex:
+
+                print(
+                    f"FMP enrichment failed: {ex}"
+                )"""
+)
+
+f.write_text(txt)
+print("manager.py patched")
+PY
+
+
+echo "[2/3] Patching scripts/refresh_entities.py"
+
+python3 <<'PY'
+from pathlib import Path
+
+f = Path("/opt/mip/mip-backend/scripts/refresh_entities.py")
+txt = f.read_text()
+
+txt = txt.replace(
+"""def refresh_entities(
+    mode: str = "MISSING",
+    symbol: str | None = None,
+    create_if_missing: bool = False,
+):""",
+"""def refresh_entities(
+    mode: str = "MISSING",
+    symbol: str | None = None,
+    create_if_missing: bool = False,
+    refresh_mode: bool = True,
+):"""
+)
+
+txt = txt.replace(
+""".get_profile(
+                        row.symbol
+                    )""",
+""".get_profile(
+                        row.symbol,
+                        refresh_mode=refresh_mode
+                    )"""
+)
+
+f.write_text(txt)
+print("refresh_entities.py patched")
+PY
+
+
+echo "[3/3] Patching routers/admin.py"
+
+python3 <<'PY'
+from pathlib import Path
+
+f = Path("/opt/mip/mip-backend/routers/admin.py")
+txt = f.read_text()
+
+old = """        create_if_missing=payload.get(
+            "create_if_missing",
+            False
+        ),
+    )"""
+
+new = """        create_if_missing=payload.get(
+            "create_if_missing",
+            False
+        ),
+        refresh_mode=payload.get(
+            "refresh_mode",
+            True
+        ),
+    )"""
+
+txt = txt.replace(old, new)
+
+f.write_text(txt)
+print("admin.py patched")
 PY
 
 echo
-echo "✅ website cleanup enabled"
-echo
+echo "[OK] Patch completed"

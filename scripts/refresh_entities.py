@@ -12,6 +12,7 @@ def refresh_entities(
     mode: str = "MISSING",
     symbol: str | None = None,
     create_if_missing: bool = False,
+    full_refresh: bool = False,
 ):
 
     db = SessionLocal()
@@ -59,6 +60,13 @@ def refresh_entities(
                 )
             )
 
+            print(
+                symbol,
+                profile.get("last_price") if profile else None,
+                profile.get("data_source") if profile else None,
+                flush=True
+            )
+            
             if not profile:
 
                 return {
@@ -112,14 +120,24 @@ def refresh_entities(
             try:
 
                 print(
-                    f"Refreshing {row.symbol}"
+                    f"Refreshing {row.symbol}",
+                    flush=True
                 )
 
                 profile = (
                     market_data
                     .get_profile(
-                        row.symbol
+                        row.symbol,
+                        full_refresh=full_refresh
                     )
+                )
+
+                print(
+                    row.symbol,
+                    profile.get("last_price") if profile else None,
+                    profile.get("data_source") if profile else None,
+                    profile.get("country_code") if profile else None,
+                    flush=True
                 )
 
                 if not profile:
@@ -130,7 +148,9 @@ def refresh_entities(
                     row.entity_id,
                     row.symbol,
                     profile.get("data_source"),
-                    profile.get("currency")
+                    profile.get("currency"),
+                    profile.get("country_code"),
+                    flush=True
                 )
 
                 db.execute(
@@ -161,7 +181,8 @@ def refresh_entities(
                 
                 print(
                     "UPDATED",
-                    row.symbol
+                    row.symbol,
+                    flush=True
                 )
 
             except Exception as ex:

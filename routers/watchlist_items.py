@@ -56,6 +56,7 @@ def upsert_watchlist_item(
                 """
                 SELECT
                 sp_upsert_watchlist_item(
+                    :watchlist_item_id,
                     :watchlist_id,
                     :entity_id,
                     :priority,
@@ -65,6 +66,11 @@ def upsert_watchlist_item(
                 """
             ),
             {
+                "watchlist_item_id":
+                    payload.get(
+                        "watchlist_item_id"
+                    ),
+
                 "watchlist_id":
                     payload[
                         "watchlist_id"

@@ -277,6 +277,23 @@ class GhostfolioProvider:
                 .get("name")
             )
 
+        if last_price is None:
+
+            print(
+                "NO PRICE",
+                symbol,
+                json.dumps(payload)[:1000],
+                flush=True
+            )
+            
+        if country is None:
+
+            print(
+                "NO COUNTRY",
+                symbol,
+                json.dumps(payload)[:1000],
+                flush=True
+            )
         return {
             "symbol":
                 profile.get(
@@ -293,7 +310,7 @@ class GhostfolioProvider:
                     "currency"
                 ),
 
-            "country":
+            "country_code":
                 country,
 
             "sector":
@@ -379,6 +396,7 @@ class GhostfolioProvider:
                     profile
                     and profile.get("name")
                     and profile.get("asset_class")
+                    and profile.get("last_price") is not None
                 ):
                     return profile
 

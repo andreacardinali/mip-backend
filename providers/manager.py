@@ -50,6 +50,7 @@ class MarketDataManager:
     def get_profile(
         self,
         symbol,
+        full_refresh=False,
         **kwargs
     ):
 
@@ -61,34 +62,36 @@ class MarketDataManager:
             )
         )
 
-        try:
+        if full_refresh:
 
-            metadata = (
-                self.fmp
-                .find_symbol_metadata(
-                    symbol
-                )
-            )
+            try:
 
-            if metadata:
-
-                profile["exchange"] = (
-                    metadata.get(
-                        "exchange"
+                metadata = (
+                    self.fmp
+                    .find_symbol_metadata(
+                        symbol
                     )
                 )
 
-                profile["exchangeFullName"] = (
-                    metadata.get(
-                        "exchangeFullName"
+                if metadata:
+
+                    profile["exchange"] = (
+                        metadata.get(
+                            "exchange"
+                        )
                     )
+
+                    profile["exchangeFullName"] = (
+                        metadata.get(
+                            "exchangeFullName"
+                        )
+                    )
+
+            except Exception as ex:
+
+                print(
+                    f"FMP enrichment failed for {symbol}: {ex}"
                 )
-
-        except Exception as ex:
-
-            print(
-                f"FMP enrichment failed: {ex}"
-            )
 
         return profile
 

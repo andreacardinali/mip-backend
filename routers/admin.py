@@ -61,4 +61,8 @@ def refresh_entities_endpoint(
             "create_if_missing",
             False
         ),
+        full_refresh=payload.get(
+            "full_refresh",
+            False
+        ),
     )

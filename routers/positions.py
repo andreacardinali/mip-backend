@@ -64,6 +64,7 @@ def upsert_position(
             text(
                 """
                 SELECT sp_upsert_position(
+                    :position_id,
                     :portfolio_id,
                     :instrument_id,
                     :quantity,
@@ -74,6 +75,11 @@ def upsert_position(
                 """
             ),
             {
+                "position_id":
+                    payload.get(
+                        "position_id"
+                    ),
+
                 "portfolio_id":
                     payload[
                         "portfolio_id"
