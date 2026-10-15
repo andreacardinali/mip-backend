@@ -1,5 +1,3 @@
-from uuid import uuid4
-
 from fastapi import APIRouter
 from sqlalchemy import text
 
@@ -18,17 +16,8 @@ def get_portfolios():
         rows = db.execute(
             text(
                 """
-                SELECT
-                    portfolio_id,
-                    user_id,
-                    name,
-                    portfolio_type,
-                    description,
-                    base_currency,
-                    created_at,
-                    updated_at
-                FROM portfolios
-                ORDER BY name
+                SELECT *
+                FROM sp_get_portfolios()
                 """
             )
         )
@@ -42,97 +31,110 @@ def get_portfolios():
 
         db.close()
 
-@router.post("")
-def create_portfolio(payload: dict):
+
+@router.post("/upsert")
+def upsert_portfolio(
+    payload: dict
+):
 
     db = SessionLocal()
 
     try:
-        # USER DI TEST
-        user_id = "5fc35381-dfbf-4d67-8c4e-479bb279542b"
 
-        portfolio_id = str(uuid4())
+        user_id = (
+            "5fc35381-dfbf-4d67-8c4e-479bb279542b"
+        )
 
-        db.execute(
+        portfolio_id = db.execute(
             text(
                 """
-                INSERT INTO portfolios
-                (
-                    portfolio_id,
-                    user_id,
-                    name,
-                    portfolio_type,
-                    description,
-                    base_currency,
-                    created_at,
-                    updated_at
-                )
-                VALUES
-                (
+                SELECT sp_upsert_portfolio(
                     :portfolio_id,
                     :user_id,
                     :name,
                     :portfolio_type,
                     :description,
-                    :base_currency,
-                    NOW(),
-                    NOW()
+                    :base_currency
                 )
                 """
             ),
             {
-                "portfolio_id": portfolio_id,
-                "user_id": user_id,
-                "name": payload["name"],
-                "portfolio_type": payload.get(
-                    "portfolioType",
-                    "PORTFOLIO"
-                ),
-                "description": payload.get(
-                    "description"
-                ),
-                "base_currency": payload.get(
-                    "baseCurrency",
-                    "CHF"
-                ),
+                "portfolio_id":
+                    payload.get(
+                        "portfolio_id"
+                    ),
+
+                "user_id":
+                    user_id,
+
+                "name":
+                    payload["name"],
+
+                "portfolio_type":
+                    payload.get(
+                        "portfolio_type",
+                        "PORTFOLIO"
+                    ),
+
+                "description":
+                    payload.get(
+                        "description"
+                    ),
+
+                "base_currency":
+                    payload.get(
+                        "base_currency",
+                        "CHF"
+                    ),
             },
-        )
+        ).scalar()
 
         db.commit()
 
         return {
-            "portfolio_id": portfolio_id,
-            "status": "created",
+            "portfolio_id":
+                str(portfolio_id),
+            "status":
+                "saved",
         }
 
     finally:
 
         db.close()
 
-@router.delete("/{portfolio_id}")
-def delete_portfolio(portfolio_id: str):
+
+@router.delete(
+    "/{portfolio_id}"
+)
+def delete_portfolio(
+    portfolio_id: str
+):
 
     db = SessionLocal()
 
     try:
-
-        result = db.execute(
+        deleted = db.execute(
             text(
                 """
-                DELETE FROM portfolios
-                WHERE portfolio_id = :portfolio_id
+                SELECT
+                sp_delete_portfolio(
+                    :portfolio_id
+                )
                 """
             ),
             {
-                "portfolio_id": portfolio_id
-            }
-        )
+                "portfolio_id":
+                    portfolio_id
+            },
+        ).scalar()
 
         db.commit()
 
         return {
-            "deleted": result.rowcount > 0
+            "deleted":
+                deleted
         }
+
 
     finally:
 

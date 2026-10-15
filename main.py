@@ -2,24 +2,111 @@ from fastapi import FastAPI
 from db import engine
 from sqlalchemy import text
 
-from routers.watchlists import router as watchlists
-from routers.portfolios import router as portfolios
+from fastapi.middleware.cors import CORSMiddleware
+from routers.watchlists import (
+    router as watchlists_router
+)
+
+from routers.watchlist_items import (
+    router as watchlist_items_router
+)
+
+from routers.portfolios import (
+    router as portfolios_router
+)
+
+from routers.positions import (
+    router as positions_router
+)
+
+from routers.entities import (
+    router as entities_router
+)
+
+from routers.instruments import (
+    router as instruments_router
+)
+
+from routers.search import (
+    router as search_router
+)
+
+from routers.imports import (
+    router as imports_router
+)
+
+from routers.admin import (
+    router as admin_router
+)
 
 app = FastAPI(
     title="Market Intelligence Platform"
 )
 
-app.include_router(
-    watchlists,
-    prefix="/api/watchlists"
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://mip.internal:5173",
+        "http://mip.internal:5174",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 app.include_router(
-    portfolios,
-    prefix="/api/portfolios"
+    watchlists_router,
+    prefix="/api/watchlists",
+    tags=["watchlists"]
 )
 
+app.include_router(
+    watchlist_items_router,
+    prefix="/api/watchlist-items",
+    tags=["watchlist-items"]
+)
 
+app.include_router(
+    portfolios_router,
+    prefix="/api/portfolios",
+    tags=["portfolios"]
+)
+
+app.include_router(
+    positions_router,
+    prefix="/api/positions",
+    tags=["positions"]
+)
+
+app.include_router(
+    entities_router,
+    prefix="/api/entities",
+    tags=["entities"]
+)
+
+app.include_router(
+    instruments_router,
+    prefix="/api/instruments",
+    tags=["instruments"]
+)
+
+app.include_router(
+    search_router,
+    prefix="/api/search",
+    tags=["search"]
+)
+
+app.include_router(
+    imports_router,
+    prefix="/api/import",
+    tags=["import"]
+)
+
+app.include_router(
+    admin_router,
+    prefix="/api/admin",
+    tags=["admin"]
+)
 
 @app.get("/health")
 def health():

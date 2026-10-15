@@ -1,5 +1,3 @@
-from uuid import uuid4
-
 from fastapi import APIRouter
 from sqlalchemy import text
 
@@ -18,15 +16,8 @@ def get_watchlists():
         rows = db.execute(
             text(
                 """
-                SELECT
-                    watchlist_id,
-                    user_id,
-                    name,
-                    description,
-                    created_at,
-                    updated_at
-                FROM watchlists
-                ORDER BY name
+                SELECT *
+                FROM sp_get_watchlists()
                 """
             )
         )
@@ -40,83 +31,91 @@ def get_watchlists():
 
         db.close()
 
-@router.post("")
-def create_watchlist(payload: dict):
+
+@router.post("/upsert")
+def upsert_watchlist(
+    payload: dict
+):
 
     db = SessionLocal()
 
     try:
 
-        # USER DI TEST
-        user_id = "5fc35381-dfbf-4d67-8c4e-479bb279542b"
+        user_id = (
+            "5fc35381-dfbf-4d67-8c4e-479bb279542b"
+        )
 
-        watchlist_id = str(uuid4())
-
-        db.execute(
+        watchlist_id = db.execute(
             text(
                 """
-                INSERT INTO watchlists
-                (
-                    watchlist_id,
-                    user_id,
-                    name,
-                    description,
-                    created_at,
-                    updated_at
-                )
-                VALUES
-                (
+                SELECT sp_upsert_watchlist(
                     :watchlist_id,
                     :user_id,
                     :name,
-                    :description,
-                    NOW(),
-                    NOW()
+                    :description
                 )
                 """
             ),
             {
-                "watchlist_id": watchlist_id,
-                "user_id": user_id,
-                "name": payload["name"],
-                "description": payload.get("description"),
-            },
-        )
+                "watchlist_id":
+                    payload.get(
+                        "watchlist_id"
+                    ),
+                "user_id":
+                    user_id,
+                "name":
+                    payload["name"],
+                "description":
+                    payload.get(
+                        "description"
+                    ),
+            }
+        ).scalar()
 
         db.commit()
 
         return {
-            "watchlist_id": watchlist_id,
-            "status": "created",
+            "watchlist_id":
+                str(watchlist_id),
+            "status":
+                "saved",
         }
 
     finally:
 
         db.close()
 
-@router.delete("/{watchlist_id}")
-def delete_watchlist(watchlist_id: str):
+
+@router.delete(
+    "/{watchlist_id}"
+)
+def delete_watchlist(
+    watchlist_id: str
+):
 
     db = SessionLocal()
 
     try:
-
-        result = db.execute(
+        deleted = db.execute(
             text(
                 """
-                DELETE FROM watchlists
-                WHERE watchlist_id = :watchlist_id
+                SELECT
+                sp_delete_watchlist(
+                    :watchlist_id
+                )
                 """
             ),
             {
-                "watchlist_id": watchlist_id
-            }
-        )
+                "watchlist_id":
+                    watchlist_id
+            },
+        ).scalar()
 
         db.commit()
 
         return {
-            "deleted": result.rowcount > 0
+            "deleted":
+                deleted
         }
 
     finally:
