@@ -1,7 +1,9 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from sqlalchemy import text
 
 from db import SessionLocal
+
+from auth.security import get_current_user, CurrentUser
 
 router = APIRouter()
 
@@ -9,10 +11,11 @@ router = APIRouter()
 @router.get(
     "/{watchlist_id}/items"
 )
-def get_watchlist_items(
-    watchlist_id: str
+async def get_watchlist_items(
+    watchlist_id: str,
+    current_user: CurrentUser = Depends(get_current_user),
 ):
-
+    user_id = current_user["user_id"]
     db = SessionLocal()
 
     try:
@@ -22,13 +25,16 @@ def get_watchlist_items(
                 """
                 SELECT *
                 FROM sp_get_watchlist_items(
-                    :watchlist_id
+                    :watchlist_id,
+                    :user_id
                 )
                 """
             ),
             {
                 "watchlist_id":
-                    watchlist_id
+                    watchlist_id,
+                "user_id":
+                    user_id,
             },
         )
 
@@ -43,10 +49,11 @@ def get_watchlist_items(
 
 
 @router.post("/upsert")
-def upsert_watchlist_item(
-    payload: dict
+async def upsert_watchlist_item(
+    payload: dict,
+    current_user: CurrentUser = Depends(get_current_user),
 ):
-
+    user_id = current_user["user_id"]
     db = SessionLocal()
 
     try:
@@ -58,6 +65,7 @@ def upsert_watchlist_item(
                 sp_upsert_watchlist_item(
                     :watchlist_item_id,
                     :watchlist_id,
+                    :user_id,
                     :entity_id,
                     :priority,
                     :target_price,
@@ -75,6 +83,10 @@ def upsert_watchlist_item(
                     payload[
                         "watchlist_id"
                     ],
+
+                "user_id":
+                    user_id,
+
                 "entity_id":
                     payload[
                         "entity_id"
@@ -111,10 +123,11 @@ def upsert_watchlist_item(
 @router.delete(
     "/{watchlist_item_id}"
 )
-def delete_watchlist_item(
-    watchlist_item_id: str
+async def delete_watchlist_item(
+    watchlist_item_id: str,
+    current_user: CurrentUser = Depends(get_current_user),
 ):
-
+    user_id = current_user["user_id"]
     db = SessionLocal()
 
     try:
@@ -123,13 +136,16 @@ def delete_watchlist_item(
                 """
                 SELECT
                 sp_delete_watchlist_item(
-                    :watchlist_item_id
+                    :watchlist_item_id,
+                    :user_id
                 )
                 """
             ),
             {
                 "watchlist_item_id":
-                    watchlist_item_id
+                    watchlist_item_id,
+                "user_id":
+                    user_id,
             },
         ).scalar()
 

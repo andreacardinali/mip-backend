@@ -1,14 +1,17 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from sqlalchemy import text
 
 from db import SessionLocal
 
+from auth.security import get_current_user, CurrentUser
+
 router = APIRouter()
 
-
 @router.get("")
-def get_watchlists():
-
+async def get_watchlists(
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    user_id = current_user["user_id"]
     db = SessionLocal()
 
     try:
@@ -17,9 +20,15 @@ def get_watchlists():
             text(
                 """
                 SELECT *
-                FROM sp_get_watchlists()
+                FROM sp_get_watchlists(
+                    :user_id
+                )
                 """
-            )
+            ),
+            {
+                "user_id":
+                    user_id,
+            }
         )
 
         return [
@@ -33,10 +42,11 @@ def get_watchlists():
 
 
 @router.post("/upsert")
-def upsert_watchlist(
-    payload: dict
+async def upsert_watchlist(
+    payload: dict,
+    current_user: CurrentUser = Depends(get_current_user),
 ):
-
+    user_id = current_user["user_id"]
     db = SessionLocal()
 
     try:
@@ -89,10 +99,11 @@ def upsert_watchlist(
 @router.delete(
     "/{watchlist_id}"
 )
-def delete_watchlist(
-    watchlist_id: str
+async def delete_watchlist(
+    watchlist_id: str,
+    current_user: CurrentUser = Depends(get_current_user),    
 ):
-
+    user_id = current_user["user_id"]
     db = SessionLocal()
 
     try:
@@ -101,13 +112,16 @@ def delete_watchlist(
                 """
                 SELECT
                 sp_delete_watchlist(
-                    :watchlist_id
+                    :watchlist_id,
+                    :user_id
                 )
                 """
             ),
             {
                 "watchlist_id":
-                    watchlist_id
+                    watchlist_id,
+                "user_id":
+                    user_id,
             },
         ).scalar()
 

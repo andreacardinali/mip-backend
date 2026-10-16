@@ -1,31 +1,33 @@
 import json
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from sqlalchemy import text
 
 from db import SessionLocal
+
+from auth.security import get_current_user, CurrentUser
+
+router = APIRouter()
 
 from providers.manager import (
     market_data
 )
 
-router = APIRouter()
-
 
 @router.post("/entity")
 def import_entity(
-    payload: dict
+    payload: dict,
+    current_user: CurrentUser = Depends(get_current_user),
 ):
-
-    symbol = (
-        payload["symbol"]
-        .strip()
-        .upper()
-    )
-
+    user_id = current_user["user_id"]
     db = SessionLocal()
-
+    
     try:
+        symbol = (
+            payload["symbol"]
+            .strip()
+            .upper()
+        )
 
         symbol_info = db.execute(
             text(

@@ -1,14 +1,17 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from sqlalchemy import text
 
 from db import SessionLocal
 
+from auth.security import get_current_user, CurrentUser
+
 router = APIRouter()
 
-
-@router.get("")
-def get_portfolios():
-
+@router.get("/")
+async def get_portfolios(
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    user_id = current_user["user_id"]
     db = SessionLocal()
 
     try:
@@ -17,9 +20,15 @@ def get_portfolios():
             text(
                 """
                 SELECT *
-                FROM sp_get_portfolios()
+                FROM sp_get_portfolios(
+                :user_id
+                )
                 """
-            )
+            ),
+            {
+                "user_id":
+                    user_id,
+            }
         )
 
         return [
@@ -31,19 +40,15 @@ def get_portfolios():
 
         db.close()
 
-
 @router.post("/upsert")
-def upsert_portfolio(
-    payload: dict
+async def upsert_portfolio(
+    payload: dict,
+    current_user: CurrentUser = Depends(get_current_user),
 ):
-
+    user_id = current_user["user_id"]
     db = SessionLocal()
 
     try:
-
-        user_id = (
-            "5fc35381-dfbf-4d67-8c4e-479bb279542b"
-        )
 
         portfolio_id = db.execute(
             text(
@@ -84,7 +89,7 @@ def upsert_portfolio(
                 "base_currency":
                     payload.get(
                         "base_currency",
-                        "CHF"
+                        "USD"
                     ),
             },
         ).scalar()
@@ -102,14 +107,12 @@ def upsert_portfolio(
 
         db.close()
 
-
-@router.delete(
-    "/{portfolio_id}"
-)
-def delete_portfolio(
-    portfolio_id: str
+@router.delete("/{portfolio_id}")
+async def delete_portfolio(
+    portfolio_id: str,
+    current_user: CurrentUser = Depends(get_current_user),
 ):
-
+    user_id = current_user["user_id"]
     db = SessionLocal()
 
     try:
@@ -118,13 +121,16 @@ def delete_portfolio(
                 """
                 SELECT
                 sp_delete_portfolio(
-                    :portfolio_id
+                    :portfolio_id,
+                    :user_id
                 )
                 """
             ),
             {
                 "portfolio_id":
-                    portfolio_id
+                    portfolio_id,
+                "user_id":
+                    user_id,
             },
         ).scalar()
 
@@ -138,4 +144,37 @@ def delete_portfolio(
 
     finally:
 
+        db.close()
+
+@router.get("/{portfolio_id}/summary")
+async def get_portfolio_summary(
+    portfolio_id: str,
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    user_id = current_user["user_id"]
+    db = SessionLocal()
+
+    try:
+
+        row = db.execute(
+            text(
+                """
+                SELECT *
+                FROM sp_get_portfolio_summary(
+                    :portfolio_id,
+                    :user_id
+                )
+                """
+            ),
+            {
+                "portfolio_id": portfolio_id,
+                "user_id": user_id,
+            },
+        ).first()
+
+        return dict(
+            row._mapping
+        )
+
+    finally:
         db.close()

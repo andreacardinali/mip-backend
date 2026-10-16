@@ -1,8 +1,9 @@
-from fastapi import APIRouter
-
+from fastapi import APIRouter, Depends
 from sqlalchemy import text
 
 from db import SessionLocal
+
+from auth.security import get_current_user, CurrentUser
 
 from scripts.refresh_entities import (
     refresh_entities
@@ -14,8 +15,10 @@ router = APIRouter()
 @router.post(
     "/cache/cleanup"
 )
-def cleanup_cache():
-
+async def cleanup_cache(
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    user_id = current_user["user_id"]
     db = SessionLocal()
 
     try:
@@ -43,9 +46,13 @@ def cleanup_cache():
         db.close()
 
 @router.post("/entities/refresh")
-def refresh_entities_endpoint(
-    payload: dict
+async def refresh_entities_endpoint(
+    payload: dict,
 ):
+
+    current_user: CurrentUser = Depends(get_current_user),
+    user_id = current_user["user_id"]
+    db = SessionLocal()
 
     print(payload)
 

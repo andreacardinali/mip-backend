@@ -1,9 +1,12 @@
 import json
-
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from sqlalchemy import text
 
 from db import SessionLocal
+
+from auth.security import get_current_user, CurrentUser
+
+router = APIRouter()
 
 from providers.manager import (
     market_data
@@ -13,8 +16,13 @@ router = APIRouter()
 
 
 @router.get("")
-def search_symbols(q: str):
-
+async def search_symbols(
+    q: str,
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    user_id = current_user["user_id"]
+    db = SessionLocal()
+    
     if not q:
 
         return {
@@ -26,8 +34,6 @@ def search_symbols(q: str):
         q.lower()
          .strip()
     )
-
-    db = SessionLocal()
 
     try:
 

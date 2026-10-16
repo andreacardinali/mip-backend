@@ -1,7 +1,9 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from sqlalchemy import text
 
 from db import SessionLocal
+
+from auth.security import get_current_user, CurrentUser
 
 router = APIRouter()
 
@@ -9,10 +11,11 @@ router = APIRouter()
 @router.get(
     "/portfolio/{portfolio_id}"
 )
-def get_positions(
-    portfolio_id: str
+async def get_positions(
+    portfolio_id: str,
+    current_user: CurrentUser = Depends(get_current_user),
 ):
-
+    user_id = current_user["user_id"]
     db = SessionLocal()
 
     try:
@@ -22,13 +25,16 @@ def get_positions(
                 """
                 SELECT *
                 FROM sp_get_positions(
-                    :portfolio_id
+                    :portfolio_id,
+                    :user_id
                 )
                 """
             ),
             {
                 "portfolio_id":
-                    portfolio_id
+                    portfolio_id,
+                "user_id":
+                    user_id,
             },
         )
 
@@ -43,9 +49,13 @@ def get_positions(
 
 
 @router.post("/upsert")
-def upsert_position(
-    payload: dict
+async def upsert_position(
+    payload: dict,
+    current_user: CurrentUser = Depends(get_current_user),
 ):
+
+    user_id = current_user["user_id"]
+    db = SessionLocal()
 
     if "instrument_id" not in payload:
         return {
@@ -55,9 +65,6 @@ def upsert_position(
                 payload
         }
 
-    db = SessionLocal()
-
-
     try:
 
         position_id = db.execute(
@@ -66,6 +73,7 @@ def upsert_position(
                 SELECT sp_upsert_position(
                     :position_id,
                     :portfolio_id,
+                    :user_id,
                     :instrument_id,
                     :quantity,
                     :avg_price,
@@ -84,6 +92,9 @@ def upsert_position(
                     payload[
                         "portfolio_id"
                     ],
+                    
+                "user_id":
+                    user_id,
 
                 "instrument_id":
                     payload[
@@ -129,10 +140,12 @@ def upsert_position(
 @router.delete(
     "/{position_id}"
 )
-def delete_position(
-    position_id: str
+async def delete_position(
+    position_id: str,
+    current_user: CurrentUser = Depends(get_current_user),
 ):
 
+    user_id = current_user["user_id"]
     db = SessionLocal()
 
     try:
@@ -141,13 +154,16 @@ def delete_position(
                 """
                 SELECT
                 sp_delete_position(
-                    :position_id
+                    :position_id,
+                    :user_id
                 )
                 """
             ),
             {
                 "position_id":
-                    position_id
+                    position_id,
+                "user_id":
+                    user_id,
             },
         ).scalar()
 

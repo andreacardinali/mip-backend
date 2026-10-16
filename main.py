@@ -39,6 +39,10 @@ from routers.admin import (
     router as admin_router
 )
 
+from routers.auth import (
+    router as auth_router
+)
+
 app = FastAPI(
     title="Market Intelligence Platform"
 )
@@ -106,6 +110,12 @@ app.include_router(
     admin_router,
     prefix="/api/admin",
     tags=["admin"]
+)
+
+app.include_router(
+    auth_router,
+    prefix="/api/auth",
+    tags=["auth"]
 )
 
 @app.get("/health")
