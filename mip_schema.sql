@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict SFsD0zKojOmQg5clKcTq4riDXFJtLlPVvMqDu4cG6WOyMhVDuZKnV8HcGI0iMpY
+\restrict MFnYS4jILaIu4FYbBFoEFuB2hu0XqfiKIajQqBJqugwoposNgHLe9B2rhdmNqxd
 
 -- Dumped from database version 18.6 (Debian 18.6-1.pgdg13+2)
 -- Dumped by pg_dump version 18.6 (Debian 18.6-1.pgdg13+2)
@@ -5117,5 +5117,5 @@ ALTER TABLE ONLY public.watchlists
 -- PostgreSQL database dump complete
 --
 
-\unrestrict SFsD0zKojOmQg5clKcTq4riDXFJtLlPVvMqDu4cG6WOyMhVDuZKnV8HcGI0iMpY
+\unrestrict MFnYS4jILaIu4FYbBFoEFuB2hu0XqfiKIajQqBJqugwoposNgHLe9B2rhdmNqxd
 
