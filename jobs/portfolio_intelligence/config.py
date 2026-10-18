@@ -35,7 +35,7 @@ class IntelligenceConfig:
     daily_move_min_pct: float
     daily_renotify_delta_pct: float
     min_history_rows: int
-    notification_http_timeout: float
+    notification_timeout: float
     notification_retention_days: int
     yahoo_range: str
     yahoo_interval: str
@@ -62,7 +62,7 @@ class IntelligenceConfig:
             daily_move_min_pct=_f("DAILY_MOVE_MIN_PCT", 3.0),
             daily_renotify_delta_pct=_f("DAILY_RENOTIFY_DELTA_PCT", 2.0),
             min_history_rows=_i("MIN_HISTORY_ROWS", 50),
-            notification_timeout=_f("INTELLIGENCE_NOTIFICATION_TIMEOUT", 30.0),
+            notification_timeout=_f("NOTIFICATION_HTTP_TIMEOUT", 30.0),
             notification_retention_days=_i("NOTIFICATION_RETENTION_DAYS", 45),
             yahoo_range=settings.get("YAHOO_HISTORY_RANGE", "2y"),
             yahoo_interval=settings.get("YAHOO_HISTORY_INTERVAL", "1d"),
