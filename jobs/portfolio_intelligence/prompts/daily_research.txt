@@ -1,0 +1,4 @@
+Analyze the observed daily movement using Google Search. Return JSON with symbol, catalyst and supports.
+Do not claim causality unless a source explicitly establishes it. Do not infer price direction from the event type.
+Observed:
+{observed}
