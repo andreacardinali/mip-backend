@@ -37,7 +37,6 @@ class IntelligenceConfig:
     breaking_lookback_hours: int
     daily_move_min_pct: float
     min_history_rows: int
-    notification_retention_days: int
     yahoo_range: str
     yahoo_interval: str
     market_data_timeout: float
@@ -79,9 +78,6 @@ class IntelligenceConfig:
             ),
             daily_move_min_pct=_f("DAILY_MOVE_MIN_PCT", 3.0),
             min_history_rows=_i("MIN_HISTORY_ROWS", 50),
-            notification_retention_days=_i(
-                "NOTIFICATION_RETENTION_DAYS", 45
-            ),
             yahoo_range=settings.get("YAHOO_HISTORY_RANGE", "2y"),
             yahoo_interval=settings.get("YAHOO_HISTORY_INTERVAL", "1d"),
             market_data_timeout=_f("MARKET_DATA_HTTP_TIMEOUT", 30.0),
