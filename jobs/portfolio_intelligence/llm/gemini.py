@@ -1,29 +1,9 @@
-import random
-import time
-
 import httpx
-
-from jobs.portfolio_intelligence.llm.base import (
-    LLMProvider,
-    LLMRequest,
-    LLMResponse,
-)
-from jobs.portfolio_intelligence.llm.parsing import (
-    parse_json_object,
-)
-
+from jobs.portfolio_intelligence.llm.base import LLMProvider, LLMRequest, LLMResponse
+from jobs.portfolio_intelligence.llm.parsing import parse_json_object
+from jobs.portfolio_intelligence.llm.retry import post_with_retry
 
 class GeminiProvider(LLMProvider):
-
-    RETRYABLE_STATUS_CODES = {
-        408,
-        429,
-        500,
-        502,
-        503,
-        504,
-    }
-
     def __init__(
         self,
         api_key: str,
@@ -35,58 +15,6 @@ class GeminiProvider(LLMProvider):
         self.model = model
         self.timeout = timeout
         self.max_retries = max_retries
-
-    def _post_with_retry(
-        self,
-        client: httpx.Client,
-        url: str,
-        body: dict,
-    ) -> httpx.Response:
-
-        for attempt in range(
-            self.max_retries + 1
-        ):
-            response = client.post(
-                url,
-                headers={
-                    "x-goog-api-key": self.api_key,
-                    "Content-Type": "application/json",
-                },
-                json=body,
-            )
-
-            if (
-                response.status_code
-                not in self.RETRYABLE_STATUS_CODES
-            ):
-                response.raise_for_status()
-                return response
-
-            if attempt >= self.max_retries:
-                response.raise_for_status()
-
-            retry_after = (
-                response.headers.get("Retry-After")
-            )
-
-            if retry_after:
-                try:
-                    delay = float(retry_after)
-                except ValueError:
-                    delay = 2 ** attempt
-            else:
-                delay = 2 ** attempt
-
-            delay += random.uniform(
-                0.0,
-                0.5,
-            )
-
-            time.sleep(delay)
-
-        raise RuntimeError(
-            "Gemini retry loop terminated unexpectedly"
-        )
 
     def generate_json(
         self,
@@ -135,10 +63,15 @@ class GeminiProvider(LLMProvider):
             timeout=self.timeout
         ) as client:
 
-            response = self._post_with_retry(
+            response = post_with_retry(
                 client,
                 url,
-                body,
+                max_retries=self.max_retries,
+                headers={
+                    "x-goog-api-key": self.api_key,
+                    "Content-Type": "application/json",
+                },
+                json=body,
             )
 
             raw = response.json()

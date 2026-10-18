@@ -1,30 +1,22 @@
 import httpx
+from jobs.portfolio_intelligence.llm.base import LLMProvider, LLMRequest, LLMResponse
+from jobs.portfolio_intelligence.llm.parsing import parse_json_object
+from jobs.portfolio_intelligence.llm.retry import post_with_retry
 
-from jobs.portfolio_intelligence.llm.base import (
-    LLMProvider,
-    LLMRequest,
-    LLMResponse,
-)
-from jobs.portfolio_intelligence.llm.parsing import (
-    parse_json_object,
-)
-
-
-class OpenAICompatibleProvider(
-    LLMProvider
-):
-
+class OpenAICompatibleProvider(LLMProvider):
     def __init__(
         self,
         base_url: str,
         api_key: str,
         model: str,
         timeout: float = 60,
+        max_retries: int = 4,
     ):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
         self.timeout = timeout
+        self.max_retries = max_retries
 
     def generate_json(
         self,
@@ -56,8 +48,10 @@ class OpenAICompatibleProvider(
             timeout=self.timeout
         ) as client:
 
-            response = client.post(
+            response = post_with_retry(
+                client,
                 url,
+                max_retries=self.max_retries,
                 headers={
                     "Authorization":
                         f"Bearer {self.api_key}",
