@@ -25,11 +25,11 @@ class UpcomingCatalystBranch(IntelligenceBranch):
         try:
             for batch in _batches(candidates,context.config.batch_size):
                 payload=[{**c.to_dict(),"recentCatalysts":known.get(c.entity_id,[])} for c in batch]
-                response=context.gemini.generate_json(LLMRequest(prompt=prompt_tpl.format(execution_date=date.today().isoformat(),window_start=today.isoformat(),window_end=end.isoformat(),candidates=json.dumps(payload,default=str)),grounded_search=True,max_tokens=8192))
+                response=context.research_llm.generate_json(LLMRequest(prompt=prompt_tpl.format(execution_date=date.today().isoformat(),window_start=today.isoformat(),window_end=end.isoformat(),candidates=json.dumps(payload,default=str)),grounded_search=True,max_tokens=8192))
                 rows=response.data.get("results") or []
-                if len(rows)!=len(batch): raise ValueError("Upcoming Gemini result count mismatch")
+                if len(rows)!=len(batch): raise ValueError("Upcoming LLM result count mismatch")
                 for source, row in zip(batch,rows):
-                    if row.get("symbol")!=source.symbol: raise ValueError("Upcoming Gemini symbol mismatch")
+                    if row.get("symbol")!=source.symbol: raise ValueError("Upcoming LLM symbol mismatch")
                     for event in row.get("events") or []:
                         try: event_date=date.fromisoformat(event["eventDate"][:10])
                         except Exception: continue

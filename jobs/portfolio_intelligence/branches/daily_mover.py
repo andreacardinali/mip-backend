@@ -23,10 +23,10 @@ class DailyMoverBranch(IntelligenceBranch):
                 observed={**entity.to_dict(),**tech,"allocationPct":entity.allocation_pct,
                           "portfolioImpactPct":tech["dailyChangePct"]*entity.allocation_pct/100,
                           "severity":severity(tech["dailyChangePct"],entity.allocation_pct)}
-                research=context.gemini.generate_json(LLMRequest(prompt=research_tpl.format(observed=json.dumps(observed,default=str)),grounded_search=True,max_tokens=4096))
-                final=context.ollama.generate_json(LLMRequest(prompt=validate_tpl.format(observed=json.dumps(observed,default=str),catalyst=json.dumps(research.data.get("catalyst"),default=str),supports=json.dumps(research.data.get("supports") or research.sources,default=str)),max_tokens=900))
+                context.research_llm.generate_json(LLMRequest(prompt=research_tpl.format(observed=json.dumps(observed,default=str)),grounded_search=True,max_tokens=4096))
+                final=context.research_llm.generate_json(LLMRequest(prompt=validate_tpl.format(observed=json.dumps(observed,default=str),catalyst=json.dumps(research.data.get("catalyst"),default=str),supports=json.dumps(research.data.get("supports") or research.sources,default=str)),max_tokens=900))
                 data=final.data
-                if data.get("symbol")!=entity.symbol: raise ValueError("Ollama symbol mismatch")
+                if data.get("symbol")!=entity.symbol: raise ValueError("Validation LLM symbol mismatch")
                 cause=bool(data.get("causeFound")); indices=data.get("sourceIndicesUsed") or []
                 if not cause: data.update({"causeConfidence":0,"likelyCause":None,"sourceIndicesUsed":[]})
                 item={**observed,**data,"entity_id":entity.entity_id,"sourcesUsed":validated_sources(indices,research.sources)}; accepted.append(item)

@@ -15,11 +15,11 @@ class BreakingCatalystBranch(IntelligenceBranch):
         tpl=(Path(__file__).parent.parent/'prompts/breaking.txt').read_text(); accepted=[]
         try:
             for batch in _batches(candidates,context.config.batch_size):
-                response=context.gemini.generate_json(LLMRequest(prompt=tpl.format(lookback_hours=context.config.breaking_lookback_hours,execution_date=datetime.now(timezone.utc).isoformat(),candidates=json.dumps([c.to_dict() for c in batch],default=str)),grounded_search=True,max_tokens=8192))
+                response=context.research_llm.generate_json(LLMRequest(prompt=tpl.format(lookback_hours=context.config.breaking_lookback_hours,execution_date=datetime.now(timezone.utc).isoformat(),candidates=json.dumps([c.to_dict() for c in batch],default=str)),grounded_search=True,max_tokens=8192))
                 rows=response.data.get("results") or []
-                if len(rows)!=len(batch): raise ValueError("Breaking Gemini result count mismatch")
+                if len(rows)!=len(batch): raise ValueError("Breaking LLM result count mismatch")
                 for source,row in zip(batch,rows):
-                    if row.get("symbol")!=source.symbol: raise ValueError("Breaking Gemini symbol mismatch")
+                    if row.get("symbol")!=source.symbol: raise ValueError("Breaking LLM symbol mismatch")
                     for event in row.get("events") or []:
                         if int(event.get("eventConfidence",0))<60: continue
                         fingerprint=str(event.get("eventFingerprint") or "").strip()

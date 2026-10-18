@@ -9,7 +9,13 @@ from apscheduler.triggers.cron import CronTrigger
 from sqlalchemy import text
 
 from config.settings import settings
+
 from db import SessionLocal
+
+from scheduler_repository import SchedulerRepository
+
+db = SessionLocal()
+repository = SchedulerRepository(db)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -37,31 +43,12 @@ def execute_job(
     started_at = datetime.now(timezone.utc)
 
     try:
-        db.execute(
-            text(
-                """
-                INSERT INTO scheduler_job_runs
-                (
-                    job_run_id,
-                    job_id,
-                    started_at,
-                    status
-                )
-                VALUES
-                (
-                    :job_run_id,
-                    :job_id,
-                    :started_at,
-                    'RUNNING'
-                )
-                """
-            ),
-            {
-                "job_run_id": job_run_id,
-                "job_id": UUID(job_id),
-                "started_at": started_at,
-            },
+        repository.start_run(
+            job_run_id=job_run_id,
+            job_id=UUID(job_id),
+            started_at=started_at,
         )
+
         db.commit()
 
         module = importlib.import_module(
@@ -82,40 +69,16 @@ def execute_job(
         elif result_status == "PARTIAL":
             error_message = "Job completed with partial failures"
 
-        db.execute(
-            text(
-                """
-                UPDATE scheduler_job_runs
-                SET
-                    completed_at = :completed_at,
-                    status = :status,
-                    error_message = :error_message,
-                    result = CAST(:result AS jsonb)
-                WHERE job_run_id = :job_run_id
-                """
+        repository.complete_run(
+            job_run_id=job_run_id,
+            status=result_status,
+            error_message=error_message,
+            result=result,
+            completed_at=datetime.now(
+                timezone.utc
             ),
-            {
-                "completed_at": datetime.now(timezone.utc),
-                "status": result_status,
-                "error_message": error_message,
-                "result": json.dumps(result),
-                "job_run_id": job_run_id,
-            },
         )
 
-        db.execute(
-            text(
-                """
-                UPDATE scheduler_jobs
-                SET last_run_at = :last_run_at
-                WHERE job_id = :job_id
-                """
-            ),
-            {
-                "last_run_at": datetime.now(timezone.utc),
-                "job_id": UUID(job_id),
-            },
-        )
         db.commit()
 
         logger.info(
@@ -129,23 +92,14 @@ def execute_job(
     except Exception as exc:
         db.rollback()
 
-        db.execute(
-            text(
-                """
-                UPDATE scheduler_job_runs
-                SET
-                    completed_at = :completed_at,
-                    status = 'FAILED',
-                    error_message = :error_message
-                WHERE job_run_id = :job_run_id
-                """
+        repository.fail_run(
+            job_run_id=job_run_id,
+            error_message=str(exc),
+            completed_at=datetime.now(
+                timezone.utc
             ),
-            {
-                "completed_at": datetime.now(timezone.utc),
-                "error_message": str(exc),
-                "job_run_id": job_run_id,
-            },
         )
+
         db.commit()
 
         logger.exception(

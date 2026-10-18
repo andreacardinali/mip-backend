@@ -41,3 +41,43 @@ def create_research_provider(
         "INTELLIGENCE_LLM_PROVIDER: "
         f"{config.llm_provider}"
     )
+
+def create_validation_provider(
+    config,
+) -> LLMProvider:
+    provider = (
+        config.validation_llm_provider
+        .strip()
+        .lower()
+    )
+
+    if provider == "ollama":
+        return OllamaProvider(
+            base_url=(
+                config.validation_llm_base_url
+            ),
+            model=config.validation_llm_model,
+            timeout=max(
+                config.request_timeout,
+                120,
+            ),
+        )
+
+    if provider == "openai_compatible":
+        return OpenAICompatibleProvider(
+            base_url=(
+                config.validation_llm_base_url
+            ),
+            api_key=(
+                config.validation_llm_api_key
+            ),
+            model=(
+                config.validation_llm_model
+            ),
+            timeout=config.request_timeout,
+        )
+
+    raise ValueError(
+        "Unsupported validation LLM provider: "
+        f"{provider}"
+    )

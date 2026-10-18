@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict wqfs8AFYmgzBihPhrdiIo9fJd8z1NfRkTSoATq1s1L51qg2E6NUkM9efVGPVJml
+\restrict I23gKMZq8bdvgBwchyOxDzsPMyXVJ9LjoIMFZjuzMTbmcPUgKBrZHfsQM1tuyaI
 
 -- Dumped from database version 18.6 (Debian 18.6-1.pgdg13+2)
 -- Dumped by pg_dump version 18.6 (Debian 18.6-1.pgdg13+2)
@@ -403,6 +403,181 @@ $$;
 
 
 --
+-- Name: sp_get_intelligence_candidates(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_get_intelligence_candidates() RETURNS TABLE(user_id uuid, entity_id uuid, instrument_id uuid, symbol character varying, name character varying, exchange character varying, currency_code character, instrument_type character varying, quantity numeric, market_value numeric, allocation_pct numeric, in_portfolio boolean, in_watchlist boolean)
+    LANGUAGE sql STABLE
+    AS $$
+WITH portfolio_rows AS
+(
+    SELECT
+        pf.user_id,
+        i.entity_id,
+        i.instrument_id,
+        i.symbol,
+        e.name,
+        i.exchange,
+        i.currency_code,
+        i.instrument_type,
+        SUM(p.quantity)::numeric AS quantity,
+        SUM(
+            COALESCE(
+                p.quantity * i.last_price,
+                0
+            )
+        )::numeric AS market_value
+    FROM positions p
+    JOIN portfolios pf
+      ON pf.portfolio_id = p.portfolio_id
+    JOIN instruments i
+      ON i.instrument_id = p.instrument_id
+    JOIN entities e
+      ON e.entity_id = i.entity_id
+    JOIN users u
+      ON u.user_id = pf.user_id
+     AND u.is_active = true
+    WHERE e.active = true
+      AND i.symbol IS NOT NULL
+    GROUP BY
+        pf.user_id,
+        i.entity_id,
+        i.instrument_id,
+        i.symbol,
+        e.name,
+        i.exchange,
+        i.currency_code,
+        i.instrument_type
+),
+watchlist_rows AS
+(
+    SELECT DISTINCT
+        w.user_id,
+        i.entity_id,
+        i.instrument_id,
+        i.symbol,
+        e.name,
+        i.exchange,
+        i.currency_code,
+        i.instrument_type
+    FROM watchlist_items wi
+    JOIN watchlists w
+      ON w.watchlist_id = wi.watchlist_id
+    JOIN users u
+      ON u.user_id = w.user_id
+     AND u.is_active = true
+    JOIN entities e
+      ON e.entity_id = wi.entity_id
+    JOIN instruments i
+      ON i.entity_id = e.entity_id
+    WHERE e.active = true
+      AND i.symbol IS NOT NULL
+),
+combined AS
+(
+    SELECT
+        user_id,
+        entity_id,
+        instrument_id,
+        symbol,
+        name,
+        exchange,
+        currency_code,
+        instrument_type,
+        quantity,
+        market_value,
+        true AS in_portfolio,
+        false AS in_watchlist
+    FROM portfolio_rows
+
+    UNION ALL
+
+    SELECT
+        user_id,
+        entity_id,
+        instrument_id,
+        symbol,
+        name,
+        exchange,
+        currency_code,
+        instrument_type,
+        0::numeric,
+        0::numeric,
+        false,
+        true
+    FROM watchlist_rows
+),
+aggregated AS
+(
+    SELECT
+        user_id,
+        entity_id,
+        instrument_id,
+        symbol,
+        name,
+        exchange,
+        currency_code,
+        instrument_type,
+        SUM(quantity)::numeric AS quantity,
+        SUM(market_value)::numeric AS market_value,
+        BOOL_OR(in_portfolio) AS in_portfolio,
+        BOOL_OR(in_watchlist) AS in_watchlist
+    FROM combined
+    GROUP BY
+        user_id,
+        entity_id,
+        instrument_id,
+        symbol,
+        name,
+        exchange,
+        currency_code,
+        instrument_type
+),
+totals AS
+(
+    SELECT
+        user_id,
+        NULLIF(
+            SUM(market_value),
+            0
+        ) AS total_value
+    FROM aggregated
+    GROUP BY user_id
+)
+SELECT
+    a.user_id,
+    a.entity_id,
+    a.instrument_id,
+    a.symbol,
+    a.name,
+    a.exchange,
+    a.currency_code,
+    a.instrument_type,
+    a.quantity,
+    a.market_value,
+    CASE
+        WHEN t.total_value IS NULL
+            THEN 0
+        ELSE ROUND(
+            a.market_value
+            / t.total_value
+            * 100,
+            4
+        )
+    END AS allocation_pct,
+    a.in_portfolio,
+    a.in_watchlist
+FROM aggregated a
+JOIN totals t
+  ON t.user_id = a.user_id
+ORDER BY
+    a.user_id,
+    a.symbol,
+    a.exchange NULLS LAST;
+$$;
+
+
+--
 -- Name: sp_get_market_cache(character varying, integer); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -583,6 +758,30 @@ $$;
 
 
 --
+-- Name: sp_get_recent_catalysts(uuid[], integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_get_recent_catalysts(p_entity_ids uuid[], p_days integer DEFAULT 30) RETURNS TABLE(entity_id uuid, catalyst_type character varying, catalyst_date timestamp with time zone, status character varying, importance numeric, title text, source character varying, raw_payload jsonb)
+    LANGUAGE sql STABLE
+    AS $$
+SELECT
+    c.entity_id,
+    c.catalyst_type,
+    c.catalyst_date,
+    c.status,
+    c.importance,
+    c.title,
+    c.source,
+    c.raw_payload
+FROM catalysts c
+WHERE c.entity_id = ANY(p_entity_ids)
+  AND c.catalyst_date >=
+      now() - make_interval(days => p_days)
+ORDER BY c.catalyst_date DESC;
+$$;
+
+
+--
 -- Name: sp_get_symbol(character varying, integer); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -721,6 +920,32 @@ SELECT
 FROM users
 WHERE username =
       p_username;
+$$;
+
+
+--
+-- Name: sp_get_user_notification_source(uuid, character varying); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_get_user_notification_source(p_user_id uuid, p_source_type character varying) RETURNS TABLE(source_id uuid, source_type character varying, source_name character varying, external_id text, config jsonb)
+    LANGUAGE sql STABLE
+    AS $$
+SELECT
+    us.source_id,
+    us.source_type,
+    us.source_name,
+    us.external_id,
+    us.config
+FROM user_sources us
+WHERE us.user_id = p_user_id
+  AND UPPER(us.source_type) =
+      UPPER(p_source_type)
+  AND COALESCE(
+        (us.config->>'enabled')::boolean,
+        true
+      ) = true
+ORDER BY us.created_at DESC
+LIMIT 1;
 $$;
 
 
@@ -4388,5 +4613,5 @@ ALTER TABLE ONLY public.watchlists
 -- PostgreSQL database dump complete
 --
 
-\unrestrict wqfs8AFYmgzBihPhrdiIo9fJd8z1NfRkTSoATq1s1L51qg2E6NUkM9efVGPVJml
+\unrestrict I23gKMZq8bdvgBwchyOxDzsPMyXVJ9LjoIMFZjuzMTbmcPUgKBrZHfsQM1tuyaI
 
