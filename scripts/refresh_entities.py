@@ -1,213 +1,54 @@
+import argparse
 import json
-from providers.manager import (
-    market_data
-)
-
-from sqlalchemy import text
 
 from db import SessionLocal
+from services.entities import RefreshMode, refresh_entities
 
 
-def refresh_entities(
-    mode: str = "MISSING",
-    symbol: str | None = None,
-    create_if_missing: bool = False,
-    full_refresh: bool = False,
-):
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Refresh one or more entities"
+    )
+    parser.add_argument(
+        "--mode",
+        choices=[mode.value for mode in RefreshMode],
+        default=RefreshMode.MISSING.value,
+    )
+    parser.add_argument("--symbol")
+    parser.add_argument(
+        "--create-if-missing",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--full-refresh",
+        action="store_true",
+    )
+    return parser.parse_args()
 
+
+def main() -> int:
+    args = parse_args()
     db = SessionLocal()
 
     try:
-
-        rows = db.execute(
-            text(
-                """
-                SELECT *
-                FROM
-                sp_get_entities_for_refresh(
-                    :mode,
-                    :symbol
-                )
-                """
-            ),
-            {
-                "mode": mode,
-                "symbol": symbol,
-            },
-        ).fetchall()
-
-        updated = 0
-        created = 0
-
-        #
-        # create if missing
-        #
-
-        if (
-            mode == "SYMBOL"
-            and
-            symbol
-            and
-            len(rows) == 0
-            and
-            create_if_missing
-        ):
-
-            profile = (
-                market_data
-                .get_profile(
-                    symbol
-                )
-            )
-
-            print(
-                symbol,
-                profile.get("last_price") if profile else None,
-                profile.get("data_source") if profile else None,
-                flush=True
-            )
-            
-            if not profile:
-
-                return {
-                    "updated": 0,
-                    "created": 0,
-                    "error": "symbol not found",
-                }
-
-            result = db.execute(
-                text(
-                    """
-                    SELECT *
-                    FROM
-                    sp_import_asset_profile(
-                        CAST(
-                            :payload
-                            AS jsonb
-                        )
-                    )
-                    """
-                ),
-                {
-                    "payload":
-                        json.dumps(
-                            profile
-                        )
-                },
-            ).first()
-
-            db.commit()
-
-            return {
-                "updated": 0,
-                "created": 1,
-                "entity_id":
-                    str(
-                        result.entity_id
-                    ),
-                "instrument_id":
-                    str(
-                        result.instrument_id
-                    ),
-            }
-
-        #
-        # refresh
-        #
-
-        for row in rows:
-
-            try:
-
-                print(
-                    f"Refreshing {row.symbol}",
-                    flush=True
-                )
-
-                profile = (
-                    market_data
-                    .get_profile(
-                        row.symbol,
-                        full_refresh=full_refresh
-                    )
-                )
-
-                print(
-                    row.symbol,
-                    profile.get("last_price") if profile else None,
-                    profile.get("data_source") if profile else None,
-                    profile.get("country_code") if profile else None,
-                    flush=True
-                )
-
-                if not profile:
-                    continue
-
-                print(
-                    "REFRESHING ENTITY",
-                    row.entity_id,
-                    row.symbol,
-                    profile.get("data_source"),
-                    profile.get("currency"),
-                    profile.get("country_code"),
-                    flush=True
-                )
-
-                db.execute(
-                    text(
-                        """
-                        SELECT
-                        sp_refresh_entity_from_profile(
-                            :entity_id,
-                            :instrument_id,
-                            CAST(
-                                :payload
-                                AS jsonb
-                            )
-                        )
-                        """
-                    ),
-                    {
-                        "entity_id":
-                            row.entity_id,
-                        "instrument_id":
-                            row.instrument_id,
-                        "payload":
-                            json.dumps(
-                                profile
-                            ),
-                    },
-                )
-
-                updated += 1
-                
-                print(
-                    "UPDATED",
-                    row.symbol,
-                    flush=True
-                )
-
-            except Exception as ex:
-
-                print(
-                    f"ERROR {row.symbol}: {ex}"
-                )
-
+        result = refresh_entities(
+            db,
+            mode=args.mode,
+            symbol=args.symbol,
+            create_if_missing=args.create_if_missing,
+            full_refresh=args.full_refresh,
+        )
         db.commit()
+        print(json.dumps(result, indent=2, default=str))
+        return 1 if result["status"] == "FAILED" else 0
 
-        return {
-            "mode": mode,
-            "updated": updated,
-            "created": created,
-        }
+    except Exception:
+        db.rollback()
+        raise
 
     finally:
-
         db.close()
 
 
 if __name__ == "__main__":
-
-    result = refresh_entities()
-
-    print(result)
+    raise SystemExit(main())

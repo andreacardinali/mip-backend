@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict wdgVgsJzViwRh3uwGpdu9idoSKxnER2CYsRYGa96udHxJBdMznJqLjmJCj1UnS7
+\restrict QmmPUFmn73ENPfemdVPhX80lxmw2rXzrdGxyBuGXKgDgXps4mYO9vLqibSg6pxN
 
 -- Dumped from database version 18.6 (Debian 18.6-1.pgdg13+2)
 -- Dumped by pg_dump version 18.6 (Debian 18.6-1.pgdg13+2)
@@ -3273,7 +3273,7 @@ CREATE TABLE public.scheduler_job_runs (
 --
 
 CREATE TABLE public.scheduler_jobs (
-    job_id uuid NOT NULL,
+    job_id uuid DEFAULT gen_random_uuid() NOT NULL,
     job_name character varying(100) NOT NULL,
     python_module character varying(255) NOT NULL,
     trigger_type character varying(20) NOT NULL,
@@ -4929,5 +4929,5 @@ ALTER TABLE ONLY public.watchlists
 -- PostgreSQL database dump complete
 --
 
-\unrestrict wdgVgsJzViwRh3uwGpdu9idoSKxnER2CYsRYGa96udHxJBdMznJqLjmJCj1UnS7
+\unrestrict QmmPUFmn73ENPfemdVPhX80lxmw2rXzrdGxyBuGXKgDgXps4mYO9vLqibSg6pxN
 

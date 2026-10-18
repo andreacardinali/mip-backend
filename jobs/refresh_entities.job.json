@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "job_key": "refresh_entities_missing",
+  "job_name": "Refresh Missing Entities",
+  "python_module": "jobs.entities.refresh_entities",
+  "trigger": {
+    "type": "cron",
+    "cron_expression": "30 5 * * *"
+  },
+  "enabled_by_default": true
+}
