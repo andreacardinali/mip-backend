@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict F6TfaYS1eu4MaZ10dTeaKCukan4fcz84MEKaoWojfkcplox1ji7Y2L1sgrluLeY
+\restrict rHd5NJq0XZLnbAaPKVfoa0390v9zmAYch5j31QSrfHjAnl03xueR4RNUiiJgzcc
 
 -- Dumped from database version 18.6 (Debian 18.6-1.pgdg13+2)
 -- Dumped by pg_dump version 18.6 (Debian 18.6-1.pgdg13+2)
@@ -301,15 +301,34 @@ $$;
 -- Name: sp_get_entities_for_refresh(character varying, character varying); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.sp_get_entities_for_refresh(p_mode character varying DEFAULT 'MISSING'::character varying, p_symbol character varying DEFAULT NULL::character varying) RETURNS TABLE(entity_id uuid, symbol character varying)
+CREATE FUNCTION public.sp_get_entities_for_refresh(p_mode character varying DEFAULT 'MISSING'::character varying, p_symbol character varying DEFAULT NULL::character varying) RETURNS TABLE(entity_id uuid, instrument_id uuid, symbol character varying)
     LANGUAGE plpgsql
     AS $$
 BEGIN
+
+    IF UPPER(p_mode) NOT IN (
+        'MISSING',
+        'ALL',
+        'SYMBOL'
+    ) THEN
+        RAISE EXCEPTION
+            'Invalid refresh mode: %',
+            p_mode;
+    END IF;
+
+    IF (
+        UPPER(p_mode) = 'SYMBOL'
+        AND NULLIF(TRIM(p_symbol), '') IS NULL
+    ) THEN
+        RAISE EXCEPTION
+            'p_symbol is required when p_mode is SYMBOL';
+    END IF;
 
     RETURN QUERY
 
     SELECT
         e.entity_id,
+        i.instrument_id,
         i.symbol
 
     FROM entities e
@@ -318,32 +337,36 @@ BEGIN
       ON i.entity_id = e.entity_id
 
     WHERE
+        e.active = TRUE
 
+        AND
         (
-            p_mode = 'MISSING'
-            AND
-            UPPER(e.name)
-            =
-            UPPER(i.symbol)
-        )
+            (
+                UPPER(p_mode) = 'MISSING'
+                AND
+                (
+                    UPPER(e.name) =
+                    UPPER(i.symbol)
 
-        OR
-
-        (
-            p_mode = 'ALL'
-        )
-
-        OR
-
-        (
-            p_mode = 'SYMBOL'
-            AND
-            UPPER(i.symbol)
-            =
-            UPPER(
-                p_symbol
+                    OR e.country_code IS NULL
+                    OR i.currency_code IS NULL
+                    OR i.data_source IS NULL
+                )
             )
-        );
+
+            OR UPPER(p_mode) = 'ALL'
+
+            OR
+            (
+                UPPER(p_mode) = 'SYMBOL'
+                AND UPPER(i.symbol) =
+                    UPPER(TRIM(p_symbol))
+            )
+        )
+
+    ORDER BY
+        i.symbol,
+        i.instrument_id;
 
 END;
 $$;
@@ -771,96 +794,218 @@ CREATE FUNCTION public.sp_import_asset_profile(p_payload jsonb) RETURNS TABLE(en
     LANGUAGE plpgsql
     AS $$
 DECLARE
+    v_symbol varchar(50);
+    v_name varchar(255);
 
-    v_symbol VARCHAR(50);
+    v_exchange varchar(50);
+    v_exchange_full_name varchar(255);
 
-    v_name VARCHAR(255);
+    v_currency char(3);
+    v_entity_type entity_type;
+    v_instrument_type varchar(50);
 
-    v_exchange VARCHAR(50);
+    v_country_code varchar(2);
+    v_data_source varchar(50);
+    v_last_price numeric(20,8);
 
-    v_exchange_full_name VARCHAR(255);
-
-    v_currency CHAR(3);
-
-    v_type VARCHAR(50);
-
-    v_country VARCHAR(10);
-
-    v_sector VARCHAR(255);
-
-    v_website VARCHAR(500);
-
-    v_data_source VARCHAR(50);
-
-    v_entity_id UUID;
-
-    v_instrument_id UUID;
-
-	v_last_price NUMERIC(20,8);
-
+    v_entity_id uuid;
+    v_instrument_id uuid;
 BEGIN
 
-	v_symbol :=
-	    p_payload->>'symbol';
-	
-	v_name :=
-	    NULLIF(
-	        COALESCE(
-	            p_payload->>'name',
-	            p_payload->>'companyName'
-	        ),
-	        v_symbol
-	    );
-	
-	v_exchange :=
-	    p_payload->>'exchange';
-	
-	v_exchange_full_name :=
-	    p_payload->>'exchangeFullName';
-	
-	v_currency :=
-	    p_payload->>'currency';
-	
-	v_type :=
-	    COALESCE(
-	        p_payload->>'type',
-	        'STOCK'
-	    );
-	
-	v_country :=
-	    p_payload->>'country';
-	
-	v_sector :=
-	    p_payload->>'sector';
-	
-	v_website :=
-	    p_payload->>'website';
-	
-	v_data_source :=
-	    p_payload->>'data_source';
-
-	v_last_price :=
-	    NULLIF(
-	        p_payload->>'last_price',
-	        ''
-	    )::NUMERIC;
-
     --------------------------------------------------------
-    -- upsert exchange
+    -- Lettura e validazione symbol
     --------------------------------------------------------
 
-	IF v_exchange IS NOT NULL THEN
-	
-	    PERFORM
-	    sp_upsert_exchange(
-	        v_exchange,
-	        v_exchange_full_name
-	    );
-	
-	END IF;
-	
+    v_symbol :=
+        NULLIF(
+            UPPER(
+                TRIM(
+                    p_payload->>'symbol'
+                )
+            ),
+            ''
+        );
+
+    IF v_symbol IS NULL THEN
+        RAISE EXCEPTION
+            'Payload symbol is required';
+    END IF;
+
     --------------------------------------------------------
-    -- instrument already exists
+    -- Lettura nome
+    --------------------------------------------------------
+
+    v_name :=
+        NULLIF(
+            TRIM(
+                COALESCE(
+                    p_payload->>'name',
+                    p_payload->>'companyName'
+                )
+            ),
+            ''
+        );
+
+    v_name :=
+        COALESCE(
+            v_name,
+            v_symbol
+        );
+
+    --------------------------------------------------------
+    -- Lettura exchange
+    --------------------------------------------------------
+
+    v_exchange :=
+        NULLIF(
+            TRIM(
+                p_payload->>'exchange'
+            ),
+            ''
+        );
+
+    v_exchange_full_name :=
+        NULLIF(
+            TRIM(
+                p_payload->>'exchangeFullName'
+            ),
+            ''
+        );
+
+    --------------------------------------------------------
+    -- Lettura valuta dello strumento
+    --------------------------------------------------------
+
+    v_currency :=
+        NULLIF(
+            UPPER(
+                TRIM(
+                    p_payload->>'currency'
+                )
+            ),
+            ''
+        );
+
+    --------------------------------------------------------
+    -- Tipo dello strumento
+    --------------------------------------------------------
+
+    v_instrument_type :=
+        COALESCE(
+            NULLIF(
+                UPPER(
+                    TRIM(
+                        COALESCE(
+                            p_payload->>'instrument_type',
+                            p_payload->>'asset_sub_class',
+                            p_payload->>'type'
+                        )
+                    )
+                ),
+                ''
+            ),
+            'STOCK'
+        );
+
+    --------------------------------------------------------
+    -- Tipo dell'entity
+    --------------------------------------------------------
+
+    v_entity_type :=
+        CASE
+
+            WHEN UPPER(
+                COALESCE(
+                    p_payload->>'asset_class',
+                    ''
+                )
+            ) IN (
+                'CRYPTO',
+                'CRYPTOCURRENCY'
+            )
+                THEN 'CRYPTO'::entity_type
+
+            WHEN v_instrument_type = 'ETF'
+                THEN 'ETF'::entity_type
+
+            WHEN v_instrument_type IN (
+                'FUND',
+                'MUTUALFUND',
+                'MUTUAL_FUND'
+            )
+                THEN 'FUND'::entity_type
+
+            WHEN v_instrument_type = 'INDEX'
+                THEN 'INDEX'::entity_type
+
+            WHEN v_instrument_type = 'COMMODITY'
+                THEN 'COMMODITY'::entity_type
+
+            ELSE 'COMPANY'::entity_type
+
+        END;
+
+    --------------------------------------------------------
+    -- Paese dell'entity
+    --------------------------------------------------------
+
+    v_country_code :=
+        NULLIF(
+            UPPER(
+                TRIM(
+                    COALESCE(
+                        p_payload->>'country_code',
+                        p_payload->>'country'
+                    )
+                )
+            ),
+            ''
+        );
+
+    --------------------------------------------------------
+    -- Provider market data
+    --------------------------------------------------------
+
+    v_data_source :=
+        NULLIF(
+            UPPER(
+                TRIM(
+                    p_payload->>'data_source'
+                )
+            ),
+            ''
+        );
+
+    --------------------------------------------------------
+    -- Ultimo prezzo
+    --------------------------------------------------------
+
+    v_last_price :=
+        NULLIF(
+            TRIM(
+                p_payload->>'last_price'
+            ),
+            ''
+        )::numeric;
+
+    --------------------------------------------------------
+    -- Upsert exchange
+    --------------------------------------------------------
+
+    IF v_exchange IS NOT NULL THEN
+
+        PERFORM sp_upsert_exchange(
+            v_exchange,
+            v_exchange_full_name
+        );
+
+    END IF;
+
+    --------------------------------------------------------
+    -- Verifica se lo strumento esiste già
+    --
+    -- IS NOT DISTINCT FROM tratta correttamente anche
+    -- il caso in cui entrambi gli exchange siano NULL.
     --------------------------------------------------------
 
     SELECT
@@ -870,10 +1015,65 @@ BEGIN
         v_entity_id,
         v_instrument_id
     FROM instruments i
-    WHERE i.symbol = v_symbol
+    WHERE UPPER(i.symbol) = v_symbol
+      AND i.exchange IS NOT DISTINCT FROM v_exchange
     LIMIT 1;
 
+    --------------------------------------------------------
+    -- Aggiornamento strumento già esistente
+    --------------------------------------------------------
+
     IF v_instrument_id IS NOT NULL THEN
+
+        UPDATE entities
+        SET
+            name = COALESCE(
+                v_name,
+                name
+            ),
+
+            entity_type = COALESCE(
+                v_entity_type,
+                entity_type
+            ),
+
+            country_code = COALESCE(
+                v_country_code,
+                country_code
+            )
+
+        WHERE entities.entity_id =
+              v_entity_id;
+
+        UPDATE instruments
+        SET
+            exchange = COALESCE(
+                v_exchange,
+                exchange
+            ),
+
+            instrument_type = COALESCE(
+                v_instrument_type,
+                instrument_type
+            ),
+
+            currency_code = COALESCE(
+                v_currency,
+                currency_code
+            ),
+
+            data_source = COALESCE(
+                v_data_source,
+                data_source
+            ),
+
+            last_price = COALESCE(
+                v_last_price,
+                last_price
+            )
+
+        WHERE instruments.instrument_id =
+              v_instrument_id;
 
         RETURN QUERY
         SELECT
@@ -886,50 +1086,54 @@ BEGIN
     END IF;
 
     --------------------------------------------------------
-    -- entity
+    -- Creazione nuova entity
     --------------------------------------------------------
 
     INSERT INTO entities
     (
         name,
         entity_type,
-        currency_code
+        country_code
     )
     VALUES
     (
         v_name,
-        'COMPANY',
-        v_currency
+        v_entity_type,
+        v_country_code
     )
     RETURNING entities.entity_id
     INTO v_entity_id;
 
     --------------------------------------------------------
-    -- instrument
+    -- Creazione nuovo instrument
     --------------------------------------------------------
 
-	INSERT INTO instruments
-	(
-	    entity_id,
-	    symbol,
-	    exchange,
-	    instrument_type,
-	    currency_code,
-	    data_source,
-		last_price
-	)
-	VALUES
-	(
-	    v_entity_id,
-	    v_symbol,
-	    v_exchange,
-	    v_type,
-	    v_currency,
-	    v_data_source,
-		v_last_price
-	)
+    INSERT INTO instruments
+    (
+        entity_id,
+        symbol,
+        exchange,
+        instrument_type,
+        currency_code,
+        data_source,
+        last_price
+    )
+    VALUES
+    (
+        v_entity_id,
+        v_symbol,
+        v_exchange,
+        v_instrument_type,
+        v_currency,
+        v_data_source,
+        v_last_price
+    )
     RETURNING instruments.instrument_id
     INTO v_instrument_id;
+
+    --------------------------------------------------------
+    -- Risultato
+    --------------------------------------------------------
 
     RETURN QUERY
     SELECT
@@ -942,113 +1146,171 @@ $$;
 
 
 --
--- Name: sp_refresh_entity_from_profile(uuid, jsonb); Type: FUNCTION; Schema: public; Owner: -
+-- Name: sp_refresh_entity_from_profile(uuid, uuid, jsonb); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.sp_refresh_entity_from_profile(p_entity_id uuid, p_payload jsonb) RETURNS void
+CREATE FUNCTION public.sp_refresh_entity_from_profile(p_entity_id uuid, p_instrument_id uuid, p_payload jsonb) RETURNS void
     LANGUAGE plpgsql
     AS $$
 DECLARE
+    v_name varchar(255);
+    v_country_code varchar(2);
 
-    v_name VARCHAR(255);
-
-    v_currency VARCHAR(10);
-
-    v_exchange VARCHAR(50);
-
-    v_exchange_full_name VARCHAR(255);
-
-	v_country_code VARCHAR(2);
-
+    v_exchange varchar(50);
+    v_exchange_full_name varchar(255);
+    v_currency varchar(3);
+    v_data_source varchar(50);
+    v_last_price numeric(20,8);
 BEGIN
 
+    --------------------------------------------------------
+    -- Validazione relazione entity/instrument
+    --------------------------------------------------------
+
+    IF NOT EXISTS
+    (
+        SELECT 1
+        FROM instruments i
+        WHERE i.instrument_id = p_instrument_id
+          AND i.entity_id = p_entity_id
+    ) THEN
+        RAISE EXCEPTION
+            'Instrument % does not belong to entity %',
+            p_instrument_id,
+            p_entity_id;
+    END IF;
+
+    --------------------------------------------------------
+    -- Lettura attributi entity
+    --------------------------------------------------------
+
     v_name :=
-        COALESCE(
-            p_payload->>'companyName',
-            p_payload->>'name'
+        NULLIF(
+            TRIM(
+                COALESCE(
+                    p_payload->>'name',
+                    p_payload->>'companyName'
+                )
+            ),
+            ''
+        );
+
+    v_country_code :=
+        NULLIF(
+            UPPER(
+                TRIM(
+                    p_payload->>'country_code'
+                )
+            ),
+            ''
+        );
+
+    --------------------------------------------------------
+    -- Lettura attributi instrument
+    --------------------------------------------------------
+
+    v_exchange :=
+        NULLIF(
+            TRIM(
+                p_payload->>'exchange'
+            ),
+            ''
+        );
+
+    v_exchange_full_name :=
+        NULLIF(
+            TRIM(
+                p_payload->>'exchangeFullName'
+            ),
+            ''
         );
 
     v_currency :=
-        p_payload->>'currency';
+        NULLIF(
+            UPPER(
+                TRIM(
+                    p_payload->>'currency'
+                )
+            ),
+            ''
+        );
 
-    v_exchange :=
-            p_payload->>'exchange';
+    v_data_source :=
+        NULLIF(
+            UPPER(
+                TRIM(
+                    p_payload->>'data_source'
+                )
+            ),
+            ''
+        );
 
-    v_exchange_full_name :=
-        p_payload->>'exchangeFullName';
+    v_last_price :=
+        NULLIF(
+            TRIM(
+                p_payload->>'last_price'
+            ),
+            ''
+        )::numeric;
 
-	v_country_code :=
-	    UPPER(
-	        p_payload->>'country_code'
-	    );
+    --------------------------------------------------------
+    -- Exchange
+    --------------------------------------------------------
 
-    --------------------------------------------------
-    -- exchange
-    --------------------------------------------------
+    IF v_exchange IS NOT NULL THEN
 
-    PERFORM
-    sp_upsert_exchange(
-        v_exchange,
-        v_exchange_full_name
-    );
+        PERFORM sp_upsert_exchange(
+            v_exchange,
+            v_exchange_full_name
+        );
 
-    --------------------------------------------------
-    -- entity
-    --------------------------------------------------
+    END IF;
+
+    --------------------------------------------------------
+    -- Entity
+    --------------------------------------------------------
 
     UPDATE entities
     SET
-        name =
-            COALESCE(
-                v_name,
-                name
-            ),
+        name = COALESCE(
+            v_name,
+            name
+        ),
 
-        currency_code =
-            COALESCE(
-                v_currency,
-                currency_code
-            ),
-		country_code =
-	        COALESCE(
-	            v_country_code,
-	            country_code
-	        )
+        country_code = COALESCE(
+            v_country_code,
+            country_code
+        )
 
-    WHERE entity_id =
-          p_entity_id;
+    WHERE entity_id = p_entity_id;
 
-    --------------------------------------------------
-    -- instruments
-    --------------------------------------------------
+    --------------------------------------------------------
+    -- Singolo instrument
+    --------------------------------------------------------
 
-	UPDATE instruments
-	SET
-	    exchange =
-	        COALESCE(
-	            v_exchange,
-	            exchange
-	        ),
-	
-	    currency_code =
-	        COALESCE(
-	            v_currency,
-	            currency_code
-	        ),
-	
-	    last_price =
-	        COALESCE(
-	            (p_payload->>'last_price')::numeric,
-	            last_price
-	        ),
-		data_source =
-			  COALESCE(
-			      p_payload->>'data_source',
-			      data_source
-			  )
-	
-	WHERE entity_id =
-	      p_entity_id;
+    UPDATE instruments
+    SET
+        exchange = COALESCE(
+            v_exchange,
+            exchange
+        ),
+
+        currency_code = COALESCE(
+            v_currency,
+            currency_code
+        ),
+
+        data_source = COALESCE(
+            v_data_source,
+            data_source
+        ),
+
+        last_price = COALESCE(
+            v_last_price,
+            last_price
+        )
+
+    WHERE instrument_id = p_instrument_id;
 
 END;
 $$;
@@ -1229,10 +1491,10 @@ $$;
 
 
 --
--- Name: sp_update_entity_profile(uuid, character varying, character varying, character varying); Type: FUNCTION; Schema: public; Owner: -
+-- Name: sp_update_entity_profile(uuid, character varying, character varying); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.sp_update_entity_profile(p_entity_id uuid, p_name character varying, p_country_code character varying, p_currency_code character varying) RETURNS void
+CREATE FUNCTION public.sp_update_entity_profile(p_entity_id uuid, p_name character varying, p_country_code character varying) RETURNS void
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -1240,22 +1502,24 @@ BEGIN
     UPDATE entities
     SET
         name = COALESCE(
-            p_name,
+            NULLIF(
+                TRIM(p_name),
+                ''
+            ),
             name
         ),
 
         country_code = COALESCE(
-            p_country_code,
+            NULLIF(
+                UPPER(
+                    TRIM(p_country_code)
+                ),
+                ''
+            ),
             country_code
-        ),
-
-        currency_code = COALESCE(
-            p_currency_code,
-            currency_code
         )
 
-    WHERE entity_id =
-          p_entity_id;
+    WHERE entity_id = p_entity_id;
 
 END;
 $$;
@@ -1974,7 +2238,6 @@ CREATE TABLE public.entities (
     name character varying(255) NOT NULL,
     entity_type public.entity_type NOT NULL,
     country_code character(2),
-    currency_code character(3),
     description text,
     active boolean DEFAULT true,
     created_at timestamp with time zone DEFAULT now(),
@@ -2677,7 +2940,7 @@ CREATE VIEW public.vw_entities AS
     name,
     entity_type,
     country_code,
-    currency_code,
+    description,
     active,
     created_at,
     updated_at
@@ -4042,5 +4305,5 @@ ALTER TABLE ONLY public.watchlists
 -- PostgreSQL database dump complete
 --
 
-\unrestrict F6TfaYS1eu4MaZ10dTeaKCukan4fcz84MEKaoWojfkcplox1ji7Y2L1sgrluLeY
+\unrestrict rHd5NJq0XZLnbAaPKVfoa0390v9zmAYch5j31QSrfHjAnl03xueR4RNUiiJgzcc
 
