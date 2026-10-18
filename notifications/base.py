@@ -1,6 +1,13 @@
 from typing import Protocol
 
+from notifications.models import NotificationDelivery, NotificationSendResult
 
-class MessageSender(Protocol):
-    def send(self, message: str) -> list[object]:
+
+class NotificationPlugin(Protocol):
+    channel: str
+
+    def send(
+        self,
+        delivery: NotificationDelivery,
+    ) -> NotificationSendResult:
         ...

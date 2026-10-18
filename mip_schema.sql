@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict s4uYG78PFQcjIGBjycZsLCgGpe22OkJwFbFI5rYQAzlIoZatEFFd7Fj1XC4jNAN
+\restrict CfR0Z7S9H39O1fLHzMQRabK8rmmxjeLNJxzkXrU48GNSAWsf90SjzauGrf7Xvxw
 
 -- Dumped from database version 18.6 (Debian 18.6-1.pgdg13+2)
 -- Dumped by pg_dump version 18.6 (Debian 18.6-1.pgdg13+2)
@@ -147,6 +147,93 @@ BEGIN
     RETURN
         (p_amount * v_from_rate)
         / v_to_rate;
+END;
+$$;
+
+
+--
+-- Name: sp_claim_notifications(integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_claim_notifications(p_limit integer) RETURNS TABLE(notification_id uuid, user_id uuid, source_id uuid, channel character varying, notification_key character varying, notification_type character varying, severity character varying, title text, message text, context jsonb, source_external_id text, source_config jsonb, attempt_count integer)
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    RETURN QUERY
+
+    WITH candidates AS
+    (
+        SELECT n.notification_id
+        FROM notifications n
+
+        JOIN user_sources us
+          ON us.source_id = n.source_id
+         AND us.user_id = n.user_id
+
+        WHERE n.status IN (
+                  'PENDING',
+                  'RETRY'
+              )
+
+          AND n.source_id IS NOT NULL
+
+          AND COALESCE(
+                (us.config->>'enabled')::boolean,
+                true
+              ) = true
+
+          AND COALESCE(
+                n.next_attempt_at,
+                now()
+              ) <= now()
+
+        ORDER BY n.created_at
+
+        FOR UPDATE OF n SKIP LOCKED
+
+        LIMIT GREATEST(
+            p_limit,
+            1
+        )
+    ),
+
+    claimed AS
+    (
+        UPDATE notifications n
+        SET
+            status = 'PROCESSING',
+            processing_started_at = now(),
+            attempt_count =
+                n.attempt_count + 1,
+            last_error = NULL
+
+        FROM candidates c
+
+        WHERE n.notification_id =
+              c.notification_id
+
+        RETURNING n.*
+    )
+
+    SELECT
+        c.notification_id,
+        c.user_id,
+        c.source_id,
+        c.channel,
+        c.notification_key,
+        c.notification_type,
+        c.severity,
+        c.title,
+        c.message,
+        c.context,
+        us.external_id,
+        us.config,
+        c.attempt_count
+
+    FROM claimed c
+
+    JOIN user_sources us
+      ON us.source_id = c.source_id;
 END;
 $$;
 
@@ -305,6 +392,94 @@ BEGIN
 
     RETURN v_deleted > 0;
 
+END;
+$$;
+
+
+--
+-- Name: sp_enqueue_notification(uuid, uuid, character varying, character varying, character varying, uuid, character varying, character varying, character varying, text, text, jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_enqueue_notification(p_user_id uuid, p_source_id uuid, p_channel character varying, p_notification_key character varying, p_notification_type character varying, p_entity_id uuid, p_symbol character varying, p_event_key character varying, p_severity character varying, p_title text, p_message text, p_context jsonb) RETURNS uuid
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_notification_id uuid;
+BEGIN
+    IF NOT EXISTS
+    (
+        SELECT 1
+        FROM user_sources us
+        WHERE us.source_id = p_source_id
+          AND us.user_id = p_user_id
+          AND UPPER(us.source_type) =
+              UPPER(p_channel)
+          AND COALESCE(
+                (us.config->>'enabled')::boolean,
+                true
+              ) = true
+    )
+    THEN
+        RAISE EXCEPTION
+            'Enabled source % for channel % '
+            'does not belong to user %',
+            p_source_id,
+            p_channel,
+            p_user_id;
+    END IF;
+
+    INSERT INTO notifications
+    (
+        user_id,
+        source_id,
+        channel,
+        notification_key,
+        notification_type,
+        entity_id,
+        symbol,
+        event_key,
+        severity,
+        title,
+        message,
+        context,
+        status,
+        observed_at,
+        attempt_count,
+        next_attempt_at
+    )
+    VALUES
+    (
+        p_user_id,
+        p_source_id,
+        UPPER(p_channel),
+        p_notification_key,
+        p_notification_type,
+        p_entity_id,
+        p_symbol,
+        p_event_key,
+        p_severity,
+        p_title,
+        p_message,
+        COALESCE(
+            p_context,
+            '{}'::jsonb
+        ),
+        'PENDING',
+        now(),
+        0,
+        now()
+    )
+    ON CONFLICT
+    (
+        user_id,
+        notification_key
+    )
+    WHERE notification_key IS NOT NULL
+    DO NOTHING
+    RETURNING notification_id
+    INTO v_notification_id;
+
+    RETURN v_notification_id;
 END;
 $$;
 
@@ -1446,6 +1621,84 @@ $$;
 
 
 --
+-- Name: sp_mark_notification_failed(uuid, text, integer, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_mark_notification_failed(p_notification_id uuid, p_error text, p_max_retries integer, p_retry_base_seconds integer) RETURNS character varying
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_attempt_count integer;
+    v_status varchar;
+BEGIN
+    SELECT attempt_count
+    INTO v_attempt_count
+    FROM notifications
+    WHERE notification_id = p_notification_id
+      AND status = 'PROCESSING'
+    FOR UPDATE;
+
+    IF v_attempt_count IS NULL THEN
+        RAISE EXCEPTION
+            'PROCESSING notification not found: %',
+            p_notification_id;
+    END IF;
+
+    IF v_attempt_count <= p_max_retries THEN
+        v_status := 'RETRY';
+    ELSE
+        v_status := 'FAILED';
+    END IF;
+
+    UPDATE notifications
+    SET
+        status = v_status,
+        last_error = LEFT(p_error, 4000),
+        processing_started_at = NULL,
+        next_attempt_at = CASE
+            WHEN v_status = 'RETRY'
+            THEN now() + make_interval(
+                secs => p_retry_base_seconds
+                    * CAST(power(2, GREATEST(v_attempt_count - 1, 0)) AS integer)
+            )
+            ELSE NULL
+        END
+    WHERE notification_id = p_notification_id;
+
+    RETURN v_status;
+END;
+$$;
+
+
+--
+-- Name: sp_mark_notification_sent(uuid, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_mark_notification_sent(p_notification_id uuid, p_provider_message_id text) RETURNS void
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    UPDATE notifications
+    SET
+        status = 'SENT',
+        sent_at = now(),
+        delivered_message_id = p_provider_message_id,
+        processing_started_at = NULL,
+        next_attempt_at = NULL,
+        last_error = NULL
+    WHERE notification_id = p_notification_id
+      AND status = 'PROCESSING';
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION
+            'PROCESSING notification not found: %',
+            p_notification_id;
+    END IF;
+END;
+$$;
+
+
+--
 -- Name: sp_notification_exists(uuid, character varying); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -1827,6 +2080,35 @@ BEGIN
         v_job_id,
         p_job_key,
         v_action;
+END;
+$$;
+
+
+--
+-- Name: sp_release_stale_notifications(integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_release_stale_notifications(p_timeout_seconds integer) RETURNS integer
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_count integer;
+BEGIN
+    UPDATE notifications
+    SET
+        status = 'RETRY',
+        processing_started_at = NULL,
+        next_attempt_at = now(),
+        last_error = COALESCE(
+            last_error,
+            'Recovered from stale PROCESSING state'
+        )
+    WHERE status = 'PROCESSING'
+      AND processing_started_at
+          < now() - make_interval(secs => p_timeout_seconds);
+
+    GET DIAGNOSTICS v_count = ROW_COUNT;
+    RETURN v_count;
 END;
 $$;
 
@@ -3223,7 +3505,14 @@ CREATE TABLE public.notifications (
     context jsonb DEFAULT '{}'::jsonb NOT NULL,
     observed_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    source_id uuid,
+    channel character varying(50),
+    attempt_count integer DEFAULT 0 NOT NULL,
+    next_attempt_at timestamp with time zone,
+    processing_started_at timestamp with time zone,
+    last_error text,
+    delivered_message_id text
 );
 
 
@@ -4253,6 +4542,20 @@ CREATE INDEX ix_notification_subscriptions_user ON public.notification_subscript
 
 
 --
+-- Name: ix_notifications_delivery_queue; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_notifications_delivery_queue ON public.notifications USING btree (status, next_attempt_at, created_at) WHERE ((status)::text = ANY ((ARRAY['PENDING'::character varying, 'RETRY'::character varying])::text[]));
+
+
+--
+-- Name: ix_notifications_source_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_notifications_source_id ON public.notifications USING btree (source_id);
+
+
+--
 -- Name: ix_notifications_user_branch; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -4930,6 +5233,14 @@ ALTER TABLE ONLY public.notifications
 
 
 --
+-- Name: notifications notifications_source_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.notifications
+    ADD CONSTRAINT notifications_source_id_fkey FOREIGN KEY (source_id) REFERENCES public.user_sources(source_id) ON DELETE SET NULL;
+
+
+--
 -- Name: notifications notifications_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -5117,5 +5428,5 @@ ALTER TABLE ONLY public.watchlists
 -- PostgreSQL database dump complete
 --
 
-\unrestrict s4uYG78PFQcjIGBjycZsLCgGpe22OkJwFbFI5rYQAzlIoZatEFFd7Fj1XC4jNAN
+\unrestrict CfR0Z7S9H39O1fLHzMQRabK8rmmxjeLNJxzkXrU48GNSAWsf90SjzauGrf7Xvxw
 

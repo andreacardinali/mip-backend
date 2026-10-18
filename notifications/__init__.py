@@ -1,13 +1,3 @@
-from notifications.telegram import (
-    TelegramConfig,
-    TelegramDeliveryError,
-    TelegramMessageResult,
-    TelegramSender,
-)
+from notifications.queue import NotificationQueue
 
-__all__ = [
-    "TelegramConfig",
-    "TelegramDeliveryError",
-    "TelegramMessageResult",
-    "TelegramSender",
-]
+__all__ = ["NotificationQueue"]

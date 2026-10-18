@@ -5,22 +5,19 @@ from jobs.portfolio_intelligence.llm.factory import (
     create_research_provider,
     create_validation_provider,
 )
-from jobs.portfolio_intelligence.notifications.service import NotificationService
-from jobs.portfolio_intelligence.repositories.notifications import NotificationRepository
+from notifications.queue import NotificationQueue
 
 
 def build_context(db) -> JobContext:
     config = IntelligenceConfig.load()
-    repository = NotificationRepository(db)
     return JobContext(
         db=db,
         config=config,
         research_llm=create_research_provider(config),
         validation_llm=create_validation_provider(config),
-        notifications=NotificationService(
-            repository,
-            config.notification_http_timeout,
-            config.send_notifications,
+        notification_queue=NotificationQueue(
+            db,
+            enabled=config.create_notifications,
         ),
     )
 
@@ -30,9 +27,6 @@ def run_branch(branch) -> dict:
     try:
         context = build_context(db)
         result = branch.execute(context)
-        context.notifications.repo.purge_notifications(
-            context.config.notification_retention_days
-        )
         db.commit()
         return result.to_dict()
     except Exception:
