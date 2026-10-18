@@ -40,9 +40,19 @@ class NotificationRepository:
             VALUES (CAST(:user_id AS uuid),CAST(:entity_id AS uuid),:branch,
                     :notification_key,:branch,:symbol,:event_key,:severity,:status,
                     :title,:message,CAST(:context AS jsonb),now(),:sent_at,now(),now())
-            ON CONFLICT (user_id, notification_key) DO UPDATE SET
-              status=EXCLUDED.status, message=EXCLUDED.message,
-              context=EXCLUDED.context, sent_at=EXCLUDED.sent_at, updated_at=now()
+            ON CONFLICT
+            (
+                user_id,
+                notification_key
+            )
+            WHERE notification_key IS NOT NULL
+            DO UPDATE
+            SET
+                status = EXCLUDED.status,
+                message = EXCLUDED.message,
+                context = EXCLUDED.context,
+                sent_at = EXCLUDED.sent_at,
+                updated_at = now()
         """), {"user_id":user_id,"notification_key":notification_key,
         "branch":branch,"entity_id":entity_id,"symbol":symbol,"event_key":event_key,
         "severity":severity,"status":status,"title":title,"message":message,

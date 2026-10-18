@@ -39,7 +39,17 @@ class UpcomingCatalystBranch(IntelligenceBranch):
                         key=f"{source.symbol}|{event.get('eventType')}|{event_date.isoformat()}"
                         item={**event,"user_id":source.user_id,"entity_id":source.entity_id,"symbol":source.symbol,"name":source.name,"eventKey":key,"daysUntilEvent":days,"severity":severity,"severityScore":score,"sources":response.sources}
                         accepted.append(item)
-            dedup={x["eventKey"]:x for x in accepted}; accepted=list(dedup.values()); result.accepted_count=len(accepted)
+            dedup = {
+                        (
+                            x["user_id"],
+                            x["eventKey"],
+                        ): x
+                        for x in accepted
+                    }
+
+            accepted = list(
+                dedup.values()
+            )
             for e in accepted:
                 message = (f"📅 UPCOMING CATALYST\n{e['symbol']} | {e.get('eventType')} | {e.get('eventDate')}\n"
                            f"Severity: {e['severity']}\n{e.get('headline','')}\n{e.get('eventSummary','')}")

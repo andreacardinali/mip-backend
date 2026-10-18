@@ -28,7 +28,15 @@ class BreakingCatalystBranch(IntelligenceBranch):
                         key=f"{source.symbol}|{event.get('eventType')}|{day}|{fingerprint}"
                         confidence=int(event.get("eventConfidence",0)); severity="CRITICAL" if confidence>=90 and source.allocation_pct>=20 else "HIGH" if confidence>=80 else "MEDIUM"
                         accepted.append({**event,"user_id":source.user_id,"entity_id":source.entity_id,"symbol":source.symbol,"name":source.name,"eventKey":key,"severity":severity,"sources":response.sources})
-            accepted=list({e["eventKey"]:e for e in accepted}.values()); result.accepted_count=len(accepted)
+            accepted = list(
+                {
+                    (
+                        e["user_id"],
+                        e["eventKey"],
+                    ): e
+                    for e in accepted
+                }.values()
+            )
             for e in accepted:
                 message = (f"⚡ BREAKING CATALYST\n{e['symbol']} | {e.get('eventType')}\n"
                            f"Severity: {e['severity']}\n{e.get('headline','')}\n{e.get('eventSummary','')}\n"
