@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict QePL1hZLAtWQZd4DFKGciknPqDKJysN2MGxi90AjHmxjst4hdSXXgyrybTVXOgH
+\restrict ud76Ovf8wl0fVry7rSEKR07gA3jaO2EDWdwdmkfwZavDeoXNGc8zqqrOhoITeXe
 
 -- Dumped from database version 18.6 (Debian 18.6-1.pgdg13+2)
 -- Dumped by pg_dump version 18.6 (Debian 18.6-1.pgdg13+2)
@@ -2605,7 +2605,18 @@ CREATE TABLE public.notifications (
     notification_type character varying(50),
     title text,
     message text,
-    sent_at timestamp with time zone
+    sent_at timestamp with time zone,
+    user_id uuid,
+    notification_key character varying(255),
+    branch character varying(50),
+    symbol character varying(50),
+    event_key character varying(255),
+    severity character varying(20),
+    status character varying(20) DEFAULT 'PENDING'::character varying NOT NULL,
+    context jsonb DEFAULT '{}'::jsonb NOT NULL,
+    observed_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
 
@@ -2714,7 +2725,8 @@ CREATE TABLE public.scheduler_job_runs (
     started_at timestamp with time zone NOT NULL,
     completed_at timestamp with time zone,
     status character varying(20) NOT NULL,
-    error_message text
+    error_message text,
+    result jsonb
 );
 
 
@@ -3626,6 +3638,27 @@ CREATE INDEX ix_holding_snapshots_portfolio ON public.portfolio_holdings_snapsho
 
 
 --
+-- Name: ix_notifications_user_branch; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_notifications_user_branch ON public.notifications USING btree (user_id, branch);
+
+
+--
+-- Name: ix_notifications_user_sent; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_notifications_user_sent ON public.notifications USING btree (user_id, sent_at DESC);
+
+
+--
+-- Name: ix_notifications_user_symbol; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_notifications_user_symbol ON public.notifications USING btree (user_id, symbol);
+
+
+--
 -- Name: ix_portfolio_snapshots_date; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -3780,6 +3813,13 @@ CREATE UNIQUE INDEX uq_news_impact ON public.news_impacts USING btree (news_id, 
 
 
 --
+-- Name: uq_notifications_user_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_notifications_user_key ON public.notifications USING btree (user_id, notification_key) WHERE (notification_key IS NOT NULL);
+
+
+--
 -- Name: uq_portfolio_name; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -3840,6 +3880,13 @@ CREATE TRIGGER trg_exchanges_timestamps BEFORE INSERT OR UPDATE ON public.exchan
 --
 
 CREATE TRIGGER trg_instruments_timestamps BEFORE INSERT OR UPDATE ON public.instruments FOR EACH ROW EXECUTE FUNCTION public.trg_set_timestamps();
+
+
+--
+-- Name: notifications trg_notifications_timestamps; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_notifications_timestamps BEFORE INSERT OR UPDATE ON public.notifications FOR EACH ROW EXECUTE FUNCTION public.trg_set_timestamps();
 
 
 --
@@ -4126,6 +4173,14 @@ ALTER TABLE ONLY public.notifications
 
 
 --
+-- Name: notifications notifications_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.notifications
+    ADD CONSTRAINT notifications_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(user_id) ON DELETE CASCADE;
+
+
+--
 -- Name: cache_portfolio_exposure portfolio_exposure_cache_entity_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -4305,5 +4360,5 @@ ALTER TABLE ONLY public.watchlists
 -- PostgreSQL database dump complete
 --
 
-\unrestrict QePL1hZLAtWQZd4DFKGciknPqDKJysN2MGxi90AjHmxjst4hdSXXgyrybTVXOgH
+\unrestrict ud76Ovf8wl0fVry7rSEKR07gA3jaO2EDWdwdmkfwZavDeoXNGc8zqqrOhoITeXe
 
