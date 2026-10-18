@@ -1,12 +1,18 @@
 from dataclasses import dataclass
 from config.settings import settings
 
+
 def _i(name: str, default: int) -> int:
     return int(settings.get(name, default))
+
+
 def _f(name: str, default: float) -> float:
     return float(settings.get(name, default))
+
+
 def _b(name: str, default: bool) -> bool:
-    return str(settings.get(name, str(default))).lower() in {"1","true","yes","on"}
+    return str(settings.get(name, str(default))).lower() in {"1", "true", "yes", "on"}
+
 
 @dataclass(frozen=True)
 class IntelligenceConfig:
@@ -14,11 +20,13 @@ class IntelligenceConfig:
     llm_base_url: str
     llm_api_key: str
     llm_model: str
+    validation_llm_provider: str
+    validation_llm_base_url: str
+    validation_llm_api_key: str
+    validation_llm_model: str
     gemini_api_key: str
     gemini_model: str
     gemini_max_retries: int
-    ollama_base_url: str
-    ollama_model: str
     telegram_bot_token: str | None
     telegram_chat_id: str | None
     send_notifications: bool
@@ -36,15 +44,23 @@ class IntelligenceConfig:
     @classmethod
     def load(cls) -> "IntelligenceConfig":
         config = cls(
-            llm_provider=settings.get( "INTELLIGENCE_LLM_PROVIDER", "gemini", ),
-            llm_base_url=settings.get( "INTELLIGENCE_LLM_BASE_URL", "", ).rstrip("/"),
-            llm_api_key=settings.get( "INTELLIGENCE_LLM_API_KEY", "", ),
-            llm_model=settings.get( "INTELLIGENCE_LLM_MODEL", "", ),
+            llm_provider=settings.get("INTELLIGENCE_LLM_PROVIDER", "gemini"),
+            llm_base_url=settings.get("INTELLIGENCE_LLM_BASE_URL", "").rstrip("/"),
+            llm_api_key=settings.get("INTELLIGENCE_LLM_API_KEY", ""),
+            llm_model=settings.get("INTELLIGENCE_LLM_MODEL", ""),
+            validation_llm_provider=settings.get("INTELLIGENCE_VALIDATION_LLM_PROVIDER", "ollama"),
+            validation_llm_base_url=settings.get(
+                "INTELLIGENCE_VALIDATION_LLM_BASE_URL",
+                settings.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434"),
+            ).rstrip("/"),
+            validation_llm_api_key=settings.get("INTELLIGENCE_VALIDATION_LLM_API_KEY", ""),
+            validation_llm_model=settings.get(
+                "INTELLIGENCE_VALIDATION_LLM_MODEL",
+                settings.get("OLLAMA_MODEL", "qwen3:8b"),
+            ),
             gemini_api_key=settings.get("GEMINI_API_KEY", ""),
             gemini_model=settings.get("GEMINI_MODEL", "gemini-3.8-flash"),
             gemini_max_retries=_i("GEMINI_MAX_RETRIES", 4),
-            ollama_base_url=settings.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/"),
-            ollama_model=settings.get("OLLAMA_MODEL", "qwen3:8b"),
             telegram_bot_token=settings.get("TELEGRAM_BOT_TOKEN"),
             telegram_chat_id=settings.get("TELEGRAM_CHAT_ID"),
             send_notifications=_b("INTELLIGENCE_SEND_NOTIFICATIONS", False),
@@ -59,22 +75,22 @@ class IntelligenceConfig:
             yahoo_interval=settings.get("YAHOO_HISTORY_INTERVAL", "1d"),
             request_timeout=_f("INTELLIGENCE_HTTP_TIMEOUT", 45.0),
         )
-        
-        if config.llm_provider == "gemini":
-            if not config.gemini_api_key:
-                raise ValueError( "Missing GEMINI_API_KEY" )
-        elif config.llm_provider == "openai_compatible":
-            if not config.llm_base_url:
-                raise ValueError( "Missing INTELLIGENCE_LLM_BASE_URL" )
+        research = config.llm_provider.strip().lower()
+        if research == "gemini" and not config.gemini_api_key:
+            raise ValueError("Missing GEMINI_API_KEY")
+        if research == "openai_compatible":
+            if not config.llm_base_url or not config.llm_api_key or not config.llm_model:
+                raise ValueError("Incomplete INTELLIGENCE_LLM_* configuration")
+        if research not in {"gemini", "openai_compatible"}:
+            raise ValueError(f"Unsupported INTELLIGENCE_LLM_PROVIDER: {config.llm_provider}")
 
-            if not config.llm_api_key:
-                raise ValueError( "Missing INTELLIGENCE_LLM_API_KEY" )
-
-            if not config.llm_model:
-                raise ValueError( "Missing INTELLIGENCE_LLM_MODEL" )
-        else:
-            raise ValueError( "Unsupported INTELLIGENCE_LLM_PROVIDER: " f"{config.llm_provider}" )
-
+        validation = config.validation_llm_provider.strip().lower()
+        if validation not in {"ollama", "openai_compatible"}:
+            raise ValueError(f"Unsupported validation LLM provider: {validation}")
+        if not config.validation_llm_base_url or not config.validation_llm_model:
+            raise ValueError("Incomplete validation LLM configuration")
+        if validation == "openai_compatible" and not config.validation_llm_api_key:
+            raise ValueError("Missing INTELLIGENCE_VALIDATION_LLM_API_KEY")
         if config.batch_size < 1:
             raise ValueError("INTELLIGENCE_BATCH_SIZE must be >= 1")
         if not 1 <= config.upcoming_window_days <= 30:

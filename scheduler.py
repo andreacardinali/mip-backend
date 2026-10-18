@@ -1,67 +1,50 @@
 import importlib
-import json
 import logging
 from datetime import datetime, timezone
+from typing import Any
 from uuid import UUID, uuid4
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
-from sqlalchemy import text
 
 from config.settings import settings
-
 from db import SessionLocal
-
 from scheduler_repository import SchedulerRepository
 
-db = SessionLocal()
-repository = SchedulerRepository(db)
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s",
-)
-
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
-
-SCHEDULER_TIMEZONE = settings.get(
-    "SCHEDULER_TIMEZONE",
-    "Europe/Rome",
-)
-
-scheduler = BlockingScheduler(
-    timezone=SCHEDULER_TIMEZONE,
-)
+SCHEDULER_TIMEZONE = settings.get("SCHEDULER_TIMEZONE", "Europe/Rome")
+scheduler = BlockingScheduler(timezone=SCHEDULER_TIMEZONE)
 
 
-def execute_job(
-    job_id: str,
-    python_module: str,
-):
+def normalize_result(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    return {"status": "SUCCESS", "value": value}
+
+
+def execute_job(job_id: str, python_module: str) -> dict[str, Any]:
     db = SessionLocal()
+    repository = SchedulerRepository(db)
+    job_uuid = UUID(job_id)
     job_run_id = uuid4()
     started_at = datetime.now(timezone.utc)
+    run_started = False
 
     try:
-        repository.start_run(
-            job_run_id=job_run_id,
-            job_id=UUID(job_id),
-            started_at=started_at,
-        )
-
+        repository.start_run(job_run_id=job_run_id, job_id=job_uuid, started_at=started_at)
         db.commit()
+        run_started = True
 
-        module = importlib.import_module(
-            python_module
-        )
-        run_function = getattr(module, "run")
-        result = run_function()
+        module = importlib.import_module(python_module)
+        run_function = getattr(module, "run", None)
+        if not callable(run_function):
+            raise RuntimeError(f"Module {python_module} does not expose a callable run()")
 
-        result_status = (
-            result.get("status", "SUCCESS")
-            if isinstance(result, dict)
-            else "SUCCESS"
-        )
+        result = normalize_result(run_function())
+        result_status = str(result.get("status", "SUCCESS")).upper()
+        if result_status not in {"SUCCESS", "PARTIAL", "FAILED"}:
+            raise ValueError(f"Unsupported job result status: {result_status}")
 
         error_message = None
         if result_status == "FAILED":
@@ -74,123 +57,73 @@ def execute_job(
             status=result_status,
             error_message=error_message,
             result=result,
-            completed_at=datetime.now(
-                timezone.utc
-            ),
+            completed_at=datetime.now(timezone.utc),
         )
-
         db.commit()
-
-        logger.info(
-            "Job completed job_id=%s status=%s",
-            job_id,
-            result_status,
-        )
-
+        logger.info("Job completed job_id=%s run_id=%s status=%s", job_id, job_run_id, result_status)
         return result
 
     except Exception as exc:
         db.rollback()
-
-        repository.fail_run(
-            job_run_id=job_run_id,
-            error_message=str(exc),
-            completed_at=datetime.now(
-                timezone.utc
-            ),
-        )
-
-        db.commit()
-
-        logger.exception(
-            "Job failed job_id=%s module=%s",
-            job_id,
-            python_module,
-        )
+        if run_started:
+            try:
+                repository.fail_run(
+                    job_run_id=job_run_id,
+                    error_message=str(exc),
+                    completed_at=datetime.now(timezone.utc),
+                )
+                db.commit()
+            except Exception:
+                db.rollback()
+                logger.exception("Unable to persist scheduler failure job_id=%s run_id=%s", job_id, job_run_id)
+        logger.exception("Job failed job_id=%s run_id=%s module=%s", job_id, job_run_id, python_module)
         raise
-
     finally:
         db.close()
 
 
-def load_jobs():
+def load_jobs() -> None:
     db = SessionLocal()
-
+    repository = SchedulerRepository(db)
     try:
-        rows = db.execute(
-            text(
-                """
-                SELECT
-                    job_id,
-                    job_name,
-                    python_module,
-                    trigger_type,
-                    cron_expression,
-                    interval_minutes
-                FROM scheduler_jobs
-                WHERE enabled = true
-                """
-            )
-        ).fetchall()
-
-        for row in rows:
-            job = row._mapping
-            trigger_type = str(
-                job["trigger_type"]
-            ).lower()
-
+        for job in repository.get_enabled_jobs():
+            job_id = str(job["job_id"])
+            job_name = str(job["job_name"])
+            python_module = str(job["python_module"])
+            trigger_type = str(job["trigger_type"]).strip().lower()
             common_args = {
                 "func": execute_job,
-                "args": [
-                    str(job["job_id"]),
-                    job["python_module"],
-                ],
-                "id": str(job["job_id"]),
-                "name": job["job_name"],
+                "args": [job_id, python_module],
+                "id": job_id,
+                "name": job_name,
                 "replace_existing": True,
                 "max_instances": 1,
                 "coalesce": True,
             }
-
             if trigger_type == "interval":
-                scheduler.add_job(
-                    trigger="interval",
-                    minutes=job["interval_minutes"],
-                    **common_args,
-                )
-
+                interval_minutes = job.get("interval_minutes")
+                if interval_minutes is None or int(interval_minutes) <= 0:
+                    raise ValueError(f"Invalid interval_minutes for job {job_name}")
+                scheduler.add_job(trigger="interval", minutes=int(interval_minutes), **common_args)
             elif trigger_type == "cron":
+                cron_expression = job.get("cron_expression")
+                if not cron_expression:
+                    raise ValueError(f"Missing cron_expression for job {job_name}")
                 scheduler.add_job(
-                    trigger=CronTrigger.from_crontab(
-                        job["cron_expression"],
-                        timezone=SCHEDULER_TIMEZONE,
-                    ),
+                    trigger=CronTrigger.from_crontab(str(cron_expression), timezone=SCHEDULER_TIMEZONE),
                     **common_args,
                 )
-
             else:
-                logger.error(
-                    "Unsupported trigger type job=%s trigger=%s",
-                    job["job_name"],
-                    trigger_type,
-                )
+                logger.error("Unsupported trigger type job=%s trigger=%s", job_name, trigger_type)
                 continue
-
-            logger.info(
-                "Loaded job: %s",
-                job["job_name"],
-            )
-
+            logger.info("Loaded job job_id=%s name=%s trigger=%s", job_id, job_name, trigger_type)
     finally:
         db.close()
 
 
-def main():
+def main() -> None:
     load_jobs()
-    logger.info(
-        "Scheduler started timezone=%s",
-        SCHEDULER_TIMEZONE,
-    )
+    logger.info("Scheduler started timezone=%s jobs=%s", SCHEDULER_TIMEZONE, len(scheduler.get_jobs()))
     scheduler.start()
 
 

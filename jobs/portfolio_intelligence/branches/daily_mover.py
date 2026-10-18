@@ -23,8 +23,8 @@ class DailyMoverBranch(IntelligenceBranch):
                 observed={**entity.to_dict(),**tech,"allocationPct":entity.allocation_pct,
                           "portfolioImpactPct":tech["dailyChangePct"]*entity.allocation_pct/100,
                           "severity":severity(tech["dailyChangePct"],entity.allocation_pct)}
-                context.research_llm.generate_json(LLMRequest(prompt=research_tpl.format(observed=json.dumps(observed,default=str)),grounded_search=True,max_tokens=4096))
-                final=context.research_llm.generate_json(LLMRequest(prompt=validate_tpl.format(observed=json.dumps(observed,default=str),catalyst=json.dumps(research.data.get("catalyst"),default=str),supports=json.dumps(research.data.get("supports") or research.sources,default=str)),max_tokens=900))
+                research=context.research_llm.generate_json(LLMRequest(prompt=research_tpl.format(observed=json.dumps(observed,default=str)),grounded_search=True,max_tokens=4096))
+                final=context.validation_llm.generate_json(LLMRequest(prompt=validate_tpl.format(observed=json.dumps(observed,default=str),catalyst=json.dumps(research.data.get("catalyst"),default=str),supports=json.dumps(research.data.get("supports") or research.sources,default=str)),max_tokens=900))
                 data=final.data
                 if data.get("symbol")!=entity.symbol: raise ValueError("Validation LLM symbol mismatch")
                 cause=bool(data.get("causeFound")); indices=data.get("sourceIndicesUsed") or []
@@ -38,7 +38,7 @@ class DailyMoverBranch(IntelligenceBranch):
                 observed_day=datetime.fromtimestamp(c["observedDate"],timezone.utc).date().isoformat()
                 nid=f"DAILY_MOVER|{c['symbol']}|{observed_day}|{round(c['dailyChangePct'],1)}"
                 sign="+" if c["dailyChangePct"]>0 else ""
-                message = (f"📈 DAILY MOVER\n{c['symbol']} | {sign}{c['dailyChangePct']:.2f}%\n"
+                message = (f"DAILY MOVER\n{c['symbol']} | {sign}{c['dailyChangePct']:.2f}%\n"
                            f"Severity: {c['severity']}\n{c.get('headline','')}\n{c.get('explanation','')}\n"
                            f"Verifica: {c.get('recommendedCheck','')}")
                 if context.notifications.publish(user_id=c['user_id'],notification_id=nid,branch=self.name,entity_id=c['entity_id'],symbol=c['symbol'],event_key=observed_day,severity=c['severity'],title=c.get('headline') or nid,message=message,context=c): result.notification_count+=1
