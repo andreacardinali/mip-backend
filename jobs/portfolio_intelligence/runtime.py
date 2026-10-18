@@ -19,7 +19,7 @@ def build_context(db) -> JobContext:
         validation_llm=create_validation_provider(config),
         notifications=NotificationService(
             repository,
-            config.request_timeout,
+            config.notification_http_timeout,
             config.send_notifications,
         ),
     )

@@ -18,7 +18,6 @@ def create_research_provider(config) -> LLMProvider:
     if provider == "ollama":
         return OllamaProvider(
             base_url=config.llm_base_url,
-            api_key=config.llm_api_key,
             model=config.llm_model,
             timeout=config.llm_timeout,
             max_retries=config.llm_max_retries,
@@ -49,7 +48,6 @@ def create_validation_provider(config) -> LLMProvider:
     if provider == "ollama":
         return OllamaProvider(
             base_url=config.validation_llm_base_url,
-            api_key=config.validation_llm_api_key,
             model=config.validation_llm_model,
             timeout=config.validation_llm_timeout,
             max_retries=config.llm_max_retries,
@@ -64,4 +62,4 @@ def create_validation_provider(config) -> LLMProvider:
             max_retries=config.validation_llm_max_retries,
         )
 
-    raise ValueError(f"Unsupported INTELLIENCE_VALIDATION_LLM_PROVIDER: {provider}")
+    raise ValueError(f"Unsupported INTELLIGENCE_VALIDATION_LLM_PROVIDER: {provider}")

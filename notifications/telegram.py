@@ -33,7 +33,7 @@ class TelegramConfig:
         return cls(
             bot_token=_required_setting("TELEGRAM_BOT_TOKEN"),
             chat_id=_required_setting("TELEGRAM_CHAT_ID"),
-            timeout=float(settings.get("TELEGRAM_HTTP_TIMEOUT", 30.0)),
+            timeout=float(settings.get("NOTIFICATION_HTTP_TIMEOUT", 30.0)),
             parse_mode=(
                 str(settings.get("TELEGRAM_PARSE_MODE", "")).strip()
                 or None
@@ -66,9 +66,9 @@ class TelegramConfig:
         clean_chat_id = str(chat_id or "").strip()
 
         if not clean_token:
-            raise ValueError("user_sources Telegram bot_token mancante")
+            raise ValueError("user_sources: Telegram bot_token is missing")
         if not clean_chat_id:
-            raise ValueError("user_sources Telegram chat_id mancante")
+            raise ValueError("user_sources: Telegram chat_id is missing")
 
         return cls(
             bot_token=clean_token,

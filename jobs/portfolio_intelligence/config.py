@@ -35,6 +35,7 @@ class IntelligenceConfig:
     daily_move_min_pct: float
     daily_renotify_delta_pct: float
     min_history_rows: int
+    notification_http_timeout: float
     notification_retention_days: int
     yahoo_range: str
     yahoo_interval: str
@@ -61,18 +62,17 @@ class IntelligenceConfig:
             daily_move_min_pct=_f("DAILY_MOVE_MIN_PCT", 3.0),
             daily_renotify_delta_pct=_f("DAILY_RENOTIFY_DELTA_PCT", 2.0),
             min_history_rows=_i("MIN_HISTORY_ROWS", 50),
+            notification_timeout=_f("INTELLIGENCE_NOTIFICATION_TIMEOUT", 30.0),
             notification_retention_days=_i("NOTIFICATION_RETENTION_DAYS", 45),
             yahoo_range=settings.get("YAHOO_HISTORY_RANGE", "2y"),
             yahoo_interval=settings.get("YAHOO_HISTORY_INTERVAL", "1d"),
         )
-        research = (
-            config.llm_provider
-            .strip()
-            .lower()
-        )
+        research_llm = config.llm_provider.strip().lower()
+        validation_lln = config.validation_llm_provider.strip().lower()
 
-        if research not in {
+        if research_llm not in {
             "gemini",
+            "ollama",
             "openai_compatible",
         }:
             raise ValueError(
@@ -80,6 +80,29 @@ class IntelligenceConfig:
                 "INTELLIGENCE_LLM_PROVIDER: "
                 f"{config.llm_provider}"
             )
+            
+        if research_llm in { "openai_compatible", "ollama"}:
+            if not config.llm_base_url:
+                raise ValueError(
+                    "Missing INTELLIGENCE_LLM_BASE_URL"
+                )
+
+        if validation_llm not in {
+            "gemini",
+            "ollama",
+            "openai_compatible",
+        }:
+            raise ValueError(
+                "Unsupported "
+                "INTELLIGENCE_VALIDATION_LLM_PROVIDER: "
+                f"{config.llm_provider}"
+            )
+            
+        if validation_llm in { "openai_compatible", "ollama"}:
+            if not config.llm_base_url:
+                raise ValueError(
+                    "Missing INTELLIGENCE_VALIDATION_LLM_BASE_URL"
+                )
 
         if config.llm_max_retries < 0:
             raise ValueError(
@@ -97,16 +120,21 @@ class IntelligenceConfig:
             raise ValueError(
                 "Missing INTELLIGENCE_LLM_MODEL"
             )
-
-        if research == "openai_compatible":
-            if not config.llm_base_url:
-                raise ValueError(
-                    "Missing INTELLIGENCE_LLM_BASE_URL"
-                )
+            
+       if not config.validation_llm_model:
+            raise ValueError(
+                "Missing INTELLIGENCE_VALIDATION_LLM_MODEL"
+            )
 
         if config.llm_max_retries < 0:
             raise ValueError(
                 "INTELLIGENCE_LLM_MAX_RETRIES "
+                "must be >= 0"
+            )
+            
+        if config.validation_llm_max_retries < 0:
+            raise ValueError(
+                "INTELLIGENCE_VALIDATION_LLM_MAX_RETRIES "
                 "must be >= 0"
             )
         if config.batch_size < 1:
