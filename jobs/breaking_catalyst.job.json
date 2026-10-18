@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "job_key": "portfolio_intelligence_breaking",
+  "job_name": "Portfolio Intelligence - Breaking Catalysts",
+  "python_module": "jobs.portfolio_intelligence.breaking_catalyst",
+  "trigger": {
+    "type": "cron",
+    "cron_expression": "0,30 9-21 * * *"
+  },
+  "enabled_by_default": true
+}

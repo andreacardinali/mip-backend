@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict MFt7J6heVs8A3Yb0YA2R6mc0aUfCVQk2OlDHB5GFsiJVdVyJ1Zsh3fciPXVXyPJ
+\restrict wdgVgsJzViwRh3uwGpdu9idoSKxnER2CYsRYGa96udHxJBdMznJqLjmJCj1UnS7
 
 -- Dumped from database version 18.6 (Debian 18.6-1.pgdg13+2)
 -- Dumped by pg_dump version 18.6 (Debian 18.6-1.pgdg13+2)
@@ -1630,6 +1630,189 @@ $$;
 
 
 --
+-- Name: sp_register_scheduler_job(character varying, character varying, character varying, character varying, character varying, integer, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_register_scheduler_job(p_job_key character varying, p_job_name character varying, p_python_module character varying, p_trigger_type character varying, p_cron_expression character varying, p_interval_minutes integer, p_enabled_by_default boolean) RETURNS TABLE(job_id uuid, job_key character varying, action character varying)
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_job_id uuid;
+    v_action varchar;
+BEGIN
+    IF NULLIF(
+        TRIM(p_job_key),
+        ''
+    ) IS NULL THEN
+        RAISE EXCEPTION
+            'job_key cannot be empty';
+    END IF;
+
+    IF NULLIF(
+        TRIM(p_job_name),
+        ''
+    ) IS NULL THEN
+        RAISE EXCEPTION
+            'job_name cannot be empty';
+    END IF;
+
+    IF NULLIF(
+        TRIM(p_python_module),
+        ''
+    ) IS NULL THEN
+        RAISE EXCEPTION
+            'python_module cannot be empty';
+    END IF;
+
+    IF LOWER(p_trigger_type)
+        NOT IN ('cron', 'interval')
+    THEN
+        RAISE EXCEPTION
+            'Unsupported trigger_type: %',
+            p_trigger_type;
+    END IF;
+
+    IF LOWER(p_trigger_type) = 'cron'
+       AND NULLIF(
+           TRIM(p_cron_expression),
+           ''
+       ) IS NULL
+    THEN
+        RAISE EXCEPTION
+            'cron_expression is required';
+    END IF;
+
+    IF LOWER(p_trigger_type) = 'interval'
+       AND COALESCE(
+           p_interval_minutes,
+           0
+       ) <= 0
+    THEN
+        RAISE EXCEPTION
+            'interval_minutes must be '
+            'greater than zero';
+    END IF;
+
+    SELECT sj.job_id
+    INTO v_job_id
+    FROM scheduler_jobs sj
+    WHERE sj.job_key = p_job_key
+    FOR UPDATE;
+
+    IF v_job_id IS NULL THEN
+        INSERT INTO scheduler_jobs
+        (
+            job_key,
+            job_name,
+            python_module,
+            trigger_type,
+            cron_expression,
+            interval_minutes,
+            enabled
+        )
+        VALUES
+        (
+            p_job_key,
+            p_job_name,
+            p_python_module,
+            LOWER(p_trigger_type),
+            CASE
+                WHEN LOWER(
+                    p_trigger_type
+                ) = 'cron'
+                    THEN p_cron_expression
+                ELSE NULL
+            END,
+            CASE
+                WHEN LOWER(
+                    p_trigger_type
+                ) = 'interval'
+                    THEN p_interval_minutes
+                ELSE NULL
+            END,
+            p_enabled_by_default
+        )
+        RETURNING scheduler_jobs.job_id
+        INTO v_job_id;
+
+        v_action := 'INSERTED';
+
+    ELSE
+        UPDATE scheduler_jobs sj
+        SET
+            job_name = p_job_name,
+            python_module =
+                p_python_module,
+            trigger_type =
+                LOWER(p_trigger_type),
+            cron_expression =
+                CASE
+                    WHEN LOWER(
+                        p_trigger_type
+                    ) = 'cron'
+                        THEN p_cron_expression
+                    ELSE NULL
+                END,
+            interval_minutes =
+                CASE
+                    WHEN LOWER(
+                        p_trigger_type
+                    ) = 'interval'
+                        THEN
+                            p_interval_minutes
+                    ELSE NULL
+                END
+        WHERE sj.job_id = v_job_id
+          AND
+          (
+              sj.job_name
+                  IS DISTINCT FROM
+                  p_job_name
+              OR sj.python_module
+                  IS DISTINCT FROM
+                  p_python_module
+              OR sj.trigger_type
+                  IS DISTINCT FROM
+                  LOWER(p_trigger_type)
+              OR sj.cron_expression
+                  IS DISTINCT FROM
+                  CASE
+                      WHEN LOWER(
+                          p_trigger_type
+                      ) = 'cron'
+                          THEN
+                              p_cron_expression
+                      ELSE NULL
+                  END
+              OR sj.interval_minutes
+                  IS DISTINCT FROM
+                  CASE
+                      WHEN LOWER(
+                          p_trigger_type
+                      ) = 'interval'
+                          THEN
+                              p_interval_minutes
+                      ELSE NULL
+                  END
+          );
+
+        IF FOUND THEN
+            v_action := 'UPDATED';
+        ELSE
+            v_action := 'UNCHANGED';
+        END IF;
+    END IF;
+
+    RETURN QUERY
+    SELECT
+        v_job_id,
+        p_job_key,
+        v_action;
+END;
+$$;
+
+
+--
 -- Name: sp_search_assets(character varying, integer, integer); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -3100,7 +3283,8 @@ CREATE TABLE public.scheduler_jobs (
     created_at timestamp with time zone DEFAULT now(),
     updated_at timestamp with time zone DEFAULT now(),
     last_run_at timestamp with time zone,
-    next_run_at timestamp with time zone
+    next_run_at timestamp with time zone,
+    job_key character varying(100) NOT NULL
 );
 
 
@@ -4224,6 +4408,13 @@ CREATE UNIQUE INDEX uq_watchlist_name ON public.watchlists USING btree (user_id,
 
 
 --
+-- Name: ux_scheduler_jobs_job_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX ux_scheduler_jobs_job_key ON public.scheduler_jobs USING btree (job_key);
+
+
+--
 -- Name: entities trg_entities_timestamps; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -4738,5 +4929,5 @@ ALTER TABLE ONLY public.watchlists
 -- PostgreSQL database dump complete
 --
 
-\unrestrict MFt7J6heVs8A3Yb0YA2R6mc0aUfCVQk2OlDHB5GFsiJVdVyJ1Zsh3fciPXVXyPJ
+\unrestrict wdgVgsJzViwRh3uwGpdu9idoSKxnER2CYsRYGa96udHxJBdMznJqLjmJCj1UnS7
 

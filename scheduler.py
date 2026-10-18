@@ -10,12 +10,22 @@ from apscheduler.triggers.cron import CronTrigger
 from config.settings import settings
 from db import SessionLocal
 from scheduler_repository import SchedulerRepository
+from pathlib import Path
+
+from scheduler_bootstrap import (
+    bootstrap_scheduler_jobs,
+)
+
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 SCHEDULER_TIMEZONE = settings.get("SCHEDULER_TIMEZONE", "Europe/Rome")
 scheduler = BlockingScheduler(timezone=SCHEDULER_TIMEZONE)
 
+JOBS_ROOT = (
+    Path(__file__).resolve().parent
+    / "jobs"
+)
 
 def normalize_result(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
@@ -120,12 +130,24 @@ def load_jobs() -> None:
     finally:
         db.close()
 
-
 def main() -> None:
-    load_jobs()
-    logger.info("Scheduler started timezone=%s jobs=%s", SCHEDULER_TIMEZONE, len(scheduler.get_jobs()))
-    scheduler.start()
+    bootstrap_scheduler_jobs(
+        jobs_root=JOBS_ROOT,
+        timezone=SCHEDULER_TIMEZONE,
+    )
 
+    load_jobs()
+
+    logger.info(
+        "Scheduler started "
+        "timezone=%s jobs=%s",
+        SCHEDULER_TIMEZONE,
+        len(
+            scheduler.get_jobs()
+        ),
+    )
+
+    scheduler.start()
 
 if __name__ == "__main__":
     main()

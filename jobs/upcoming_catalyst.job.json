@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "job_key": "portfolio_intelligence_upcoming",
+  "job_name": "Portfolio Intelligence - Upcoming Catalysts",
+  "python_module": "jobs.portfolio_intelligence.upcoming_catalyst",
+  "trigger": {
+    "type": "cron",
+    "cron_expression": "15 7 * * *"
+  },
+  "enabled_by_default": true
+}

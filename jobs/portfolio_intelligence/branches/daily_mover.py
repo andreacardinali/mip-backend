@@ -38,7 +38,7 @@ class DailyMoverBranch(IntelligenceBranch):
                 observed_day=datetime.fromtimestamp(c["observedDate"],timezone.utc).date().isoformat()
                 nid=f"DAILY_MOVER|{c['symbol']}|{observed_day}|{round(c['dailyChangePct'],1)}"
                 sign="+" if c["dailyChangePct"]>0 else ""
-                message = (f"DAILY MOVER\n{c['symbol']} | {sign}{c['dailyChangePct']:.2f}%\n"
+                message = (f"📈 DAILY MOVER\n{c['symbol']} | {sign}{c['dailyChangePct']:.2f}%\n"
                            f"Severity: {c['severity']}\n{c.get('headline','')}\n{c.get('explanation','')}\n"
                            f"Verifica: {c.get('recommendedCheck','')}")
                 if context.notifications.publish(user_id=c['user_id'],notification_id=nid,branch=self.name,entity_id=c['entity_id'],symbol=c['symbol'],event_key=observed_day,severity=c['severity'],title=c.get('headline') or nid,message=message,context=c): result.notification_count+=1

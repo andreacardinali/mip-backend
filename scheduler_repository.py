@@ -36,3 +36,46 @@ class SchedulerRepository:
             text("SELECT sp_fail_scheduler_job(CAST(:run_id AS uuid), :error, :completed_at)"),
             {"run_id": str(job_run_id), "error": error_message, "completed_at": completed_at},
         )
+    def register_job(
+        self,
+        *,
+        job_key: str,
+        job_name: str,
+        python_module: str,
+        trigger_type: str,
+        cron_expression: str | None,
+        interval_minutes: int | None,
+        enabled_by_default: bool,
+    ) -> dict[str, Any]:
+        row = self.db.execute(
+            text(
+                """
+                SELECT *
+                FROM sp_register_scheduler_job(
+                    :job_key,
+                    :job_name,
+                    :python_module,
+                    :trigger_type,
+                    :cron_expression,
+                    :interval_minutes,
+                    :enabled_by_default
+                )
+                """
+            ),
+            {
+                "job_key": job_key,
+                "job_name": job_name,
+                "python_module":
+                    python_module,
+                "trigger_type":
+                    trigger_type,
+                "cron_expression":
+                    cron_expression,
+                "interval_minutes":
+                    interval_minutes,
+                "enabled_by_default":
+                    enabled_by_default,
+            },
+        ).mappings().one()
+
+        return dict(row)
