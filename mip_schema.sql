@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict MycJ5jFUNG55T9Z0OCWfGxWSuGjWetXfGhfcGb93MmHPJnHYrDysTtP3lxu0pYg
+\restrict SFsD0zKojOmQg5clKcTq4riDXFJtLlPVvMqDu4cG6WOyMhVDuZKnV8HcGI0iMpY
 
 -- Dumped from database version 18.6 (Debian 18.6-1.pgdg13+2)
 -- Dumped by pg_dump version 18.6 (Debian 18.6-1.pgdg13+2)
@@ -2262,7 +2262,8 @@ CREATE FUNCTION public.sp_upsert_exchange_rate(p_currency_code character, p_rate
 DECLARE
     v_currency_code char(3);
 BEGIN
-    v_currency_code := UPPER(TRIM(p_currency_code));
+    v_currency_code :=
+        UPPER(TRIM(p_currency_code));
 
     IF v_currency_code IS NULL
        OR LENGTH(v_currency_code) <> 3
@@ -2284,20 +2285,18 @@ BEGIN
     INSERT INTO exchange_rates
     (
         currency_code,
-        rate_to_usd,
-        updated_at
+        rate_to_usd
     )
     VALUES
     (
         v_currency_code,
-        p_rate_to_usd,
-        now()
+        p_rate_to_usd
     )
     ON CONFLICT (currency_code)
     DO UPDATE
     SET
-        rate_to_usd = EXCLUDED.rate_to_usd,
-        updated_at = now();
+        rate_to_usd =
+            EXCLUDED.rate_to_usd;
 END;
 $$;
 
@@ -2722,28 +2721,29 @@ $$;
 
 
 --
--- Name: trg_set_timestamps(); Type: FUNCTION; Schema: public; Owner: -
+-- Name: trg_set_created_at(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.trg_set_timestamps() RETURNS trigger
+CREATE FUNCTION public.trg_set_created_at() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
-
-    IF TG_OP = 'INSERT' THEN
-
-        NEW.created_at := now();
-        NEW.updated_at := now();
-
-    ELSIF TG_OP = 'UPDATE' THEN
-
-        NEW.created_at := OLD.created_at;
-        NEW.updated_at := now();
-
-    END IF;
-
+    NEW.created_at := now();
     RETURN NEW;
+END;
+$$;
 
+
+--
+-- Name: trg_set_updated_at(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.trg_set_updated_at() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    NEW.updated_at := now();
+    RETURN NEW;
 END;
 $$;
 
@@ -4484,66 +4484,185 @@ CREATE UNIQUE INDEX ux_scheduler_jobs_job_key ON public.scheduler_jobs USING btr
 
 
 --
--- Name: entities trg_entities_timestamps; Type: TRIGGER; Schema: public; Owner: -
+-- Name: entities trg_entities_created_at; Type: TRIGGER; Schema: public; Owner: -
 --
 
-CREATE TRIGGER trg_entities_timestamps BEFORE INSERT OR UPDATE ON public.entities FOR EACH ROW EXECUTE FUNCTION public.trg_set_timestamps();
-
-
---
--- Name: exchanges trg_exchanges_timestamps; Type: TRIGGER; Schema: public; Owner: -
---
-
-CREATE TRIGGER trg_exchanges_timestamps BEFORE INSERT OR UPDATE ON public.exchanges FOR EACH ROW EXECUTE FUNCTION public.trg_set_timestamps();
+CREATE TRIGGER trg_entities_created_at BEFORE INSERT ON public.entities FOR EACH ROW EXECUTE FUNCTION public.trg_set_created_at();
 
 
 --
--- Name: instruments trg_instruments_timestamps; Type: TRIGGER; Schema: public; Owner: -
+-- Name: entities trg_entities_updated_at; Type: TRIGGER; Schema: public; Owner: -
 --
 
-CREATE TRIGGER trg_instruments_timestamps BEFORE INSERT OR UPDATE ON public.instruments FOR EACH ROW EXECUTE FUNCTION public.trg_set_timestamps();
-
-
---
--- Name: notifications trg_notifications_timestamps; Type: TRIGGER; Schema: public; Owner: -
---
-
-CREATE TRIGGER trg_notifications_timestamps BEFORE INSERT OR UPDATE ON public.notifications FOR EACH ROW EXECUTE FUNCTION public.trg_set_timestamps();
+CREATE TRIGGER trg_entities_updated_at BEFORE INSERT OR UPDATE ON public.entities FOR EACH ROW EXECUTE FUNCTION public.trg_set_updated_at();
 
 
 --
--- Name: portfolios trg_portfolios_timestamps; Type: TRIGGER; Schema: public; Owner: -
+-- Name: entity_impact_history trg_entity_impact_history_created_at; Type: TRIGGER; Schema: public; Owner: -
 --
 
-CREATE TRIGGER trg_portfolios_timestamps BEFORE INSERT OR UPDATE ON public.portfolios FOR EACH ROW EXECUTE FUNCTION public.trg_set_timestamps();
-
-
---
--- Name: positions trg_positions_timestamps; Type: TRIGGER; Schema: public; Owner: -
---
-
-CREATE TRIGGER trg_positions_timestamps BEFORE INSERT OR UPDATE ON public.positions FOR EACH ROW EXECUTE FUNCTION public.trg_set_timestamps();
+CREATE TRIGGER trg_entity_impact_history_created_at BEFORE INSERT ON public.entity_impact_history FOR EACH ROW EXECUTE FUNCTION public.trg_set_created_at();
 
 
 --
--- Name: scheduler_jobs trg_scheduler_jobs_timestamps; Type: TRIGGER; Schema: public; Owner: -
+-- Name: exchange_rates trg_exchange_rates_updated_at; Type: TRIGGER; Schema: public; Owner: -
 --
 
-CREATE TRIGGER trg_scheduler_jobs_timestamps BEFORE INSERT OR UPDATE ON public.scheduler_jobs FOR EACH ROW EXECUTE FUNCTION public.trg_set_timestamps();
-
-
---
--- Name: users trg_users_timestamps; Type: TRIGGER; Schema: public; Owner: -
---
-
-CREATE TRIGGER trg_users_timestamps BEFORE INSERT OR UPDATE ON public.users FOR EACH ROW EXECUTE FUNCTION public.trg_set_timestamps();
+CREATE TRIGGER trg_exchange_rates_updated_at BEFORE INSERT OR UPDATE ON public.exchange_rates FOR EACH ROW EXECUTE FUNCTION public.trg_set_updated_at();
 
 
 --
--- Name: watchlists trg_watchlists_timestamps; Type: TRIGGER; Schema: public; Owner: -
+-- Name: exchanges trg_exchanges_created_at; Type: TRIGGER; Schema: public; Owner: -
 --
 
-CREATE TRIGGER trg_watchlists_timestamps BEFORE INSERT OR UPDATE ON public.watchlists FOR EACH ROW EXECUTE FUNCTION public.trg_set_timestamps();
+CREATE TRIGGER trg_exchanges_created_at BEFORE INSERT ON public.exchanges FOR EACH ROW EXECUTE FUNCTION public.trg_set_created_at();
+
+
+--
+-- Name: exchanges trg_exchanges_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_exchanges_updated_at BEFORE INSERT OR UPDATE ON public.exchanges FOR EACH ROW EXECUTE FUNCTION public.trg_set_updated_at();
+
+
+--
+-- Name: filings trg_filings_created_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_filings_created_at BEFORE INSERT ON public.filings FOR EACH ROW EXECUTE FUNCTION public.trg_set_created_at();
+
+
+--
+-- Name: instruments trg_instruments_created_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_instruments_created_at BEFORE INSERT ON public.instruments FOR EACH ROW EXECUTE FUNCTION public.trg_set_created_at();
+
+
+--
+-- Name: instruments trg_instruments_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_instruments_updated_at BEFORE INSERT OR UPDATE ON public.instruments FOR EACH ROW EXECUTE FUNCTION public.trg_set_updated_at();
+
+
+--
+-- Name: news_clusters trg_news_clusters_created_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_news_clusters_created_at BEFORE INSERT ON public.news_clusters FOR EACH ROW EXECUTE FUNCTION public.trg_set_created_at();
+
+
+--
+-- Name: notifications trg_notifications_created_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_notifications_created_at BEFORE INSERT ON public.notifications FOR EACH ROW EXECUTE FUNCTION public.trg_set_created_at();
+
+
+--
+-- Name: notifications trg_notifications_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_notifications_updated_at BEFORE INSERT OR UPDATE ON public.notifications FOR EACH ROW EXECUTE FUNCTION public.trg_set_updated_at();
+
+
+--
+-- Name: portfolio_holdings_snapshots trg_portfolio_holdings_snapshots_created_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_portfolio_holdings_snapshots_created_at BEFORE INSERT ON public.portfolio_holdings_snapshots FOR EACH ROW EXECUTE FUNCTION public.trg_set_created_at();
+
+
+--
+-- Name: portfolio_snapshots trg_portfolio_snapshots_created_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_portfolio_snapshots_created_at BEFORE INSERT ON public.portfolio_snapshots FOR EACH ROW EXECUTE FUNCTION public.trg_set_created_at();
+
+
+--
+-- Name: portfolios trg_portfolios_created_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_portfolios_created_at BEFORE INSERT ON public.portfolios FOR EACH ROW EXECUTE FUNCTION public.trg_set_created_at();
+
+
+--
+-- Name: portfolios trg_portfolios_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_portfolios_updated_at BEFORE INSERT OR UPDATE ON public.portfolios FOR EACH ROW EXECUTE FUNCTION public.trg_set_updated_at();
+
+
+--
+-- Name: positions trg_positions_created_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_positions_created_at BEFORE INSERT ON public.positions FOR EACH ROW EXECUTE FUNCTION public.trg_set_created_at();
+
+
+--
+-- Name: positions trg_positions_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_positions_updated_at BEFORE INSERT OR UPDATE ON public.positions FOR EACH ROW EXECUTE FUNCTION public.trg_set_updated_at();
+
+
+--
+-- Name: scheduler_jobs trg_scheduler_jobs_created_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_scheduler_jobs_created_at BEFORE INSERT ON public.scheduler_jobs FOR EACH ROW EXECUTE FUNCTION public.trg_set_created_at();
+
+
+--
+-- Name: scheduler_jobs trg_scheduler_jobs_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_scheduler_jobs_updated_at BEFORE INSERT OR UPDATE ON public.scheduler_jobs FOR EACH ROW EXECUTE FUNCTION public.trg_set_updated_at();
+
+
+--
+-- Name: signal_history trg_signal_history_created_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_signal_history_created_at BEFORE INSERT ON public.signal_history FOR EACH ROW EXECUTE FUNCTION public.trg_set_created_at();
+
+
+--
+-- Name: user_sources trg_user_sources_created_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_user_sources_created_at BEFORE INSERT ON public.user_sources FOR EACH ROW EXECUTE FUNCTION public.trg_set_created_at();
+
+
+--
+-- Name: users trg_users_created_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_users_created_at BEFORE INSERT ON public.users FOR EACH ROW EXECUTE FUNCTION public.trg_set_created_at();
+
+
+--
+-- Name: users trg_users_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_users_updated_at BEFORE INSERT OR UPDATE ON public.users FOR EACH ROW EXECUTE FUNCTION public.trg_set_updated_at();
+
+
+--
+-- Name: watchlists trg_watchlists_created_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_watchlists_created_at BEFORE INSERT ON public.watchlists FOR EACH ROW EXECUTE FUNCTION public.trg_set_created_at();
+
+
+--
+-- Name: watchlists trg_watchlists_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_watchlists_updated_at BEFORE INSERT OR UPDATE ON public.watchlists FOR EACH ROW EXECUTE FUNCTION public.trg_set_updated_at();
 
 
 --
@@ -4998,5 +5117,5 @@ ALTER TABLE ONLY public.watchlists
 -- PostgreSQL database dump complete
 --
 
-\unrestrict MycJ5jFUNG55T9Z0OCWfGxWSuGjWetXfGhfcGb93MmHPJnHYrDysTtP3lxu0pYg
+\unrestrict SFsD0zKojOmQg5clKcTq4riDXFJtLlPVvMqDu4cG6WOyMhVDuZKnV8HcGI0iMpY
 
