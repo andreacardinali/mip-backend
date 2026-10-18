@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict rHd5NJq0XZLnbAaPKVfoa0390v9zmAYch5j31QSrfHjAnl03xueR4RNUiiJgzcc
+\restrict QePL1hZLAtWQZd4DFKGciknPqDKJysN2MGxi90AjHmxjst4hdSXXgyrybTVXOgH
 
 -- Dumped from database version 18.6 (Debian 18.6-1.pgdg13+2)
 -- Dumped by pg_dump version 18.6 (Debian 18.6-1.pgdg13+2)
@@ -2459,7 +2459,7 @@ CREATE TABLE public.instrument_relations (
 
 CREATE TABLE public.instruments (
     instrument_id uuid DEFAULT gen_random_uuid() NOT NULL,
-    entity_id uuid,
+    entity_id uuid NOT NULL,
     symbol character varying(50),
     exchange character varying(50),
     instrument_type character varying(50),
@@ -4305,5 +4305,5 @@ ALTER TABLE ONLY public.watchlists
 -- PostgreSQL database dump complete
 --
 
-\unrestrict rHd5NJq0XZLnbAaPKVfoa0390v9zmAYch5j31QSrfHjAnl03xueR4RNUiiJgzcc
+\unrestrict QePL1hZLAtWQZd4DFKGciknPqDKJysN2MGxi90AjHmxjst4hdSXXgyrybTVXOgH
 
