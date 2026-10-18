@@ -5,7 +5,7 @@ import time
 import urllib.parse
 import urllib.request
 from urllib.error import HTTPError
-
+from config.settings import settings
 
 class GhostfolioProvider:
 
@@ -27,13 +27,9 @@ class GhostfolioProvider:
 
     def __init__(self):
 
-        self.base_url = os.getenv(
-            "GHOSTFOLIO_BASE_URL"
-        )
+        self.base_url = settings.GHOSTFOLIO_BASE_URL
 
-        self.security_token = os.getenv(
-            "GHOSTFOLIO_SECURITY_TOKEN"
-        )
+        self.security_token = settings.GHOSTFOLIO_SECURITY_TOKEN
 
         self.auth_token = None
 

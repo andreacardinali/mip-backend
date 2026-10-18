@@ -2,7 +2,7 @@ import json
 import os
 import urllib.parse
 import urllib.request
-
+from config.settings import settings
 from providers.base import (
     MarketDataProvider
 )
@@ -13,10 +13,7 @@ class FMPProvider(
 ):
 
     def __init__(self):
-
-        self.api_key = os.getenv(
-            "FMP_API_KEY"
-        )
+        self.api_key = settings.FMP_API_KEY
 
     def search_symbols(
         self,
