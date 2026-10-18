@@ -159,6 +159,7 @@ def refresh_entities(
                         SELECT
                         sp_refresh_entity_from_profile(
                             :entity_id,
+                            :instrument_id,
                             CAST(
                                 :payload
                                 AS jsonb
@@ -169,7 +170,8 @@ def refresh_entities(
                     {
                         "entity_id":
                             row.entity_id,
-
+                        "instrument_id":
+                            row.instrument_id,
                         "payload":
                             json.dumps(
                                 profile
