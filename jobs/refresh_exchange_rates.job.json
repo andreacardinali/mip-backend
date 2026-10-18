@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "job_key": "refresh_exchange_rates",
+  "job_name": "Refresh Exchange Rates",
+  "python_module": "jobs.exchange_rates.refresh_exchange_rates",
+  "trigger": {
+    "type": "cron",
+    "cron_expression": "0 17 * * 1-5"
+  },
+  "enabled_by_default": true
+}
