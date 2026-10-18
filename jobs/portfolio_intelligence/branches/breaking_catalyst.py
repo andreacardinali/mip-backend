@@ -37,6 +37,9 @@ class BreakingCatalystBranch(IntelligenceBranch):
                     for e in accepted
                 }.values()
             )
+            result.accepted_count = len(
+                accepted
+            )
             for e in accepted:
                 message = (f"⚡ BREAKING CATALYST\n{e['symbol']} | {e.get('eventType')}\n"
                            f"Severity: {e['severity']}\n{e.get('headline','')}\n{e.get('eventSummary','')}\n"

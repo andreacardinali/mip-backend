@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict xqvar0I3pQSgyH8Vo6Gqf8hC0WB8IcS2cL9uvH46SZrFmgYCkLctvP1ZYZ1mV1W
+\restrict wqfs8AFYmgzBihPhrdiIo9fJd8z1NfRkTSoATq1s1L51qg2E6NUkM9efVGPVJml
 
 -- Dumped from database version 18.6 (Debian 18.6-1.pgdg13+2)
 -- Dumped by pg_dump version 18.6 (Debian 18.6-1.pgdg13+2)
@@ -2579,7 +2579,12 @@ CREATE TABLE public.notification_subscriptions (
     portfolio_id uuid,
     event_type character varying(50),
     min_confidence numeric,
-    min_impact numeric
+    min_impact numeric,
+    user_id uuid,
+    source_id uuid,
+    enabled boolean DEFAULT true NOT NULL,
+    severity_min character varying(20),
+    config jsonb DEFAULT '{}'::jsonb NOT NULL
 );
 
 
@@ -3638,6 +3643,13 @@ CREATE INDEX ix_holding_snapshots_portfolio ON public.portfolio_holdings_snapsho
 
 
 --
+-- Name: ix_notification_subscriptions_user; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_notification_subscriptions_user ON public.notification_subscriptions USING btree (user_id, enabled);
+
+
+--
 -- Name: ix_notifications_user_branch; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -4165,6 +4177,22 @@ ALTER TABLE ONLY public.notification_hashes
 
 
 --
+-- Name: notification_subscriptions notification_subscriptions_source_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.notification_subscriptions
+    ADD CONSTRAINT notification_subscriptions_source_id_fkey FOREIGN KEY (source_id) REFERENCES public.user_sources(source_id) ON DELETE CASCADE;
+
+
+--
+-- Name: notification_subscriptions notification_subscriptions_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.notification_subscriptions
+    ADD CONSTRAINT notification_subscriptions_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(user_id) ON DELETE CASCADE;
+
+
+--
 -- Name: notifications notifications_entity_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -4360,5 +4388,5 @@ ALTER TABLE ONLY public.watchlists
 -- PostgreSQL database dump complete
 --
 
-\unrestrict xqvar0I3pQSgyH8Vo6Gqf8hC0WB8IcS2cL9uvH46SZrFmgYCkLctvP1ZYZ1mV1W
+\unrestrict wqfs8AFYmgzBihPhrdiIo9fJd8z1NfRkTSoATq1s1L51qg2E6NUkM9efVGPVJml
 
