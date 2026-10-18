@@ -1,15 +1,11 @@
 from datetime import datetime, timedelta
 import jwt
 
-from auth.config import (
-    JWT_SECRET,
-    JWT_ALGORITHM,
-    JWT_EXPIRE_HOURS
-)
+from config.settings import settings
 
 def create_access_token(user_id: str):
     expire = datetime.utcnow() + timedelta(
-        hours=JWT_EXPIRE_HOURS
+        hours = int(settings.JWT_EXPIRE_HOURS)
     )
 
     payload = {
@@ -19,6 +15,6 @@ def create_access_token(user_id: str):
 
     return jwt.encode(
         payload,
-        JWT_SECRET,
-        algorithm=JWT_ALGORITHM
+        settings.JWT_SECRET,
+        algorithm=settings.JWT_ALGORITHM
     )

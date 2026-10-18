@@ -13,11 +13,7 @@ from sqlalchemy import text
 
 from db import SessionLocal
 
-from auth.config import (
-    JWT_SECRET,
-    JWT_ALGORITHM,
-    JWT_EXPIRE_HOURS
-)
+from config.settings import settings
 
 from typing import TypedDict
 
@@ -39,8 +35,8 @@ async def get_current_user(
 
         payload = jwt.decode(
             token,
-            JWT_SECRET,
-            algorithms=[JWT_ALGORITHM],
+            settings.JWT_SECRET,
+            algorithms=[settings.JWT_ALGORITHM],
         )
 
         user_id = payload.get(
