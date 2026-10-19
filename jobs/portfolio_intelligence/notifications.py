@@ -17,7 +17,5 @@ class NotificationDiagnostics:
             "notificationsCreated": self._counts[EnqueueStatus.CREATED],
             "notificationsDuplicate": self._counts[EnqueueStatus.DUPLICATE],
             "notificationsDisabled": self._counts[EnqueueStatus.DISABLED],
-            "notificationsWithoutSource": self._counts[
-                EnqueueStatus.SOURCE_NOT_FOUND
-            ],
+            "notificationsWithoutSource": self._counts[EnqueueStatus.SOURCE_NOT_FOUND],
         }

@@ -7,7 +7,6 @@ from notifications.models import NotificationDelivery
 from notifications.plugins.telegram import TelegramPlugin
 from notifications.repository import NotificationRepository
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -21,9 +20,7 @@ class NotificationDispatcher:
         self.config = config
         self.repo = NotificationRepository(db)
         self.plugins = {
-            "TELEGRAM": TelegramPlugin(
-                timeout_seconds=config.http_timeout_seconds
-            ),
+            "TELEGRAM": TelegramPlugin(timeout_seconds=config.http_timeout_seconds),
         }
 
     def run_once(self) -> dict:
@@ -36,9 +33,7 @@ class NotificationDispatcher:
                 "failed": 0,
             }
 
-        released = self.repo.release_stale(
-            self.config.processing_timeout_seconds
-        )
+        released = self.repo.release_stale(self.config.processing_timeout_seconds)
         deliveries = self.repo.claim(self.config.batch_size)
         self.db.commit()
 

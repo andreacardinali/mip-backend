@@ -39,16 +39,14 @@ class LLMConfig:
                     f"{normalized_prefix}_PROVIDER",
                     default_provider,
                 )
-            ).strip().lower(),
-            base_url=str(
-                settings.get(f"{normalized_prefix}_BASE_URL", "") or ""
-            ).strip().rstrip("/"),
-            api_key=str(
-                settings.get(f"{normalized_prefix}_API_KEY", "") or ""
-            ).strip(),
-            model=str(
-                settings.get(f"{normalized_prefix}_MODEL", "") or ""
-            ).strip(),
+            )
+            .strip()
+            .lower(),
+            base_url=str(settings.get(f"{normalized_prefix}_BASE_URL", "") or "")
+            .strip()
+            .rstrip("/"),
+            api_key=str(settings.get(f"{normalized_prefix}_API_KEY", "") or "").strip(),
+            model=str(settings.get(f"{normalized_prefix}_MODEL", "") or "").strip(),
             timeout=float(
                 settings.get(
                     f"{normalized_prefix}_TIMEOUT",
@@ -67,9 +65,7 @@ class LLMConfig:
 
     def validate(self, *, prefix: str = "LLM") -> None:
         if self.provider not in SUPPORTED_PROVIDERS:
-            raise ValueError(
-                f"Unsupported {prefix}_PROVIDER: {self.provider}"
-            )
+            raise ValueError(f"Unsupported {prefix}_PROVIDER: {self.provider}")
         if not self.model:
             raise ValueError(f"Missing {prefix}_MODEL")
         if self.provider in {"ollama", "openai_compatible"} and not self.base_url:

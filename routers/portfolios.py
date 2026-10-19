@@ -1,11 +1,11 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy import text
 
+from auth.security import CurrentUser, get_current_user
 from db import SessionLocal
 
-from auth.security import get_current_user, CurrentUser
-
 router = APIRouter()
+
 
 @router.get("/")
 async def get_portfolios(
@@ -26,19 +26,16 @@ async def get_portfolios(
                 """
             ),
             {
-                "user_id":
-                    user_id,
-            }
+                "user_id": user_id,
+            },
         )
 
-        return [
-            dict(row._mapping)
-            for row in rows
-        ]
+        return [dict(row._mapping) for row in rows]
 
     finally:
 
         db.close()
+
 
 @router.post("/upsert")
 async def upsert_portfolio(
@@ -64,48 +61,26 @@ async def upsert_portfolio(
                 """
             ),
             {
-                "portfolio_id":
-                    payload.get(
-                        "portfolio_id"
-                    ),
-
-                "user_id":
-                    user_id,
-
-                "name":
-                    payload["name"],
-
-                "portfolio_type":
-                    payload.get(
-                        "portfolio_type",
-                        "PORTFOLIO"
-                    ),
-
-                "description":
-                    payload.get(
-                        "description"
-                    ),
-
-                "base_currency":
-                    payload.get(
-                        "base_currency",
-                        "USD"
-                    ),
+                "portfolio_id": payload.get("portfolio_id"),
+                "user_id": user_id,
+                "name": payload["name"],
+                "portfolio_type": payload.get("portfolio_type", "PORTFOLIO"),
+                "description": payload.get("description"),
+                "base_currency": payload.get("base_currency", "USD"),
             },
         ).scalar()
 
         db.commit()
 
         return {
-            "portfolio_id":
-                str(portfolio_id),
-            "status":
-                "saved",
+            "portfolio_id": str(portfolio_id),
+            "status": "saved",
         }
 
     finally:
 
         db.close()
+
 
 @router.delete("/{portfolio_id}")
 async def delete_portfolio(
@@ -127,24 +102,19 @@ async def delete_portfolio(
                 """
             ),
             {
-                "portfolio_id":
-                    portfolio_id,
-                "user_id":
-                    user_id,
+                "portfolio_id": portfolio_id,
+                "user_id": user_id,
             },
         ).scalar()
 
         db.commit()
 
-        return {
-            "deleted":
-                deleted
-        }
-
+        return {"deleted": deleted}
 
     finally:
 
         db.close()
+
 
 @router.get("/{portfolio_id}/summary")
 async def get_portfolio_summary(
@@ -172,9 +142,7 @@ async def get_portfolio_summary(
             },
         ).first()
 
-        return dict(
-            row._mapping
-        )
+        return dict(row._mapping)
 
     finally:
         db.close()

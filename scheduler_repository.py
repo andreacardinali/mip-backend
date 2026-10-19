@@ -15,27 +15,57 @@ class SchedulerRepository:
         rows = self.db.execute(text("SELECT * FROM sp_get_enabled_scheduler_jobs()"))
         return [dict(row) for row in rows.mappings().all()]
 
-    def start_run(self, *, job_run_id: UUID, job_id: UUID, started_at: datetime) -> None:
+    def start_run(
+        self, *, job_run_id: UUID, job_id: UUID, started_at: datetime
+    ) -> None:
         self.db.execute(
-            text("SELECT sp_start_scheduler_job(CAST(:run_id AS uuid), CAST(:job_id AS uuid), :started_at)"),
-            {"run_id": str(job_run_id), "job_id": str(job_id), "started_at": started_at},
+            text(
+                "SELECT sp_start_scheduler_job(CAST(:run_id AS uuid), CAST(:job_id AS uuid), :started_at)"
+            ),
+            {
+                "run_id": str(job_run_id),
+                "job_id": str(job_id),
+                "started_at": started_at,
+            },
         )
 
-    def complete_run(self, *, job_run_id: UUID, status: str,
-                     result: dict[str, Any] | None, completed_at: datetime,
-                     error_message: str | None = None) -> None:
+    def complete_run(
+        self,
+        *,
+        job_run_id: UUID,
+        status: str,
+        result: dict[str, Any] | None,
+        completed_at: datetime,
+        error_message: str | None = None,
+    ) -> None:
         payload = json.dumps(result, default=str) if result is not None else None
         self.db.execute(
-            text("SELECT sp_complete_scheduler_job(CAST(:run_id AS uuid), :status, :error, CAST(:result AS jsonb), :completed_at)"),
-            {"run_id": str(job_run_id), "status": status.strip().upper(), "error": error_message,
-             "result": payload, "completed_at": completed_at},
+            text(
+                "SELECT sp_complete_scheduler_job(CAST(:run_id AS uuid), :status, :error, CAST(:result AS jsonb), :completed_at)"
+            ),
+            {
+                "run_id": str(job_run_id),
+                "status": status.strip().upper(),
+                "error": error_message,
+                "result": payload,
+                "completed_at": completed_at,
+            },
         )
 
-    def fail_run(self, *, job_run_id: UUID, error_message: str, completed_at: datetime) -> None:
+    def fail_run(
+        self, *, job_run_id: UUID, error_message: str, completed_at: datetime
+    ) -> None:
         self.db.execute(
-            text("SELECT sp_fail_scheduler_job(CAST(:run_id AS uuid), :error, :completed_at)"),
-            {"run_id": str(job_run_id), "error": error_message, "completed_at": completed_at},
+            text(
+                "SELECT sp_fail_scheduler_job(CAST(:run_id AS uuid), :error, :completed_at)"
+            ),
+            {
+                "run_id": str(job_run_id),
+                "error": error_message,
+                "completed_at": completed_at,
+            },
         )
+
     def register_job(
         self,
         *,
@@ -47,9 +77,10 @@ class SchedulerRepository:
         interval_minutes: int | None,
         enabled_by_default: bool,
     ) -> dict[str, Any]:
-        row = self.db.execute(
-            text(
-                """
+        row = (
+            self.db.execute(
+                text(
+                    """
                 SELECT *
                 FROM sp_register_scheduler_job(
                     :job_key,
@@ -61,21 +92,19 @@ class SchedulerRepository:
                     :enabled_by_default
                 )
                 """
-            ),
-            {
-                "job_key": job_key,
-                "job_name": job_name,
-                "python_module":
-                    python_module,
-                "trigger_type":
-                    trigger_type,
-                "cron_expression":
-                    cron_expression,
-                "interval_minutes":
-                    interval_minutes,
-                "enabled_by_default":
-                    enabled_by_default,
-            },
-        ).mappings().one()
+                ),
+                {
+                    "job_key": job_key,
+                    "job_name": job_name,
+                    "python_module": python_module,
+                    "trigger_type": trigger_type,
+                    "cron_expression": cron_expression,
+                    "interval_minutes": interval_minutes,
+                    "enabled_by_default": enabled_by_default,
+                },
+            )
+            .mappings()
+            .one()
+        )
 
         return dict(row)

@@ -1,14 +1,16 @@
 import json
-import os
 import re
 import time
 import urllib.parse
 import urllib.request
 from urllib.error import HTTPError
+
 from config.settings import settings
+
 
 class GhostfolioProfileNotFoundError(Exception):
     pass
+
 
 class GhostfolioProvider:
 
@@ -18,10 +20,7 @@ class GhostfolioProvider:
         if not value:
             return None
 
-        match = re.search(
-            r'href="([^"]+)"',
-            value
-        )
+        match = re.search(r'href="([^"]+)"', value)
 
         if match:
             return match.group(1)
@@ -33,29 +32,17 @@ class GhostfolioProvider:
         market_data,
     ):
         if isinstance(market_data, dict):
-            market_data = list(
-                market_data.values()
-            )
+            market_data = list(market_data.values())
 
         if not isinstance(market_data, list):
             return None
 
-        valid_rows = [
-            row
-            for row in market_data
-            if isinstance(row, dict)
-        ]
+        valid_rows = [row for row in market_data if isinstance(row, dict)]
 
-        valid_rows.sort(
-            key=lambda row: (
-                row.get("date") or ""
-            )
-        )
+        valid_rows.sort(key=lambda row: (row.get("date") or ""))
 
         for row in reversed(valid_rows):
-            market_price = row.get(
-                "marketPrice"
-            )
+            market_price = row.get("marketPrice")
 
             if market_price is not None:
                 return market_price
@@ -70,26 +57,17 @@ class GhostfolioProvider:
             return None
 
         if isinstance(countries, list):
-            valid_countries = [
-                item
-                for item in countries
-                if isinstance(item, dict)
-            ]
+            valid_countries = [item for item in countries if isinstance(item, dict)]
 
             if not valid_countries:
                 return None
 
             main_country = max(
                 valid_countries,
-                key=lambda item: (
-                    item.get("weight") or 0
-                ),
+                key=lambda item: (item.get("weight") or 0),
             )
 
-            return (
-                main_country.get("code")
-                or main_country.get("name")
-            )
+            return main_country.get("code") or main_country.get("name")
 
         if isinstance(countries, dict):
             if "code" in countries:
@@ -100,9 +78,7 @@ class GhostfolioProvider:
 
             return max(
                 countries,
-                key=lambda key: (
-                    countries.get(key) or 0
-                ),
+                key=lambda key: (countries.get(key) or 0),
             )
 
         return None
@@ -115,26 +91,17 @@ class GhostfolioProvider:
             return None
 
         if isinstance(countries, list):
-            valid_countries = [
-                item
-                for item in countries
-                if isinstance(item, dict)
-            ]
+            valid_countries = [item for item in countries if isinstance(item, dict)]
 
             if not valid_countries:
                 return None
 
             main_country = max(
                 valid_countries,
-                key=lambda item: (
-                    item.get("weight") or 0
-                ),
+                key=lambda item: (item.get("weight") or 0),
             )
 
-            return (
-                main_country.get("code")
-                or main_country.get("name")
-            )
+            return main_country.get("code") or main_country.get("name")
 
         if isinstance(countries, dict):
             if "code" in countries:
@@ -145,9 +112,7 @@ class GhostfolioProvider:
 
             return max(
                 countries,
-                key=lambda key: (
-                    countries.get(key) or 0
-                ),
+                key=lambda key: (countries.get(key) or 0),
             )
 
         return None
@@ -160,26 +125,17 @@ class GhostfolioProvider:
             return None
 
         if isinstance(sectors, list):
-            valid_sectors = [
-                item
-                for item in sectors
-                if isinstance(item, dict)
-            ]
+            valid_sectors = [item for item in sectors if isinstance(item, dict)]
 
             if not valid_sectors:
                 return None
 
             main_sector = max(
                 valid_sectors,
-                key=lambda item: (
-                    item.get("weight") or 0
-                ),
+                key=lambda item: (item.get("weight") or 0),
             )
 
-            return (
-                main_sector.get("name")
-                or main_sector.get("sector")
-            )
+            return main_sector.get("name") or main_sector.get("sector")
 
         if isinstance(sectors, dict):
             if "name" in sectors:
@@ -190,9 +146,7 @@ class GhostfolioProvider:
 
             return max(
                 sectors,
-                key=lambda key: (
-                    sectors.get(key) or 0
-                ),
+                key=lambda key: (sectors.get(key) or 0),
             )
 
         return None
@@ -210,133 +164,61 @@ class GhostfolioProvider:
         if self.auth_token:
             return
 
-        payload = json.dumps(
-            {
-                "accessToken":
-                    self.security_token
-            }
-        ).encode()
+        payload = json.dumps({"accessToken": self.security_token}).encode()
 
         request = urllib.request.Request(
-            self.base_url
-            + "/api/v1/auth/anonymous",
+            self.base_url + "/api/v1/auth/anonymous",
             data=payload,
-            headers={
-                "Content-Type":
-                    "application/json"
-            },
-            method="POST"
+            headers={"Content-Type": "application/json"},
+            method="POST",
         )
 
-        with urllib.request.urlopen(
-            request,
-            timeout=10
-        ) as response:
+        with urllib.request.urlopen(request, timeout=10) as response:
 
-            data = json.loads(
-                response.read()
-            )
+            data = json.loads(response.read())
 
-        self.auth_token = (
-            data["authToken"]
-        )
+        self.auth_token = data["authToken"]
 
     def _headers(self):
 
         self._authenticate()
 
-        return {
-            "Authorization":
-                (
-                    "Bearer "
-                    + self.auth_token
-                )
-        }
+        return {"Authorization": ("Bearer " + self.auth_token)}
 
-    def search_symbols(
-        self,
-        query: str,
-        limit: int = 20
-    ):
+    def search_symbols(self, query: str, limit: int = 20):
 
         url = (
             self.base_url
             + "/api/v1/symbol/lookup?"
-            + urllib.parse.urlencode(
-                {
-                    "query": query
-                }
-            )
+            + urllib.parse.urlencode({"query": query})
         )
 
-        request = urllib.request.Request(
-            url,
-            headers=self._headers()
-        )
+        request = urllib.request.Request(url, headers=self._headers())
 
-        with urllib.request.urlopen(
-            request,
-            timeout=15
-        ) as response:
+        with urllib.request.urlopen(request, timeout=15) as response:
 
-            payload = json.loads(
-                response.read()
-            )
+            payload = json.loads(response.read())
 
         results = []
 
-        for item in payload.get(
-            "items",
-            []
-        )[:limit]:
+        for item in payload.get("items", [])[:limit]:
 
             results.append(
                 {
-                    "symbol":
-                        item.get(
-                            "symbol"
-                        ),
-
-                    "name":
-                        item.get(
-                            "name"
-                        ),
-
-                    "currency":
-                        item.get(
-                            "currency"
-                        ),
-
-                    "asset_class":
-                        item.get(
-                            "assetClass"
-                        ),
-
-                    "asset_sub_class":
-                        item.get(
-                            "assetSubClass"
-                        ),
-
-                    "data_source":
-                        item.get(
-                            "dataSource"
-                        ),
-
-                    "exchange":
-                        None,
-
-                    "exchangeFullName":
-                        None
+                    "symbol": item.get("symbol"),
+                    "name": item.get("name"),
+                    "currency": item.get("currency"),
+                    "asset_class": item.get("assetClass"),
+                    "asset_sub_class": item.get("assetSubClass"),
+                    "data_source": item.get("dataSource"),
+                    "exchange": None,
+                    "exchangeFullName": None,
                 }
             )
 
         return results
 
-    def refresh_profile(
-        self,
-        symbol,
-        data_source="YAHOO"
-    ):
+    def refresh_profile(self, symbol, data_source="YAHOO"):
         url = (
             self.base_url
             + "/api/v1/admin/gather/profile-data/"
@@ -347,21 +229,11 @@ class GhostfolioProvider:
 
         print("REFRESH:", url)
 
-        request = urllib.request.Request(
-            url,
-            headers=self._headers(),
-            method="POST"
-        )
+        request = urllib.request.Request(url, headers=self._headers(), method="POST")
 
-        with urllib.request.urlopen(
-            request,
-            timeout=30
-        ) as response:
+        with urllib.request.urlopen(request, timeout=30) as response:
 
-            print(
-                "REFRESH STATUS:",
-                response.status
-            )
+            print("REFRESH STATUS:", response.status)
 
     def get_profile(
         self,
@@ -396,8 +268,7 @@ class GhostfolioProvider:
                 raw_body = response.read()
 
                 body = raw_body.decode(
-                    response.headers.get_content_charset()
-                    or "utf-8",
+                    response.headers.get_content_charset() or "utf-8",
                     errors="replace",
                 )
 
@@ -406,9 +277,7 @@ class GhostfolioProvider:
                     {
                         "symbol": symbol,
                         "status": response.status,
-                        "content_type": response.headers.get(
-                            "Content-Type"
-                        ),
+                        "content_type": response.headers.get("Content-Type"),
                         "body": body[:10000],
                     },
                     flush=True,
@@ -434,8 +303,7 @@ class GhostfolioProvider:
 
             if error.code == 404:
                 raise GhostfolioProfileNotFoundError(
-                    f"Profile not found for "
-                    f"{symbol} ({data_source})"
+                    f"Profile not found for " f"{symbol} ({data_source})"
                 ) from error
 
             raise
@@ -476,50 +344,28 @@ class GhostfolioProvider:
 
         market_data = payload.get("marketData") or []
 
-        last_price = self._extract_last_price(
-            market_data
-        )
+        last_price = self._extract_last_price(market_data)
 
-        country_code = self._extract_country_code(
-            profile.get("countries")
-        )
+        country_code = self._extract_country_code(profile.get("countries"))
 
-        sector = self._extract_sector(
-            profile.get("sectors")
-        )
+        sector = self._extract_sector(profile.get("sectors"))
 
         result = {
-            "symbol": (
-                profile.get("symbol")
-                or symbol
-            ),
+            "symbol": (profile.get("symbol") or symbol),
             "name": profile.get("name"),
             "currency": profile.get("currency"),
             "country_code": country_code,
             "sector": sector,
-            "website": self._clean_url(
-                profile.get("url")
-            ),
-            "asset_class": profile.get(
-                "assetClass"
-            ),
-            "asset_sub_class": profile.get(
-                "assetSubClass"
-            ),
-            "data_source": (
-                profile.get("dataSource")
-                or data_source
-            ),
+            "website": self._clean_url(profile.get("url")),
+            "asset_class": profile.get("assetClass"),
+            "asset_sub_class": profile.get("assetSubClass"),
+            "data_source": (profile.get("dataSource") or data_source),
             "exchange": None,
             "exchangeFullName": None,
             "last_price": last_price,
             "figi": profile.get("figi"),
-            "figi_composite": profile.get(
-                "figiComposite"
-            ),
-            "figi_share_class": profile.get(
-                "figiShareClass"
-            ),
+            "figi_composite": profile.get("figiComposite"),
+            "figi_share_class": profile.get("figiShareClass"),
         }
 
         print(
@@ -546,10 +392,7 @@ class GhostfolioProvider:
 
         time.sleep(1)
 
-        deadline = (
-            time.monotonic()
-            + timeout_seconds
-        )
+        deadline = time.monotonic() + timeout_seconds
 
         last_profile = None
 
@@ -564,10 +407,8 @@ class GhostfolioProvider:
 
                 if (
                     last_profile
-                    and
-                    last_profile.get("symbol")
-                    and
-                    last_profile.get("name")
+                    and last_profile.get("symbol")
+                    and last_profile.get("name")
                 ):
                     return last_profile
 

@@ -80,10 +80,10 @@ def split_inline_comment(raw: str) -> tuple[str, str]:
         if char == "#" and (index == 0 or raw[index - 1].isspace()):
             value = raw[:index].rstrip()
             comment = raw[index:]
-            spacing = raw[len(value):index]
+            spacing = raw[len(value) : index]
             return value, spacing + comment
 
-    return raw.rstrip(), raw[len(raw.rstrip()):]
+    return raw.rstrip(), raw[len(raw.rstrip()) :]
 
 
 def remove_outer_quotes(value: str) -> tuple[str, str | None]:

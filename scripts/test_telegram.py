@@ -3,9 +3,7 @@ from notifications.telegram import TelegramSender
 
 def main() -> int:
     sender = TelegramSender.for_platform_admin()
-    results = sender.send(
-        "MIP platform test: administrator Telegram sender OK"
-    )
+    results = sender.send("MIP platform test: administrator Telegram sender OK")
 
     for result in results:
         print(

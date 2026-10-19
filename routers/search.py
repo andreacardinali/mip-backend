@@ -1,16 +1,11 @@
 import json
+
 from fastapi import APIRouter, Depends
 from sqlalchemy import text
 
+from auth.security import CurrentUser, get_current_user
 from db import SessionLocal
-
-from auth.security import get_current_user, CurrentUser
-
-router = APIRouter()
-
-from providers.manager import (
-    market_data
-)
+from providers.manager import market_data
 
 router = APIRouter()
 
@@ -20,20 +15,18 @@ async def search_symbols(
     q: str,
     current_user: CurrentUser = Depends(get_current_user),
 ):
-    user_id = current_user["user_id"]
-    db = SessionLocal()
-    
-    if not q:
 
+    query = q.strip()
+
+    if not query:
         return {
             "source": "EMPTY",
-            "results": []
+            "results": [],
         }
 
-    cache_key = (
-        q.lower()
-         .strip()
-    )
+    cache_key = query.lower()
+
+    db = SessionLocal()
 
     try:
 
@@ -48,22 +41,14 @@ async def search_symbols(
                 )
                 """
             ),
-            {
-                "query":
-                    cache_key
-            },
+            {"query": cache_key},
         ).scalar()
 
         #
         # LOCAL / CACHE
         #
 
-        if (
-            search_result
-            and
-            search_result["source"]
-                != "MISS"
-        ):
+        if search_result and search_result["source"] != "MISS":
 
             return search_result
 
@@ -71,13 +56,7 @@ async def search_symbols(
         # PROVIDER
         #
 
-        results = (
-            market_data
-            .search_symbols(
-                q,
-                20
-            )
-        )
+        results = market_data.search_symbols(query, 20)
 
         db.execute(
             text(
@@ -92,25 +71,21 @@ async def search_symbols(
                 """
             ),
             {
-                "cache_key":
-                    cache_key,
-
-                "payload":
-                    json.dumps(
-                        results
-                    ),
+                "cache_key": cache_key,
+                "payload": json.dumps(results),
             },
         )
 
         db.commit()
 
         return {
-            "source":
-                "PROVIDER",
-
-            "results":
-                results,
+            "source": "PROVIDER",
+            "results": results,
         }
+
+    except Exception:
+        db.rollback()
+        raise
 
     finally:
 

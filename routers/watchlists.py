@@ -1,11 +1,11 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy import text
 
+from auth.security import CurrentUser, get_current_user
 from db import SessionLocal
 
-from auth.security import get_current_user, CurrentUser
-
 router = APIRouter()
+
 
 @router.get("")
 async def get_watchlists(
@@ -26,15 +26,11 @@ async def get_watchlists(
                 """
             ),
             {
-                "user_id":
-                    user_id,
-            }
+                "user_id": user_id,
+            },
         )
 
-        return [
-            dict(row._mapping)
-            for row in rows
-        ]
+        return [dict(row._mapping) for row in rows]
 
     finally:
 
@@ -51,9 +47,7 @@ async def upsert_watchlist(
 
     try:
 
-        user_id = (
-            "5fc35381-dfbf-4d67-8c4e-479bb279542b"
-        )
+        user_id = "5fc35381-dfbf-4d67-8c4e-479bb279542b"
 
         watchlist_id = db.execute(
             text(
@@ -67,28 +61,18 @@ async def upsert_watchlist(
                 """
             ),
             {
-                "watchlist_id":
-                    payload.get(
-                        "watchlist_id"
-                    ),
-                "user_id":
-                    user_id,
-                "name":
-                    payload["name"],
-                "description":
-                    payload.get(
-                        "description"
-                    ),
-            }
+                "watchlist_id": payload.get("watchlist_id"),
+                "user_id": user_id,
+                "name": payload["name"],
+                "description": payload.get("description"),
+            },
         ).scalar()
 
         db.commit()
 
         return {
-            "watchlist_id":
-                str(watchlist_id),
-            "status":
-                "saved",
+            "watchlist_id": str(watchlist_id),
+            "status": "saved",
         }
 
     finally:
@@ -96,12 +80,10 @@ async def upsert_watchlist(
         db.close()
 
 
-@router.delete(
-    "/{watchlist_id}"
-)
+@router.delete("/{watchlist_id}")
 async def delete_watchlist(
     watchlist_id: str,
-    current_user: CurrentUser = Depends(get_current_user),    
+    current_user: CurrentUser = Depends(get_current_user),
 ):
     user_id = current_user["user_id"]
     db = SessionLocal()
@@ -118,19 +100,14 @@ async def delete_watchlist(
                 """
             ),
             {
-                "watchlist_id":
-                    watchlist_id,
-                "user_id":
-                    user_id,
+                "watchlist_id": watchlist_id,
+                "user_id": user_id,
             },
         ).scalar()
 
         db.commit()
 
-        return {
-            "deleted":
-                deleted
-        }
+        return {"deleted": deleted}
 
     finally:
 

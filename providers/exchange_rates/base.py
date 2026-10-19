@@ -13,5 +13,4 @@ class ExchangeRateSnapshot:
 
 
 class ExchangeRateProvider(Protocol):
-    def get_latest_rates(self) -> ExchangeRateSnapshot:
-        ...
+    def get_latest_rates(self) -> ExchangeRateSnapshot: ...

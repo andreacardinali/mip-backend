@@ -1,6 +1,6 @@
 import unittest
 
-from notifications.models import EnqueueResult, EnqueueStatus
+from notifications.models import EnqueueStatus
 from notifications.queue import NotificationQueue
 
 
@@ -17,7 +17,9 @@ class FakeRepository:
 
 
 class EnqueueTests(unittest.TestCase):
-    def _queue(self, *, enabled=True, source_id="source", notification_id="notification"):
+    def _queue(
+        self, *, enabled=True, source_id="source", notification_id="notification"
+    ):
         queue = object.__new__(NotificationQueue)
         queue.enabled = enabled
         queue.default_channel = "TELEGRAM"

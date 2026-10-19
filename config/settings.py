@@ -7,17 +7,9 @@ class Settings:
 
     def __init__(self):
 
-        env_file = (
-            Path(__file__)
-            .resolve()
-            .parent
-            .parent
-            / ".env"
-        )
+        env_file = Path(__file__).resolve().parent.parent / ".env"
 
-        self._values = dict(
-            dotenv_values(env_file)
-        )
+        self._values = dict(dotenv_values(env_file))
 
     def get(
         self,
@@ -42,11 +34,9 @@ class Settings:
         try:
             return self._values[key]
 
-        except KeyError:
+        except KeyError as exc:
 
-            raise AttributeError(
-                f"Setting '{key}' not found"
-            )
+            raise AttributeError(f"Setting '{key}' not found") from exc
 
 
 settings = Settings()

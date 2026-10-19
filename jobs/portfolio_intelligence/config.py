@@ -13,9 +13,7 @@ def _f(name: str, default: float) -> float:
 
 
 def _b(name: str, default: bool) -> bool:
-    return str(settings.get(name, str(default))).lower() in {
-        "1", "true", "yes", "on"
-    }
+    return str(settings.get(name, str(default))).lower() in {"1", "true", "yes", "on"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,9 +69,7 @@ class IntelligenceConfig:
         if config.batch_size < 1:
             raise ValueError("INTELLIGENCE_BATCH_SIZE must be >= 1")
         if not 1 <= config.upcoming_window_days <= 30:
-            raise ValueError(
-                "UPCOMING_CATALYST_WINDOW_DAYS must be between 1 and 30"
-            )
+            raise ValueError("UPCOMING_CATALYST_WINDOW_DAYS must be between 1 and 30")
         if not str(config.history_range or "").strip():
             raise ValueError("YAHOO_HISTORY_RANGE cannot be empty")
         if not str(config.history_interval or "").strip():

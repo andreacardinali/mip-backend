@@ -8,7 +8,6 @@ from sqlalchemy.orm import Session
 
 from providers.manager import market_data
 
-
 logger = logging.getLogger(__name__)
 
 

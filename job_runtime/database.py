@@ -5,7 +5,6 @@ from sqlalchemy.orm import Session
 
 from db import SessionLocal
 
-
 T = TypeVar("T")
 
 

@@ -1,4 +1,4 @@
-from datetime import datetime
+from typing import TypedDict
 
 import jwt
 from fastapi import (
@@ -8,28 +8,22 @@ from fastapi import (
 from fastapi.security import (
     OAuth2PasswordBearer,
 )
-
 from sqlalchemy import text
 
+from config.settings import settings
 from db import SessionLocal
 
-from config.settings import settings
-
-from typing import TypedDict
 
 class CurrentUser(TypedDict):
     user_id: str
     username: str
     email: str
 
-oauth2_scheme = OAuth2PasswordBearer(
-    tokenUrl="/api/auth/login"
-)
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
 
-async def get_current_user(
-    token: str = Depends(oauth2_scheme)
-) -> CurrentUser:
+async def get_current_user(token: str = Depends(oauth2_scheme)) -> CurrentUser:
 
     try:
 
@@ -39,9 +33,7 @@ async def get_current_user(
             algorithms=[settings.JWT_ALGORITHM],
         )
 
-        user_id = payload.get(
-            "sub"
-        )
+        user_id = payload.get("sub")
 
         if not user_id:
 
@@ -55,7 +47,7 @@ async def get_current_user(
         raise HTTPException(
             status_code=401,
             detail="Invalid token",
-        )
+        ) from None
 
     db = SessionLocal()
 
@@ -73,9 +65,7 @@ async def get_current_user(
                 WHERE user_id = :user_id
                 """
             ),
-            {
-                "user_id": user_id
-            },
+            {"user_id": user_id},
         ).first()
 
         if not row:
@@ -85,9 +75,7 @@ async def get_current_user(
                 detail="User not found",
             )
 
-        return dict(
-            row._mapping
-        )
+        return dict(row._mapping)
 
     finally:
 

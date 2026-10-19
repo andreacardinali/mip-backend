@@ -1,19 +1,17 @@
 import logging
 import random
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
-from typing import Any, Callable
+from typing import Any
 
 import httpx
 
-
 logger = logging.getLogger(__name__)
 
-DEFAULT_RETRYABLE_STATUS_CODES = frozenset(
-    {408, 429, 500, 502, 503, 504}
-)
+DEFAULT_RETRYABLE_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
 RETRYABLE_EXCEPTIONS = (
     httpx.ConnectError,
     httpx.ConnectTimeout,
@@ -22,9 +20,7 @@ RETRYABLE_EXCEPTIONS = (
     httpx.PoolTimeout,
     httpx.RemoteProtocolError,
 )
-IDEMPOTENT_METHODS = frozenset(
-    {"GET", "HEAD", "OPTIONS", "TRACE", "PUT", "DELETE"}
-)
+IDEMPOTENT_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE", "PUT", "DELETE"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,10 +66,7 @@ def request_with_retry(
     if not normalized_method:
         raise ValueError("HTTP method cannot be empty")
 
-    may_retry = (
-        normalized_method in IDEMPOTENT_METHODS
-        or retry_non_idempotent
-    )
+    may_retry = normalized_method in IDEMPOTENT_METHODS or retry_non_idempotent
 
     for attempt in range(policy.max_retries + 1):
         try:
@@ -137,13 +130,11 @@ def _retry_delay(
     if parsed_retry_after is not None:
         base_delay = parsed_retry_after
     else:
-        base_delay = policy.base_delay_seconds * (2 ** attempt)
+        base_delay = policy.base_delay_seconds * (2**attempt)
 
     bounded_delay = min(base_delay, policy.max_delay_seconds)
     jitter = (
-        random_uniform(0.0, policy.jitter_seconds)
-        if policy.jitter_seconds
-        else 0.0
+        random_uniform(0.0, policy.jitter_seconds) if policy.jitter_seconds else 0.0
     )
     return max(0.0, bounded_delay + jitter)
 
@@ -161,8 +152,8 @@ def _parse_retry_after(value: str | None) -> float | None:
     except (TypeError, ValueError, OverflowError):
         return None
     if retry_at.tzinfo is None:
-        retry_at = retry_at.replace(tzinfo=timezone.utc)
+        retry_at = retry_at.replace(tzinfo=UTC)
     return max(
         0.0,
-        (retry_at - datetime.now(timezone.utc)).total_seconds(),
+        (retry_at - datetime.now(UTC)).total_seconds(),
     )

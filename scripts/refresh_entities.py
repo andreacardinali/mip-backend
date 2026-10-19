@@ -6,9 +6,7 @@ from services.entities import RefreshMode, refresh_entities
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Refresh one or more entities"
-    )
+    parser = argparse.ArgumentParser(description="Refresh one or more entities")
     parser.add_argument(
         "--mode",
         choices=[mode.value for mode in RefreshMode],

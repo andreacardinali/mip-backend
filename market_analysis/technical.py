@@ -31,10 +31,9 @@ def rsi(
     if len(closes) <= period:
         return None
 
-    changes = [
-        closes[index] - closes[index - 1]
-        for index in range(1, len(closes))
-    ][-period:]
+    changes = [closes[index] - closes[index - 1] for index in range(1, len(closes))][
+        -period:
+    ]
     average_gain = mean([max(change, 0.0) for change in changes])
     average_loss = mean([max(-change, 0.0) for change in changes])
 
@@ -84,11 +83,7 @@ def analyze_price_bars(
     closes = [bar.close for bar in bars]
     current = closes[-1]
     previous = closes[-2]
-    daily_change_pct = (
-        (current / previous - 1.0) * 100.0
-        if previous != 0
-        else 0.0
-    )
+    daily_change_pct = (current / previous - 1.0) * 100.0 if previous != 0 else 0.0
 
     return TechnicalSnapshot(
         market_price=current,

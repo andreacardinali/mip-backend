@@ -1,5 +1,5 @@
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from jobs.portfolio_intelligence.branches.base import IntelligenceBranch
 from jobs.portfolio_intelligence.messages import format_daily_mover_message
@@ -35,8 +35,7 @@ class DailyMoverBranch(IntelligenceBranch):
             snapshot = analyze_price_bars(bars)
             if (
                 snapshot is None
-                or abs(snapshot.daily_change_pct)
-                < context.config.daily_move_min_pct
+                or abs(snapshot.daily_change_pct) < context.config.daily_move_min_pct
             ):
                 continue
 
@@ -45,9 +44,7 @@ class DailyMoverBranch(IntelligenceBranch):
                 **snapshot.to_dict(),
                 "allocationPct": entity.allocation_pct,
                 "portfolioImpactPct": (
-                    snapshot.daily_change_pct
-                    * entity.allocation_pct
-                    / 100.0
+                    snapshot.daily_change_pct * entity.allocation_pct / 100.0
                 ),
                 "severity": daily_mover_severity(
                     snapshot.daily_change_pct,
@@ -72,8 +69,7 @@ class DailyMoverBranch(IntelligenceBranch):
                             default=str,
                         ),
                         supports=json.dumps(
-                            research.data.get("supports")
-                            or research.sources,
+                            research.data.get("supports") or research.sources,
                             default=str,
                         ),
                     ),
@@ -99,10 +95,14 @@ class DailyMoverBranch(IntelligenceBranch):
         result.accepted_count = len(accepted)
         diagnostics = NotificationDiagnostics()
         for item in accepted:
-            observed_day = datetime.fromtimestamp(
-                item["observedDate"],
-                timezone.utc,
-            ).date().isoformat()
+            observed_day = (
+                datetime.fromtimestamp(
+                    item["observedDate"],
+                    UTC,
+                )
+                .date()
+                .isoformat()
+            )
             notification_key = (
                 f"DAILY_MOVER|{item['symbol']}|{observed_day}|"
                 f"{round(item['dailyChangePct'], 1)}"

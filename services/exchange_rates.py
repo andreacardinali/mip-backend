@@ -7,7 +7,6 @@ from sqlalchemy.orm import Session
 
 from providers.exchange_rates.base import ExchangeRateProvider
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -78,9 +77,7 @@ def _validate_rate(
     rate_to_usd: Decimal,
 ) -> None:
     if len(currency_code) != 3:
-        raise ValueError(
-            "Currency code must contain exactly three characters"
-        )
+        raise ValueError("Currency code must contain exactly three characters")
 
     if rate_to_usd <= 0:
         raise ValueError("Exchange rate must be positive")

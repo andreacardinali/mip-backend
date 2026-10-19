@@ -1,5 +1,5 @@
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from jobs.portfolio_intelligence.branches.base import IntelligenceBranch
 from jobs.portfolio_intelligence.messages import format_breaking_catalyst_message
@@ -30,7 +30,7 @@ class BreakingCatalystBranch(IntelligenceBranch):
                 LLMRequest(
                     prompt=template.render(
                         lookback_hours=context.config.breaking_lookback_hours,
-                        execution_date=datetime.now(timezone.utc).isoformat(),
+                        execution_date=datetime.now(UTC).isoformat(),
                         candidates=json.dumps(
                             [item.to_dict() for item in batch],
                             default=str,
@@ -44,7 +44,7 @@ class BreakingCatalystBranch(IntelligenceBranch):
             if len(rows) != len(batch):
                 raise ValueError("Breaking LLM result count mismatch")
 
-            for source, row in zip(batch, rows):
+            for source, row in zip(batch, rows, strict=True):
                 if row.get("symbol") != source.symbol:
                     raise ValueError("Breaking LLM symbol mismatch")
                 for raw_event in row.get("events") or []:

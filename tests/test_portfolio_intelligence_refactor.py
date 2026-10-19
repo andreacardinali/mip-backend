@@ -21,7 +21,9 @@ class RefactorTests(unittest.TestCase):
 
     def test_deduplicate_keeps_last(self):
         items = [{"id": 1, "v": "a"}, {"id": 2, "v": "b"}, {"id": 1, "v": "c"}]
-        self.assertEqual(deduplicate_by(items, key=lambda x: x["id"]), [items[1], items[2]])
+        self.assertEqual(
+            deduplicate_by(items, key=lambda x: x["id"]), [items[1], items[2]]
+        )
 
     def test_branch_result_becomes_partial(self):
         result = BranchResult(branch="TEST")
@@ -34,15 +36,27 @@ class RefactorTests(unittest.TestCase):
         self.assertEqual(upcoming_catalyst_severity(1, 20), ("CRITICAL", 6))
 
     def test_messages(self):
-        daily = format_daily_mover_message({
-            "symbol": "AAPL", "dailyChangePct": 3.5, "severity": "MEDIUM",
-            "headline": "Move", "explanation": "Why", "recommendedCheck": "Check",
-        })
+        daily = format_daily_mover_message(
+            {
+                "symbol": "AAPL",
+                "dailyChangePct": 3.5,
+                "severity": "MEDIUM",
+                "headline": "Move",
+                "explanation": "Why",
+                "recommendedCheck": "Check",
+            }
+        )
         self.assertIn("+3.50%", daily)
-        breaking = format_breaking_catalyst_message({
-            "symbol": "AAPL", "eventType": "NEWS", "severity": "HIGH",
-            "headline": "Headline", "eventSummary": "Summary", "materialityReason": "Reason",
-        })
+        breaking = format_breaking_catalyst_message(
+            {
+                "symbol": "AAPL",
+                "eventType": "NEWS",
+                "severity": "HIGH",
+                "headline": "Headline",
+                "eventSummary": "Summary",
+                "materialityReason": "Reason",
+            }
+        )
         self.assertIn("BREAKING CATALYST", breaking)
 
 

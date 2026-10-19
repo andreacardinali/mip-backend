@@ -1,25 +1,17 @@
 import json
-import os
 import urllib.parse
 import urllib.request
+
 from config.settings import settings
-from providers.base import (
-    MarketDataProvider
-)
+from providers.base import MarketDataProvider
 
 
-class FMPProvider(
-    MarketDataProvider
-):
+class FMPProvider(MarketDataProvider):
 
     def __init__(self):
         self.api_key = settings.FMP_API_KEY
 
-    def search_symbols(
-        self,
-        query: str,
-        limit: int = 20
-    ):
+    def search_symbols(self, query: str, limit: int = 20):
 
         params = urllib.parse.urlencode(
             {
@@ -29,20 +21,11 @@ class FMPProvider(
             }
         )
 
-        url = (
-            "https://financialmodelingprep.com"
-            "/stable/search-symbol?"
-            + params
-        )
+        url = "https://financialmodelingprep.com" "/stable/search-symbol?" + params
 
-        with urllib.request.urlopen(
-            url,
-            timeout=10
-        ) as response:
+        with urllib.request.urlopen(url, timeout=10) as response:
 
-            payload = json.loads(
-                response.read()
-            )
+            payload = json.loads(response.read())
 
         results = []
 
@@ -50,43 +33,18 @@ class FMPProvider(
 
             results.append(
                 {
-                    "symbol":
-                        item.get(
-                            "symbol"
-                        ),
-
-                    "name":
-                        item.get(
-                            "name"
-                        ),
-
-                    "exchange":
-                        item.get(
-                            "exchange"
-                        ),
-
-                    "exchangeFullName":
-                        item.get(
-                            "exchangeFullName"
-                        ),
-
-                    "currency":
-                        item.get(
-                            "currency"
-                        ),
-
-                    "data_source":
-                        "FINANCIAL_MODELING_PREP",
+                    "symbol": item.get("symbol"),
+                    "name": item.get("name"),
+                    "exchange": item.get("exchange"),
+                    "exchangeFullName": item.get("exchangeFullName"),
+                    "currency": item.get("currency"),
+                    "data_source": "FINANCIAL_MODELING_PREP",
                 }
             )
 
         return results
 
-    def get_profile(
-        self,
-        symbol: str,
-        **kwargs
-    ):
+    def get_profile(self, symbol: str, **kwargs):
 
         params = urllib.parse.urlencode(
             {
@@ -95,20 +53,11 @@ class FMPProvider(
             }
         )
 
-        url = (
-            "https://financialmodelingprep.com"
-            "/stable/profile?"
-            + params
-        )
+        url = "https://financialmodelingprep.com" "/stable/profile?" + params
 
-        with urllib.request.urlopen(
-            url,
-            timeout=10
-        ) as response:
+        with urllib.request.urlopen(url, timeout=10) as response:
 
-            payload = json.loads(
-                response.read()
-            )
+            payload = json.loads(response.read())
 
         if not payload:
 
@@ -117,76 +66,27 @@ class FMPProvider(
         p = payload[0]
 
         return {
-            "symbol":
-                p.get(
-                    "symbol"
-                ),
-
-            "name":
-                p.get(
-                    "companyName"
-                ),
-
-            "currency":
-                p.get(
-                    "currency"
-                ),
-
-            "country":
-                p.get(
-                    "country"
-                ),
-
-            "sector":
-                p.get(
-                    "sector"
-                ),
-
-            "website":
-                p.get(
-                    "website"
-                ),
-
-            "exchange":
-                p.get(
-                    "exchange"
-                ),
-
-            "exchangeFullName":
-                p.get(
-                    "exchangeFullName"
-                ),
-
-            "data_source":
-                "FINANCIAL_MODELING_PREP",
-
-            "_raw":
-                p,
+            "symbol": p.get("symbol"),
+            "name": p.get("companyName"),
+            "currency": p.get("currency"),
+            "country": p.get("country"),
+            "sector": p.get("sector"),
+            "website": p.get("website"),
+            "exchange": p.get("exchange"),
+            "exchangeFullName": p.get("exchangeFullName"),
+            "data_source": "FINANCIAL_MODELING_PREP",
+            "_raw": p,
         }
 
+    def find_symbol_metadata(self, symbol: str):
 
-    def find_symbol_metadata(
-        self,
-        symbol: str
-    ):
-
-        rows = self.search_symbols(
-            symbol,
-            20
-        )
+        rows = self.search_symbols(symbol, 20)
 
         symbol = symbol.upper()
 
         for row in rows:
 
-            if (
-                row.get(
-                    "symbol",
-                    ""
-                ).upper()
-                ==
-                symbol
-            ):
+            if row.get("symbol", "").upper() == symbol:
 
                 return row
 

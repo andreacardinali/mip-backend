@@ -6,7 +6,9 @@ from llm.parsing import parse_json_object
 
 
 class OllamaProvider(LLMProvider):
-    def __init__(self, base_url: str, model: str, timeout: float = 120, max_retries: int = 4) -> None:
+    def __init__(
+        self, base_url: str, model: str, timeout: float = 120, max_retries: int = 4
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.timeout = timeout
@@ -27,7 +29,10 @@ class OllamaProvider(LLMProvider):
                     "think": False,
                     "format": "json",
                     "prompt": request.prompt,
-                    "options": {"temperature": request.temperature, "num_predict": request.max_tokens},
+                    "options": {
+                        "temperature": request.temperature,
+                        "num_predict": request.max_tokens,
+                    },
                 },
             )
             raw = response.json()

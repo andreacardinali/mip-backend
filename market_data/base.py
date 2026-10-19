@@ -12,5 +12,4 @@ class MarketDataProvider(Protocol):
         *,
         period: str,
         interval: str,
-    ) -> list[PriceBar]:
-        ...
+    ) -> list[PriceBar]: ...

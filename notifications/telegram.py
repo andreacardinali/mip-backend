@@ -7,7 +7,6 @@ import httpx
 
 from config.settings import settings
 
-
 TELEGRAM_API_BASE_URL = "https://api.telegram.org"
 TELEGRAM_TEXT_LIMIT = 4096
 DEFAULT_CHUNK_SIZE = 4000
@@ -28,16 +27,13 @@ class TelegramConfig:
     chunk_size: int = DEFAULT_CHUNK_SIZE
 
     @classmethod
-    def for_platform_admin(cls) -> "TelegramConfig":
+    def for_platform_admin(cls) -> TelegramConfig:
         """Load platform-administrator credentials from the master .env."""
         return cls(
             bot_token=_required_setting("TELEGRAM_BOT_TOKEN"),
             chat_id=_required_setting("TELEGRAM_CHAT_ID"),
             timeout=float(settings.get("NOTIFICATION_HTTP_TIMEOUT", 30.0)),
-            parse_mode=(
-                str(settings.get("TELEGRAM_PARSE_MODE", "")).strip()
-                or None
-            ),
+            parse_mode=(str(settings.get("TELEGRAM_PARSE_MODE", "")).strip() or None),
             disable_web_page_preview=_as_bool(
                 settings.get("TELEGRAM_DISABLE_WEB_PAGE_PREVIEW", "true")
             ),
@@ -60,7 +56,7 @@ class TelegramConfig:
         disable_web_page_preview: bool = True,
         disable_notification: bool = False,
         chunk_size: int = DEFAULT_CHUNK_SIZE,
-    ) -> "TelegramConfig":
+    ) -> TelegramConfig:
         """Build credentials originating exclusively from user_sources."""
         clean_token = str(bot_token or "").strip()
         clean_chat_id = str(chat_id or "").strip()
@@ -99,7 +95,7 @@ class TelegramSender:
         self._client = client
 
     @classmethod
-    def for_platform_admin(cls) -> "TelegramSender":
+    def for_platform_admin(cls) -> TelegramSender:
         return cls(TelegramConfig.for_platform_admin())
 
     @classmethod
@@ -113,7 +109,7 @@ class TelegramSender:
         disable_web_page_preview: bool = True,
         disable_notification: bool = False,
         chunk_size: int = DEFAULT_CHUNK_SIZE,
-    ) -> "TelegramSender":
+    ) -> TelegramSender:
         return cls(
             TelegramConfig.for_user_source(
                 bot_token=bot_token,
@@ -214,10 +210,7 @@ class TelegramSender:
         )
 
     def _endpoint(self, method: str) -> str:
-        return (
-            f"{TELEGRAM_API_BASE_URL}/bot"
-            f"{self.config.bot_token}/{method}"
-        )
+        return f"{TELEGRAM_API_BASE_URL}/bot" f"{self.config.bot_token}/{method}"
 
 
 def _required_setting(name: str) -> str:
@@ -231,8 +224,7 @@ def _validated_chunk_size(value: object) -> int:
     chunk_size = int(value)
     if not 1 <= chunk_size <= TELEGRAM_TEXT_LIMIT:
         raise ValueError(
-            "Telegram chunk_size deve essere compreso tra "
-            f"1 e {TELEGRAM_TEXT_LIMIT}"
+            "Telegram chunk_size deve essere compreso tra " f"1 e {TELEGRAM_TEXT_LIMIT}"
         )
     return chunk_size
 

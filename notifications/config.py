@@ -43,8 +43,6 @@ class NotificationConfig:
         if config.retry_base_seconds < 1:
             raise ValueError("NOTIFICATIONS_RETRY_BASE_SECONDS must be >= 1")
         if config.processing_timeout_seconds < 1:
-            raise ValueError(
-                "NOTIFICATIONS_PROCESSING_TIMEOUT_SECONDS must be >= 1"
-            )
+            raise ValueError("NOTIFICATIONS_PROCESSING_TIMEOUT_SECONDS must be >= 1")
 
         return config

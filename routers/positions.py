@@ -1,16 +1,13 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy import text
 
+from auth.security import CurrentUser, get_current_user
 from db import SessionLocal
-
-from auth.security import get_current_user, CurrentUser
 
 router = APIRouter()
 
 
-@router.get(
-    "/portfolio/{portfolio_id}"
-)
+@router.get("/portfolio/{portfolio_id}")
 async def get_positions(
     portfolio_id: str,
     current_user: CurrentUser = Depends(get_current_user),
@@ -31,17 +28,12 @@ async def get_positions(
                 """
             ),
             {
-                "portfolio_id":
-                    portfolio_id,
-                "user_id":
-                    user_id,
+                "portfolio_id": portfolio_id,
+                "user_id": user_id,
             },
         )
 
-        return [
-            dict(row._mapping)
-            for row in rows
-        ]
+        return [dict(row._mapping) for row in rows]
 
     finally:
 
@@ -58,12 +50,7 @@ async def upsert_position(
     db = SessionLocal()
 
     if "instrument_id" not in payload:
-        return {
-            "error":
-                "missing instrument_id",
-            "payload":
-                payload
-        }
+        return {"error": "missing instrument_id", "payload": payload}
 
     try:
 
@@ -83,53 +70,22 @@ async def upsert_position(
                 """
             ),
             {
-                "position_id":
-                    payload.get(
-                        "position_id"
-                    ),
-
-                "portfolio_id":
-                    payload[
-                        "portfolio_id"
-                    ],
-                    
-                "user_id":
-                    user_id,
-
-                "instrument_id":
-                    payload[
-                        "instrument_id"
-                    ],
-
-                "quantity":
-                    payload[
-                        "quantity"
-                    ],
-
-                "avg_price":
-                    payload.get(
-                        "avg_price"
-                    ),
-
-                "opened_at":
-                    payload.get(
-                        "opened_at"
-                    ),
-
-                "notes":
-                    payload.get(
-                        "notes"
-                    ),
+                "position_id": payload.get("position_id"),
+                "portfolio_id": payload["portfolio_id"],
+                "user_id": user_id,
+                "instrument_id": payload["instrument_id"],
+                "quantity": payload["quantity"],
+                "avg_price": payload.get("avg_price"),
+                "opened_at": payload.get("opened_at"),
+                "notes": payload.get("notes"),
             },
         ).scalar()
 
         db.commit()
 
         return {
-            "position_id":
-                str(position_id),
-            "status":
-                "saved",
+            "position_id": str(position_id),
+            "status": "saved",
         }
 
     finally:
@@ -137,9 +93,7 @@ async def upsert_position(
         db.close()
 
 
-@router.delete(
-    "/{position_id}"
-)
+@router.delete("/{position_id}")
 async def delete_position(
     position_id: str,
     current_user: CurrentUser = Depends(get_current_user),
@@ -160,19 +114,14 @@ async def delete_position(
                 """
             ),
             {
-                "position_id":
-                    position_id,
-                "user_id":
-                    user_id,
+                "position_id": position_id,
+                "user_id": user_id,
             },
         ).scalar()
 
         db.commit()
 
-        return {
-            "deleted":
-                deleted
-        }
+        return {"deleted": deleted}
 
     finally:
 

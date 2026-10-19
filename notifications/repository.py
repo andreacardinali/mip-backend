@@ -95,10 +95,14 @@ class NotificationRepository:
         return int(value or 0)
 
     def claim(self, limit: int) -> list[NotificationDelivery]:
-        rows = self.db.execute(
-            text("SELECT * FROM sp_claim_notifications(:limit)"),
-            {"limit": limit},
-        ).mappings().all()
+        rows = (
+            self.db.execute(
+                text("SELECT * FROM sp_claim_notifications(:limit)"),
+                {"limit": limit},
+            )
+            .mappings()
+            .all()
+        )
 
         return [
             NotificationDelivery(

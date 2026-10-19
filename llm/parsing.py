@@ -15,7 +15,7 @@ def parse_json_object(text: str) -> dict:
         end = value.rfind("}")
         if start < 0 or end <= start:
             raise
-        data = json.loads(value[start:end + 1])
+        data = json.loads(value[start : end + 1])
 
     if not isinstance(data, dict):
         raise ValueError("LLM response must be a JSON object")

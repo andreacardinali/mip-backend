@@ -1,6 +1,7 @@
 import logging
+from collections.abc import Callable
 from datetime import date, timedelta
-from typing import Any, Callable
+from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -164,12 +165,8 @@ def run() -> dict[str, Any]:
     )
 
     calendar_from = today.isoformat()
-    calendar_to = (
-        today + timedelta(days=calendar_days)
-    ).isoformat()
-    filing_from = (
-        today - timedelta(days=filing_lookback_days)
-    ).isoformat()
+    calendar_to = (today + timedelta(days=calendar_days)).isoformat()
+    filing_from = (today - timedelta(days=filing_lookback_days)).isoformat()
     filing_to = today.isoformat()
 
     logger.info(
@@ -222,10 +219,7 @@ def run() -> dict[str, Any]:
             ),
         }
 
-    successful = sum(
-        item["status"] == "SUCCESS"
-        for item in sources.values()
-    )
+    successful = sum(item["status"] == "SUCCESS" for item in sources.values())
 
     if successful == len(sources):
         status = "SUCCESS"

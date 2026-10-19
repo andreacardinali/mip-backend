@@ -6,7 +6,6 @@ from auth.security import CurrentUser, get_current_user
 from db import SessionLocal
 from services.entities import RefreshMode, refresh_entities
 
-
 router = APIRouter()
 
 
@@ -32,9 +31,7 @@ class RefreshEntitiesRequest(BaseModel):
     @model_validator(mode="after")
     def validate_request(self):
         if self.mode == RefreshMode.SYMBOL and not self.symbol:
-            raise ValueError(
-                "symbol è obbligatorio quando mode è SYMBOL"
-            )
+            raise ValueError("symbol è obbligatorio quando mode è SYMBOL")
 
         if self.symbol:
             self.symbol = self.symbol.strip().upper()
@@ -49,9 +46,7 @@ async def cleanup_cache(
     db = SessionLocal()
 
     try:
-        deleted = db.execute(
-            text("SELECT sp_cleanup_market_cache(30)")
-        ).scalar()
+        deleted = db.execute(text("SELECT sp_cleanup_market_cache(30)")).scalar()
         db.commit()
         return {"deleted": deleted}
 
@@ -66,9 +61,7 @@ async def cleanup_cache(
 @router.post(
     "/entities/refresh",
     summary="Aggiorna le entities",
-    description=(
-        "Aggiorna una o più entities in base alla modalità richiesta."
-    ),
+    description=("Aggiorna una o più entities in base alla modalità richiesta."),
 )
 def refresh_entities_endpoint(
     payload: RefreshEntitiesRequest,

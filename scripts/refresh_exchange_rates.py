@@ -12,7 +12,9 @@ def _provider():
         timeout=float(settings.get("EXCHANGE_RATES_HTTP_TIMEOUT", 30)),
         retry_policy=RetryPolicy(
             max_retries=int(settings.get("EXCHANGE_RATES_HTTP_MAX_RETRIES", 3)),
-            base_delay_seconds=float(settings.get("EXCHANGE_RATES_HTTP_RETRY_BASE_SECONDS", 1.0)),
+            base_delay_seconds=float(
+                settings.get("EXCHANGE_RATES_HTTP_RETRY_BASE_SECONDS", 1.0)
+            ),
         ),
     )
 

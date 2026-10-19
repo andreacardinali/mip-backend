@@ -9,5 +9,4 @@ class NotificationPlugin(Protocol):
     def send(
         self,
         delivery: NotificationDelivery,
-    ) -> NotificationSendResult:
-        ...
+    ) -> NotificationSendResult: ...

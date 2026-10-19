@@ -12,19 +12,20 @@ def recent_catalysts(
 ) -> dict[str, list[dict[str, Any]]]:
     if not entity_ids:
         return {}
-    rows = db.execute(
-        text(
-            "SELECT * FROM "
-            "sp_get_recent_catalysts(CAST(:ids AS uuid[]), :days)"
-        ),
-        {"ids": entity_ids, "days": days},
-    ).mappings().all()
+    rows = (
+        db.execute(
+            text(
+                "SELECT * FROM " "sp_get_recent_catalysts(CAST(:ids AS uuid[]), :days)"
+            ),
+            {"ids": entity_ids, "days": days},
+        )
+        .mappings()
+        .all()
+    )
 
     result: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
-        result.setdefault(str(row["entity_id"]), []).append(
-            _catalyst_from_row(row)
-        )
+        result.setdefault(str(row["entity_id"]), []).append(_catalyst_from_row(row))
     return result
 
 

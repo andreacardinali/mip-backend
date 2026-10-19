@@ -4,7 +4,6 @@ import httpx
 
 from notifications.models import NotificationDelivery, NotificationSendResult
 
-
 TELEGRAM_API_BASE_URL = "https://api.telegram.org"
 TELEGRAM_TEXT_LIMIT = 4096
 DEFAULT_CHUNK_SIZE = 4000
@@ -21,15 +20,9 @@ class TelegramPlugin:
         delivery: NotificationDelivery,
     ) -> NotificationSendResult:
         config = delivery.source_config
-        token = str(
-            config.get("bot_token")
-            or config.get("token")
-            or ""
-        ).strip()
+        token = str(config.get("bot_token") or config.get("token") or "").strip()
         chat_id = str(
-            config.get("chat_id")
-            or delivery.source_external_id
-            or ""
+            config.get("chat_id") or delivery.source_external_id or ""
         ).strip()
 
         if not token:
@@ -44,12 +37,8 @@ class TelegramPlugin:
             )
 
         parse_mode = str(config.get("parse_mode") or "").strip() or None
-        disable_preview = _as_bool(
-            config.get("disable_web_page_preview", True)
-        )
-        disable_notification = _as_bool(
-            config.get("disable_notification", False)
-        )
+        disable_preview = _as_bool(config.get("disable_web_page_preview", True))
+        disable_notification = _as_bool(config.get("disable_notification", False))
 
         responses: list[dict[str, Any]] = []
         message_ids: list[str] = []
@@ -73,9 +62,7 @@ class TelegramPlugin:
                 result = body.get("result") or {}
                 message_id = result.get("message_id")
                 if message_id is None:
-                    raise RuntimeError(
-                        "Telegram response does not contain message_id"
-                    )
+                    raise RuntimeError("Telegram response does not contain message_id")
                 responses.append(body)
                 message_ids.append(str(message_id))
 

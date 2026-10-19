@@ -57,7 +57,7 @@ class UpcomingCatalystBranch(IntelligenceBranch):
             if len(rows) != len(batch):
                 raise ValueError("Upcoming LLM result count mismatch")
 
-            for source, row in zip(batch, rows):
+            for source, row in zip(batch, rows, strict=True):
                 if row.get("symbol") != source.symbol:
                     raise ValueError("Upcoming LLM symbol mismatch")
                 for raw_event in row.get("events") or []:

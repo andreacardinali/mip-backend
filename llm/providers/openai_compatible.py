@@ -6,7 +6,14 @@ from llm.parsing import parse_json_object
 
 
 class OpenAICompatibleProvider(LLMProvider):
-    def __init__(self, base_url: str, api_key: str, model: str, timeout: float = 60, max_retries: int = 4) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str,
+        model: str,
+        timeout: float = 60,
+        max_retries: int = 4,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model

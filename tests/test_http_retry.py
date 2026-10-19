@@ -9,6 +9,7 @@ class SequenceTransport(httpx.BaseTransport):
     def __init__(self, statuses):
         self.statuses = list(statuses)
         self.calls = 0
+
     def handle_request(self, request):
         status = self.statuses[min(self.calls, len(self.statuses) - 1)]
         self.calls += 1
@@ -20,7 +21,9 @@ class RetryTests(unittest.TestCase):
         transport = SequenceTransport([503, 200])
         with httpx.Client(transport=transport) as client:
             response = request_with_retry(
-                client, "GET", "https://example.test",
+                client,
+                "GET",
+                "https://example.test",
                 policy=RetryPolicy(max_retries=2, jitter_seconds=0),
                 sleep=lambda _: None,
             )
@@ -32,7 +35,9 @@ class RetryTests(unittest.TestCase):
         with httpx.Client(transport=transport) as client:
             with self.assertRaises(httpx.HTTPStatusError):
                 request_with_retry(
-                    client, "POST", "https://example.test",
+                    client,
+                    "POST",
+                    "https://example.test",
                     policy=RetryPolicy(max_retries=2, jitter_seconds=0),
                     sleep=lambda _: None,
                 )
@@ -42,7 +47,9 @@ class RetryTests(unittest.TestCase):
         transport = SequenceTransport([503, 200])
         with httpx.Client(transport=transport) as client:
             response = request_with_retry(
-                client, "POST", "https://example.test",
+                client,
+                "POST",
+                "https://example.test",
                 policy=RetryPolicy(max_retries=2, jitter_seconds=0),
                 retry_non_idempotent=True,
                 sleep=lambda _: None,
@@ -55,11 +62,14 @@ class RetryTests(unittest.TestCase):
         with httpx.Client(transport=transport) as client:
             with self.assertRaises(httpx.HTTPStatusError):
                 request_with_retry(
-                    client, "GET", "https://example.test",
+                    client,
+                    "GET",
+                    "https://example.test",
                     policy=RetryPolicy(max_retries=2, jitter_seconds=0),
                     sleep=lambda _: None,
                 )
         self.assertEqual(transport.calls, 3)
 
 
-if __name__ == "__main__": unittest.main()
+if __name__ == "__main__":
+    unittest.main()

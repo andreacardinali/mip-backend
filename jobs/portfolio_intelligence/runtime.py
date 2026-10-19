@@ -10,7 +10,6 @@ from market_data.factory import create_market_data_service
 from notifications.queue import NotificationQueue
 from prompting.repository import FileSystemPromptRepository
 
-
 PROMPTS_ROOT = Path(__file__).resolve().parent / "prompts"
 
 

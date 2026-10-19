@@ -1,17 +1,16 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy import text
 
+from auth.security import CurrentUser, get_current_user
 from db import SessionLocal
 
-from auth.security import get_current_user, CurrentUser
-
 router = APIRouter()
+
 
 @router.get("")
 async def get_entities(
     current_user: CurrentUser = Depends(get_current_user),
 ):
-    user_id = current_user["user_id"]
     db = SessionLocal()
 
     try:
@@ -27,10 +26,7 @@ async def get_entities(
             )
         )
 
-        return [
-            dict(row._mapping)
-            for row in rows
-        ]
+        return [dict(row._mapping) for row in rows]
 
     finally:
 

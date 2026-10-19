@@ -1,4 +1,4 @@
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from typing import Any
 
 SOURCE = "FMP"
@@ -28,16 +28,12 @@ def normalize_timestamp(value: Any) -> datetime | None:
         return None
 
     try:
-        parsed = datetime.fromisoformat(
-            text.replace("Z", "+00:00")
-        )
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError:
         return None
 
     if parsed.tzinfo is not None:
-        parsed = parsed.astimezone(
-            timezone.utc
-        ).replace(tzinfo=None)
+        parsed = parsed.astimezone(UTC).replace(tzinfo=None)
 
     return parsed
 
@@ -86,9 +82,7 @@ def normalize_dividends(
             continue
 
         try:
-            dividend_yield = float(
-                row.get("yield") or 0
-            )
+            dividend_yield = float(row.get("yield") or 0)
         except (TypeError, ValueError):
             dividend_yield = 0
 
@@ -98,11 +92,7 @@ def normalize_dividends(
                 "entity_subtype": "CASH_DIVIDEND",
                 "entity_date": event_date,
                 "status": "CONFIRMED",
-                "importance": (
-                    "HIGH"
-                    if dividend_yield >= 4
-                    else "MEDIUM"
-                ),
+                "importance": ("HIGH" if dividend_yield >= 4 else "MEDIUM"),
                 "title": f"{symbol} Dividend",
                 "source": SOURCE,
                 "payload": row,
@@ -151,15 +141,9 @@ def normalize_filings_8k(
     for row in rows:
         symbol = normalize_symbol(row.get("symbol"))
         cik = str(row.get("cik") or "").strip()
-        filing_type = str(
-            row.get("formType") or "UNKNOWN"
-        ).strip().upper()
-        filing_date = normalize_date(
-            row.get("filingDate")
-        )
-        accepted_at = normalize_timestamp(
-            row.get("acceptedDate")
-        )
+        filing_type = str(row.get("formType") or "UNKNOWN").strip().upper()
+        filing_date = normalize_date(row.get("filingDate"))
+        accepted_at = normalize_timestamp(row.get("acceptedDate"))
 
         if not all(
             (
@@ -185,10 +169,7 @@ def normalize_filings_8k(
             "cik": cik,
             "filing_date": filing_date,
             "accepted_at": accepted_at,
-            "accession_number": (
-                row.get("accessionNumber")
-                or None
-            ),
+            "accession_number": (row.get("accessionNumber") or None),
             "title": f"{symbol} {filing_type} Filing",
             "source": SOURCE,
             "payload": row,

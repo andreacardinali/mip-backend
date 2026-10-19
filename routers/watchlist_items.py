@@ -1,16 +1,13 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy import text
 
+from auth.security import CurrentUser, get_current_user
 from db import SessionLocal
-
-from auth.security import get_current_user, CurrentUser
 
 router = APIRouter()
 
 
-@router.get(
-    "/{watchlist_id}/items"
-)
+@router.get("/{watchlist_id}/items")
 async def get_watchlist_items(
     watchlist_id: str,
     current_user: CurrentUser = Depends(get_current_user),
@@ -31,17 +28,12 @@ async def get_watchlist_items(
                 """
             ),
             {
-                "watchlist_id":
-                    watchlist_id,
-                "user_id":
-                    user_id,
+                "watchlist_id": watchlist_id,
+                "user_id": user_id,
             },
         )
 
-        return [
-            dict(row._mapping)
-            for row in rows
-        ]
+        return [dict(row._mapping) for row in rows]
 
     finally:
 
@@ -74,45 +66,21 @@ async def upsert_watchlist_item(
                 """
             ),
             {
-                "watchlist_item_id":
-                    payload.get(
-                        "watchlist_item_id"
-                    ),
-
-                "watchlist_id":
-                    payload[
-                        "watchlist_id"
-                    ],
-
-                "user_id":
-                    user_id,
-
-                "entity_id":
-                    payload[
-                        "entity_id"
-                    ],
-                "priority":
-                    payload.get(
-                        "priority"
-                    ),
-                "target_price":
-                    payload.get(
-                        "target_price"
-                    ),
-                "notes":
-                    payload.get(
-                        "notes"
-                    ),
+                "watchlist_item_id": payload.get("watchlist_item_id"),
+                "watchlist_id": payload["watchlist_id"],
+                "user_id": user_id,
+                "entity_id": payload["entity_id"],
+                "priority": payload.get("priority"),
+                "target_price": payload.get("target_price"),
+                "notes": payload.get("notes"),
             },
         ).scalar()
 
         db.commit()
 
         return {
-            "watchlist_item_id":
-                str(item_id),
-            "status":
-                "saved",
+            "watchlist_item_id": str(item_id),
+            "status": "saved",
         }
 
     finally:
@@ -120,9 +88,7 @@ async def upsert_watchlist_item(
         db.close()
 
 
-@router.delete(
-    "/{watchlist_item_id}"
-)
+@router.delete("/{watchlist_item_id}")
 async def delete_watchlist_item(
     watchlist_item_id: str,
     current_user: CurrentUser = Depends(get_current_user),
@@ -142,19 +108,14 @@ async def delete_watchlist_item(
                 """
             ),
             {
-                "watchlist_item_id":
-                    watchlist_item_id,
-                "user_id":
-                    user_id,
+                "watchlist_item_id": watchlist_item_id,
+                "user_id": user_id,
             },
         ).scalar()
 
         db.commit()
 
-        return {
-            "deleted":
-                deleted
-        }
+        return {"deleted": deleted}
 
     finally:
 

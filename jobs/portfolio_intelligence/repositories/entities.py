@@ -8,9 +8,11 @@ from jobs.portfolio_intelligence.models import EntityCandidate
 
 
 def load_candidates(db: Session) -> list[EntityCandidate]:
-    rows = db.execute(
-        text("SELECT * FROM sp_get_intelligence_candidates()")
-    ).mappings().all()
+    rows = (
+        db.execute(text("SELECT * FROM sp_get_intelligence_candidates()"))
+        .mappings()
+        .all()
+    )
     return [_candidate_from_row(row) for row in rows]
 
 

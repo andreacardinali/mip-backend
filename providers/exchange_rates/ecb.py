@@ -11,13 +11,17 @@ ECB_DAILY_RATES_URL = "https://www.ecb.europa.eu/stats/eurofxref/eurofxref-daily
 
 
 class EcbExchangeRateProvider:
-    def __init__(self, *, timeout: float = 30.0, retry_policy: RetryPolicy | None = None) -> None:
+    def __init__(
+        self, *, timeout: float = 30.0, retry_policy: RetryPolicy | None = None
+    ) -> None:
         self.timeout = timeout
         self.retry_policy = retry_policy or RetryPolicy()
 
     def get_latest_rates(self) -> ExchangeRateSnapshot:
         with httpx.Client(timeout=self.timeout, follow_redirects=True) as client:
-            response = request_with_retry(client, "GET", ECB_DAILY_RATES_URL, policy=self.retry_policy)
+            response = request_with_retry(
+                client, "GET", ECB_DAILY_RATES_URL, policy=self.retry_policy
+            )
         return self._parse_xml(response.content)
 
     def _parse_xml(self, payload: bytes) -> ExchangeRateSnapshot:
@@ -34,6 +38,13 @@ class EcbExchangeRateProvider:
         usd_per_eur = eur_rates.get("USD")
         if usd_per_eur is None:
             raise ValueError("ECB response does not contain USD")
-        rates_to_usd = {currency: usd_per_eur / units for currency, units in eur_rates.items()}
+        rates_to_usd = {
+            currency: usd_per_eur / units for currency, units in eur_rates.items()
+        }
         rates_to_usd["USD"] = Decimal("1")
-        return ExchangeRateSnapshot(source="ECB", reference_date=reference_date, base_currency="EUR", rates_to_usd=rates_to_usd)
+        return ExchangeRateSnapshot(
+            source="ECB",
+            reference_date=reference_date,
+            base_currency="EUR",
+            rates_to_usd=rates_to_usd,
+        )

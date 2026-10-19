@@ -22,7 +22,9 @@ class MarketDataConfig:
             provider=str(settings.get("MARKET_DATA_PROVIDER", "yahoo")).strip().lower(),
             http_timeout=float(settings.get("MARKET_DATA_HTTP_TIMEOUT", 30.0)),
             http_max_retries=int(settings.get("MARKET_DATA_HTTP_MAX_RETRIES", 3)),
-            http_retry_base_seconds=float(settings.get("MARKET_DATA_HTTP_RETRY_BASE_SECONDS", 1.0)),
+            http_retry_base_seconds=float(
+                settings.get("MARKET_DATA_HTTP_RETRY_BASE_SECONDS", 1.0)
+            ),
         )
         config.validate()
         return config

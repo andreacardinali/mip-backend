@@ -1,9 +1,12 @@
 from job_runtime.models import JobStatus
-from jobs.portfolio_intelligence.branches.breaking_catalyst import BreakingCatalystBranch
+from jobs.portfolio_intelligence.branches.breaking_catalyst import (
+    BreakingCatalystBranch,
+)
 from jobs.portfolio_intelligence.branches.daily_mover import DailyMoverBranch
-from jobs.portfolio_intelligence.branches.upcoming_catalyst import UpcomingCatalystBranch
+from jobs.portfolio_intelligence.branches.upcoming_catalyst import (
+    UpcomingCatalystBranch,
+)
 from jobs.portfolio_intelligence.runtime import run_branch
-
 
 BRANCHES = (
     DailyMoverBranch(),
