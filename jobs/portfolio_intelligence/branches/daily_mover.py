@@ -1,14 +1,11 @@
 import json
 from datetime import datetime, timezone
-from pathlib import Path
 
 from jobs.portfolio_intelligence.branches.base import IntelligenceBranch
 from llm.evidence import select_sources
 from jobs.portfolio_intelligence.models import BranchResult
 from jobs.portfolio_intelligence.repositories.entities import load_candidates
-from jobs.portfolio_intelligence.scoring.daily_mover import (
-    daily_mover_severity,
-)
+from jobs.portfolio_intelligence.scoring.daily_mover import daily_mover_severity
 from llm.base import LLMRequest
 from market_analysis.technical import analyze_price_bars
 
@@ -20,9 +17,8 @@ class DailyMoverBranch(IntelligenceBranch):
         result = BranchResult(branch=self.name)
         entities = load_candidates(context.db)
         result.candidate_count = len(entities)
-        root = Path(__file__).parent.parent
-        research_tpl = (root / "prompts/daily_research.txt").read_text()
-        validate_tpl = (root / "prompts/daily_validate.txt").read_text()
+        research_template = context.prompts.get("daily_research")
+        validation_template = context.prompts.get("daily_validate")
         accepted = []
 
         for entity in entities:
@@ -34,52 +30,30 @@ class DailyMoverBranch(IntelligenceBranch):
                 )
                 if len(bars) < context.config.min_history_rows:
                     continue
-
                 snapshot = analyze_price_bars(bars)
-                if (
-                    snapshot is None
-                    or abs(snapshot.daily_change_pct)
-                    < context.config.daily_move_min_pct
-                ):
+                if snapshot is None or abs(snapshot.daily_change_pct) < context.config.daily_move_min_pct:
                     continue
-
                 technical_data = snapshot.to_dict()
                 observed = {
                     **entity.to_dict(),
                     **technical_data,
                     "allocationPct": entity.allocation_pct,
-                    "portfolioImpactPct": (
-                        snapshot.daily_change_pct
-                        * entity.allocation_pct
-                        / 100.0
-                    ),
-                    "severity": daily_mover_severity(
-                        snapshot.daily_change_pct,
-                        entity.allocation_pct,
-                    ),
+                    "portfolioImpactPct": snapshot.daily_change_pct * entity.allocation_pct / 100.0,
+                    "severity": daily_mover_severity(snapshot.daily_change_pct, entity.allocation_pct),
                 }
                 research = context.research_llm.generate_json(
                     LLMRequest(
-                        prompt=research_tpl.format(
-                            observed=json.dumps(observed, default=str)
-                        ),
+                        prompt=research_template.render(observed=json.dumps(observed, default=str)),
                         grounded_search=True,
                         max_tokens=4096,
                     )
                 )
                 final = context.validation_llm.generate_json(
                     LLMRequest(
-                        prompt=validate_tpl.format(
+                        prompt=validation_template.render(
                             observed=json.dumps(observed, default=str),
-                            catalyst=json.dumps(
-                                research.data.get("catalyst"),
-                                default=str,
-                            ),
-                            supports=json.dumps(
-                                research.data.get("supports")
-                                or research.sources,
-                                default=str,
-                            ),
+                            catalyst=json.dumps(research.data.get("catalyst"), default=str),
+                            supports=json.dumps(research.data.get("supports") or research.sources, default=str),
                         ),
                         max_tokens=900,
                     )
@@ -87,71 +61,41 @@ class DailyMoverBranch(IntelligenceBranch):
                 data = final.data
                 if data.get("symbol") != entity.symbol:
                     raise ValueError("Validation LLM symbol mismatch")
-
                 cause = bool(data.get("causeFound"))
                 indices = data.get("sourceIndicesUsed") or []
                 if not cause:
-                    data.update(
-                        {
-                            "causeConfidence": 0,
-                            "likelyCause": None,
-                            "sourceIndicesUsed": [],
-                        }
-                    )
-
-                accepted.append(
-                    {
-                        **observed,
-                        **data,
-                        "entity_id": entity.entity_id,
-                        "sourcesUsed": select_sources(
-                            indices,
-                            research.sources,
-                        ),
-                    }
-                )
+                    data.update({"causeConfidence": 0, "likelyCause": None, "sourceIndicesUsed": []})
+                accepted.append({
+                    **observed,
+                    **data,
+                    "entity_id": entity.entity_id,
+                    "sourcesUsed": select_sources(indices, research.sources),
+                })
             except Exception as exc:
                 result.errors.append(f"{entity.symbol}: {exc}")
 
         result.accepted_count = len(accepted)
         try:
             for item in accepted:
-                observed_day = datetime.fromtimestamp(
-                    item["observedDate"],
-                    timezone.utc,
-                ).date().isoformat()
-                notification_key = (
-                    f"DAILY_MOVER|{item['symbol']}|{observed_day}|"
-                    f"{round(item['dailyChangePct'], 1)}"
-                )
+                observed_day = datetime.fromtimestamp(item["observedDate"], timezone.utc).date().isoformat()
+                notification_key = f"DAILY_MOVER|{item['symbol']}|{observed_day}|{round(item['dailyChangePct'], 1)}"
                 sign = "+" if item["dailyChangePct"] > 0 else ""
                 message = (
-                    f"📈 DAILY MOVER\n{item['symbol']} | "
-                    f"{sign}{item['dailyChangePct']:.2f}%\n"
-                    f"Severity: {item['severity']}\n"
-                    f"{item.get('headline', '')}\n"
-                    f"{item.get('explanation', '')}\n"
-                    f"Verifica: {item.get('recommendedCheck', '')}"
+                    f"📈 DAILY MOVER\n{item['symbol']} | {sign}{item['dailyChangePct']:.2f}%\n"
+                    f"Severity: {item['severity']}\n{item.get('headline', '')}\n"
+                    f"{item.get('explanation', '')}\nVerifica: {item.get('recommendedCheck', '')}"
                 )
                 if context.notification_queue.enqueue(
-                    user_id=item["user_id"],
-                    notification_key=notification_key,
-                    notification_type=self.name,
-                    entity_id=item["entity_id"],
-                    symbol=item["symbol"],
-                    event_key=observed_day,
-                    severity=item["severity"],
-                    title=item.get("headline") or notification_key,
-                    message=message,
-                    context=item,
+                    user_id=item["user_id"], notification_key=notification_key,
+                    notification_type=self.name, entity_id=item["entity_id"],
+                    symbol=item["symbol"], event_key=observed_day,
+                    severity=item["severity"], title=item.get("headline") or notification_key,
+                    message=message, context=item,
                 ):
                     result.notification_count += 1
             context.db.commit()
         except Exception as exc:
-            context.db.rollback()
-            result.status = "FAILED"
-            result.errors.append(str(exc))
-
+            context.db.rollback(); result.status = "FAILED"; result.errors.append(str(exc))
         if result.errors and result.status == "SUCCESS":
             result.status = "PARTIAL"
         result.diagnostics = {"entityErrors": len(result.errors)}
@@ -160,5 +104,4 @@ class DailyMoverBranch(IntelligenceBranch):
 
 def run():
     from jobs.portfolio_intelligence.runtime import run_branch
-
     return run_branch(DailyMoverBranch())

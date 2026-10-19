@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from config.settings import settings
 from db import SessionLocal
 from jobs.portfolio_intelligence.config import IntelligenceConfig
@@ -6,6 +8,10 @@ from llm.factory import create_provider
 from market_data.config import MarketDataConfig
 from market_data.factory import create_market_data_service
 from notifications.queue import NotificationQueue
+from prompting.repository import FileSystemPromptRepository
+
+
+PROMPTS_ROOT = Path(__file__).resolve().parent / "prompts"
 
 
 def build_context(db) -> JobContext:
@@ -22,6 +28,7 @@ def build_context(db) -> JobContext:
             db,
             enabled=config.create_notifications,
         ),
+        prompts=FileSystemPromptRepository(PROMPTS_ROOT),
     )
 
 

@@ -6,6 +6,7 @@ from jobs.portfolio_intelligence.config import IntelligenceConfig
 from llm.base import LLMProvider
 from market_data.service import MarketDataService
 from notifications.queue import NotificationQueue
+from prompting.repository import FileSystemPromptRepository
 
 
 @dataclass
@@ -16,3 +17,4 @@ class JobContext:
     validation_llm: LLMProvider
     market_data: MarketDataService
     notification_queue: NotificationQueue
+    prompts: FileSystemPromptRepository

@@ -1,12 +1,11 @@
 import json
 from datetime import date, timedelta
-from pathlib import Path
 
 from jobs.portfolio_intelligence.branches.base import IntelligenceBranch
-from llm.base import LLMRequest
 from jobs.portfolio_intelligence.models import BranchResult
 from jobs.portfolio_intelligence.repositories.catalysts import recent_catalysts
 from jobs.portfolio_intelligence.repositories.entities import load_candidates
+from llm.base import LLMRequest
 
 
 def _batches(items, size):
@@ -41,9 +40,7 @@ class UpcomingCatalystBranch(IntelligenceBranch):
             [candidate.entity_id for candidate in candidates],
             30,
         )
-        template = (
-            Path(__file__).parent.parent / "prompts/upcoming.txt"
-        ).read_text()
+        template = context.prompts.get("upcoming")
         accepted = []
 
         try:
@@ -57,7 +54,7 @@ class UpcomingCatalystBranch(IntelligenceBranch):
                 ]
                 response = context.research_llm.generate_json(
                     LLMRequest(
-                        prompt=template.format(
+                        prompt=template.render(
                             execution_date=today.isoformat(),
                             window_start=today.isoformat(),
                             window_end=end.isoformat(),
@@ -85,33 +82,22 @@ class UpcomingCatalystBranch(IntelligenceBranch):
                             continue
                         days = (event_date - today).days
                         severity, score = _severity(days, source.allocation_pct)
-                        event_key = (
-                            f"{source.symbol}|{event.get('eventType')}|"
-                            f"{event_date.isoformat()}"
-                        )
-                        accepted.append(
-                            {
-                                **event,
-                                "user_id": source.user_id,
-                                "entity_id": source.entity_id,
-                                "symbol": source.symbol,
-                                "name": source.name,
-                                "eventKey": event_key,
-                                "daysUntilEvent": days,
-                                "severity": severity,
-                                "severityScore": score,
-                                "sources": response.sources,
-                            }
-                        )
+                        event_key = f"{source.symbol}|{event.get('eventType')}|{event_date.isoformat()}"
+                        accepted.append({
+                            **event,
+                            "user_id": source.user_id,
+                            "entity_id": source.entity_id,
+                            "symbol": source.symbol,
+                            "name": source.name,
+                            "eventKey": event_key,
+                            "daysUntilEvent": days,
+                            "severity": severity,
+                            "severityScore": score,
+                            "sources": response.sources,
+                        })
 
-            accepted = list(
-                {
-                    (item["user_id"], item["eventKey"]): item
-                    for item in accepted
-                }.values()
-            )
+            accepted = list({(item["user_id"], item["eventKey"]): item for item in accepted}.values())
             result.accepted_count = len(accepted)
-
             for item in accepted:
                 notification_key = f"UPCOMING_CATALYST|{item['eventKey']}"
                 message = (
@@ -122,28 +108,17 @@ class UpcomingCatalystBranch(IntelligenceBranch):
                     f"{item.get('eventSummary', '')}"
                 )
                 if context.notification_queue.enqueue(
-                    user_id=item["user_id"],
-                    notification_key=notification_key,
-                    notification_type=self.name,
-                    entity_id=item["entity_id"],
-                    symbol=item["symbol"],
-                    event_key=item["eventKey"],
-                    severity=item["severity"],
-                    title=item.get("headline") or item["eventKey"],
-                    message=message,
-                    context=item,
+                    user_id=item["user_id"], notification_key=notification_key,
+                    notification_type=self.name, entity_id=item["entity_id"],
+                    symbol=item["symbol"], event_key=item["eventKey"],
+                    severity=item["severity"], title=item.get("headline") or item["eventKey"],
+                    message=message, context=item,
                 ):
                     result.notification_count += 1
-
             context.db.commit()
-            result.diagnostics = {
-                "windowStart": today.isoformat(),
-                "windowEnd": end.isoformat(),
-            }
+            result.diagnostics = {"windowStart": today.isoformat(), "windowEnd": end.isoformat()}
         except Exception as exc:
-            context.db.rollback()
-            result.status = "FAILED"
-            result.errors.append(str(exc))
+            context.db.rollback(); result.status = "FAILED"; result.errors.append(str(exc))
         return result
 
 
