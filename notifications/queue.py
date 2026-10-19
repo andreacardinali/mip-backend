@@ -2,6 +2,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from notifications.models import EnqueueResult, EnqueueStatus
 from notifications.repository import NotificationRepository
 
 
@@ -33,18 +34,17 @@ class NotificationQueue:
         message: str,
         context: dict[str, Any],
         channel: str | None = None,
-    ) -> bool:
+    ) -> EnqueueResult:
         if not self.enabled:
-            return False
+            return EnqueueResult(EnqueueStatus.DISABLED)
 
         selected_channel = (channel or self.default_channel).upper()
         source_id = self.repo.resolve_source_id(
             user_id=user_id,
             channel=selected_channel,
         )
-
         if not source_id:
-            return False
+            return EnqueueResult(EnqueueStatus.SOURCE_NOT_FOUND)
 
         notification_id = self.repo.enqueue(
             user_id=user_id,
@@ -60,4 +60,9 @@ class NotificationQueue:
             message=message,
             context=context,
         )
-        return notification_id is not None
+        if notification_id is None:
+            return EnqueueResult(EnqueueStatus.DUPLICATE)
+        return EnqueueResult(
+            EnqueueStatus.CREATED,
+            notification_id=notification_id,
+        )

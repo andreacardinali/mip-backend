@@ -4,6 +4,11 @@ from datetime import date, timedelta
 from jobs.portfolio_intelligence.branches.base import IntelligenceBranch
 from jobs.portfolio_intelligence.messages import format_upcoming_catalyst_message
 from jobs.portfolio_intelligence.models import BranchResult
+from jobs.portfolio_intelligence.notifications import NotificationDiagnostics
+from jobs.portfolio_intelligence.parsing import (
+    PayloadValidationError,
+    parse_upcoming_event,
+)
 from jobs.portfolio_intelligence.repositories.catalysts import recent_catalysts
 from jobs.portfolio_intelligence.repositories.entities import load_candidates
 from jobs.portfolio_intelligence.scoring import upcoming_catalyst_severity
@@ -51,42 +56,51 @@ class UpcomingCatalystBranch(IntelligenceBranch):
             rows = response.data.get("results") or []
             if len(rows) != len(batch):
                 raise ValueError("Upcoming LLM result count mismatch")
+
             for source, row in zip(batch, rows):
                 if row.get("symbol") != source.symbol:
                     raise ValueError("Upcoming LLM symbol mismatch")
-                for event in row.get("events") or []:
+                for raw_event in row.get("events") or []:
                     try:
-                        event_date = date.fromisoformat(event["eventDate"][:10])
-                        confidence = int(event.get("eventConfidence", 0))
-                    except (KeyError, TypeError, ValueError):
-                        result.add_error(f"{source.symbol}: invalid upcoming event payload")
+                        event = parse_upcoming_event(raw_event)
+                    except PayloadValidationError as exc:
+                        result.add_error(f"{source.symbol}: {exc}")
                         continue
-                    if not today <= event_date <= end or not 0 <= confidence <= 100:
+                    if not today <= event.event_date <= end:
                         continue
-                    days = (event_date - today).days
-                    severity, score = upcoming_catalyst_severity(days, source.allocation_pct)
-                    event_key = f"{source.symbol}|{event.get('eventType')}|{event_date.isoformat()}"
-                    accepted.append({
-                        **event,
-                        "user_id": source.user_id,
-                        "entity_id": source.entity_id,
-                        "symbol": source.symbol,
-                        "name": source.name,
-                        "eventKey": event_key,
-                        "daysUntilEvent": days,
-                        "severity": severity,
-                        "severityScore": score,
-                        "sources": response.sources,
-                    })
+                    days = (event.event_date - today).days
+                    severity, score = upcoming_catalyst_severity(
+                        days,
+                        source.allocation_pct,
+                    )
+                    event_key = (
+                        f"{source.symbol}|{event.event_type}|"
+                        f"{event.event_date.isoformat()}"
+                    )
+                    accepted.append(
+                        {
+                            **event.payload,
+                            "user_id": source.user_id,
+                            "entity_id": source.entity_id,
+                            "symbol": source.symbol,
+                            "name": source.name,
+                            "eventKey": event_key,
+                            "daysUntilEvent": days,
+                            "severity": severity,
+                            "severityScore": score,
+                            "sources": response.sources,
+                        }
+                    )
 
         accepted = deduplicate_by(
             accepted,
             key=lambda item: (item["user_id"], item["eventKey"]),
         )
         result.accepted_count = len(accepted)
+        diagnostics = NotificationDiagnostics()
         for item in accepted:
             notification_key = f"UPCOMING_CATALYST|{item['eventKey']}"
-            if context.notification_queue.enqueue(
+            enqueue_result = context.notification_queue.enqueue(
                 user_id=item["user_id"],
                 notification_key=notification_key,
                 notification_type=self.name,
@@ -97,15 +111,18 @@ class UpcomingCatalystBranch(IntelligenceBranch):
                 title=item.get("headline") or item["eventKey"],
                 message=format_upcoming_catalyst_message(item),
                 context=item,
-            ):
+            )
+            if diagnostics.record(enqueue_result):
                 result.notification_count += 1
         result.diagnostics = {
             "windowStart": today.isoformat(),
             "windowEnd": end.isoformat(),
+            **diagnostics.to_dict(),
         }
         return result
 
 
 def run():
     from jobs.portfolio_intelligence.runtime import run_branch
+
     return run_branch(UpcomingCatalystBranch())

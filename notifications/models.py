@@ -1,5 +1,27 @@
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any
+
+
+class EnqueueStatus(StrEnum):
+    CREATED = "CREATED"
+    DISABLED = "DISABLED"
+    SOURCE_NOT_FOUND = "SOURCE_NOT_FOUND"
+    DUPLICATE = "DUPLICATE"
+
+
+@dataclass(frozen=True, slots=True)
+class EnqueueResult:
+    status: EnqueueStatus
+    notification_id: str | None = None
+
+    @property
+    def created(self) -> bool:
+        return self.status == EnqueueStatus.CREATED
+
+    def __bool__(self) -> bool:
+        """Keep existing boolean callers compatible during migration."""
+        return self.created
 
 
 @dataclass(frozen=True, slots=True)
