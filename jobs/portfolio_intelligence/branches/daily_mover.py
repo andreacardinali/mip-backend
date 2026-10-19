@@ -4,10 +4,13 @@ from pathlib import Path
 
 from jobs.portfolio_intelligence.branches.base import IntelligenceBranch
 from jobs.portfolio_intelligence.evidence.validator import validated_sources
-from jobs.portfolio_intelligence.market.indicators import analyze, severity
 from jobs.portfolio_intelligence.models import BranchResult
 from jobs.portfolio_intelligence.repositories.entities import load_candidates
+from jobs.portfolio_intelligence.scoring.daily_mover import (
+    daily_mover_severity,
+)
 from llm.base import LLMRequest
+from market_analysis.technical import analyze_price_bars
 
 
 class DailyMoverBranch(IntelligenceBranch):
@@ -32,26 +35,26 @@ class DailyMoverBranch(IntelligenceBranch):
                 if len(bars) < context.config.min_history_rows:
                     continue
 
-                rows = [bar.to_dict() for bar in bars]
-                tech = analyze(rows)
+                snapshot = analyze_price_bars(bars)
                 if (
-                    not tech
-                    or abs(tech["dailyChangePct"])
+                    snapshot is None
+                    or abs(snapshot.daily_change_pct)
                     < context.config.daily_move_min_pct
                 ):
                     continue
 
+                technical_data = snapshot.to_dict()
                 observed = {
                     **entity.to_dict(),
-                    **tech,
+                    **technical_data,
                     "allocationPct": entity.allocation_pct,
                     "portfolioImpactPct": (
-                        tech["dailyChangePct"]
+                        snapshot.daily_change_pct
                         * entity.allocation_pct
-                        / 100
+                        / 100.0
                     ),
-                    "severity": severity(
-                        tech["dailyChangePct"],
+                    "severity": daily_mover_severity(
+                        snapshot.daily_change_pct,
                         entity.allocation_pct,
                     ),
                 }
