@@ -2,11 +2,12 @@ import json
 from datetime import datetime, timezone
 
 from jobs.portfolio_intelligence.branches.base import IntelligenceBranch
-from llm.evidence import select_sources
+from jobs.portfolio_intelligence.messages import format_daily_mover_message
 from jobs.portfolio_intelligence.models import BranchResult
 from jobs.portfolio_intelligence.repositories.entities import load_candidates
-from jobs.portfolio_intelligence.scoring.daily_mover import daily_mover_severity
+from jobs.portfolio_intelligence.scoring import daily_mover_severity
 from llm.base import LLMRequest
+from llm.evidence import select_sources
 from market_analysis.technical import analyze_price_bars
 
 
@@ -33,10 +34,9 @@ class DailyMoverBranch(IntelligenceBranch):
                 snapshot = analyze_price_bars(bars)
                 if snapshot is None or abs(snapshot.daily_change_pct) < context.config.daily_move_min_pct:
                     continue
-                technical_data = snapshot.to_dict()
                 observed = {
                     **entity.to_dict(),
-                    **technical_data,
+                    **snapshot.to_dict(),
                     "allocationPct": entity.allocation_pct,
                     "portfolioImpactPct": snapshot.daily_change_pct * entity.allocation_pct / 100.0,
                     "severity": daily_mover_severity(snapshot.daily_change_pct, entity.allocation_pct),
@@ -61,9 +61,8 @@ class DailyMoverBranch(IntelligenceBranch):
                 data = final.data
                 if data.get("symbol") != entity.symbol:
                     raise ValueError("Validation LLM symbol mismatch")
-                cause = bool(data.get("causeFound"))
                 indices = data.get("sourceIndicesUsed") or []
-                if not cause:
+                if not bool(data.get("causeFound")):
                     data.update({"causeConfidence": 0, "likelyCause": None, "sourceIndicesUsed": []})
                 accepted.append({
                     **observed,
@@ -72,32 +71,25 @@ class DailyMoverBranch(IntelligenceBranch):
                     "sourcesUsed": select_sources(indices, research.sources),
                 })
             except Exception as exc:
-                result.errors.append(f"{entity.symbol}: {exc}")
+                result.add_error(f"{entity.symbol}: {exc}")
 
         result.accepted_count = len(accepted)
-        try:
-            for item in accepted:
-                observed_day = datetime.fromtimestamp(item["observedDate"], timezone.utc).date().isoformat()
-                notification_key = f"DAILY_MOVER|{item['symbol']}|{observed_day}|{round(item['dailyChangePct'], 1)}"
-                sign = "+" if item["dailyChangePct"] > 0 else ""
-                message = (
-                    f"📈 DAILY MOVER\n{item['symbol']} | {sign}{item['dailyChangePct']:.2f}%\n"
-                    f"Severity: {item['severity']}\n{item.get('headline', '')}\n"
-                    f"{item.get('explanation', '')}\nVerifica: {item.get('recommendedCheck', '')}"
-                )
-                if context.notification_queue.enqueue(
-                    user_id=item["user_id"], notification_key=notification_key,
-                    notification_type=self.name, entity_id=item["entity_id"],
-                    symbol=item["symbol"], event_key=observed_day,
-                    severity=item["severity"], title=item.get("headline") or notification_key,
-                    message=message, context=item,
-                ):
-                    result.notification_count += 1
-            context.db.commit()
-        except Exception as exc:
-            context.db.rollback(); result.status = "FAILED"; result.errors.append(str(exc))
-        if result.errors and result.status == "SUCCESS":
-            result.status = "PARTIAL"
+        for item in accepted:
+            observed_day = datetime.fromtimestamp(item["observedDate"], timezone.utc).date().isoformat()
+            notification_key = f"DAILY_MOVER|{item['symbol']}|{observed_day}|{round(item['dailyChangePct'], 1)}"
+            if context.notification_queue.enqueue(
+                user_id=item["user_id"],
+                notification_key=notification_key,
+                notification_type=self.name,
+                entity_id=item["entity_id"],
+                symbol=item["symbol"],
+                event_key=observed_day,
+                severity=item["severity"],
+                title=item.get("headline") or notification_key,
+                message=format_daily_mover_message(item),
+                context=item,
+            ):
+                result.notification_count += 1
         result.diagnostics = {"entityErrors": len(result.errors)}
         return result
 

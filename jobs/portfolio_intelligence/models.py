@@ -1,7 +1,10 @@
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-@dataclass
+from job_runtime.models import JobStatus
+
+
+@dataclass(frozen=True, slots=True)
 class EntityCandidate:
     user_id: str
     entity_id: str
@@ -20,15 +23,23 @@ class EntityCandidate:
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
-@dataclass
+
+@dataclass(slots=True)
 class BranchResult:
     branch: str
-    status: str = "SUCCESS"
+    status: JobStatus = JobStatus.SUCCESS
     candidate_count: int = 0
     accepted_count: int = 0
     notification_count: int = 0
     errors: list[str] = field(default_factory=list)
     diagnostics: dict[str, Any] = field(default_factory=dict)
 
+    def add_error(self, message: str) -> None:
+        self.errors.append(message)
+        if self.status == JobStatus.SUCCESS:
+            self.status = JobStatus.PARTIAL
+
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        payload["status"] = self.status.value
+        return payload

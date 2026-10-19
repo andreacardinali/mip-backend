@@ -2,14 +2,12 @@ import json
 from datetime import datetime, timezone
 
 from jobs.portfolio_intelligence.branches.base import IntelligenceBranch
+from jobs.portfolio_intelligence.messages import format_breaking_catalyst_message
 from jobs.portfolio_intelligence.models import BranchResult
 from jobs.portfolio_intelligence.repositories.entities import load_candidates
+from jobs.portfolio_intelligence.scoring import breaking_catalyst_severity
+from jobs.portfolio_intelligence.utils import batched, deduplicate_by
 from llm.base import LLMRequest
-
-
-def _batches(items, size):
-    for index in range(0, len(items), size):
-        yield items[index:index + size]
 
 
 class BreakingCatalystBranch(IntelligenceBranch):
@@ -22,65 +20,72 @@ class BreakingCatalystBranch(IntelligenceBranch):
         template = context.prompts.get("breaking")
         accepted = []
 
-        try:
-            for batch in _batches(candidates, context.config.batch_size):
-                response = context.research_llm.generate_json(
-                    LLMRequest(
-                        prompt=template.render(
-                            lookback_hours=context.config.breaking_lookback_hours,
-                            execution_date=datetime.now(timezone.utc).isoformat(),
-                            candidates=json.dumps([item.to_dict() for item in batch], default=str),
-                        ),
-                        grounded_search=True,
-                        max_tokens=8192,
-                    )
+        for batch in batched(candidates, context.config.batch_size):
+            response = context.research_llm.generate_json(
+                LLMRequest(
+                    prompt=template.render(
+                        lookback_hours=context.config.breaking_lookback_hours,
+                        execution_date=datetime.now(timezone.utc).isoformat(),
+                        candidates=json.dumps([item.to_dict() for item in batch], default=str),
+                    ),
+                    grounded_search=True,
+                    max_tokens=8192,
                 )
-                rows = response.data.get("results") or []
-                if len(rows) != len(batch):
-                    raise ValueError("Breaking LLM result count mismatch")
-                for source, row in zip(batch, rows):
-                    if row.get("symbol") != source.symbol:
-                        raise ValueError("Breaking LLM symbol mismatch")
-                    for event in row.get("events") or []:
+            )
+            rows = response.data.get("results") or []
+            if len(rows) != len(batch):
+                raise ValueError("Breaking LLM result count mismatch")
+            for source, row in zip(batch, rows):
+                if row.get("symbol") != source.symbol:
+                    raise ValueError("Breaking LLM symbol mismatch")
+                for event in row.get("events") or []:
+                    try:
                         confidence = int(event.get("eventConfidence", 0))
-                        if confidence < 60:
-                            continue
-                        fingerprint = str(event.get("eventFingerprint") or "").strip()
-                        day = str(event.get("eventDate") or "")[:10]
-                        if not fingerprint or not day:
-                            continue
-                        event_key = f"{source.symbol}|{event.get('eventType')}|{day}|{fingerprint}"
-                        severity = (
-                            "CRITICAL" if confidence >= 90 and source.allocation_pct >= 20
-                            else "HIGH" if confidence >= 80 else "MEDIUM"
-                        )
-                        accepted.append({
-                            **event, "user_id": source.user_id, "entity_id": source.entity_id,
-                            "symbol": source.symbol, "name": source.name, "eventKey": event_key,
-                            "severity": severity, "sources": response.sources,
-                        })
+                    except (TypeError, ValueError):
+                        result.add_error(f"{source.symbol}: invalid breaking confidence")
+                        continue
+                    if confidence < 60:
+                        continue
+                    fingerprint = str(event.get("eventFingerprint") or "").strip()
+                    day = str(event.get("eventDate") or "")[:10]
+                    if not fingerprint or not day:
+                        result.add_error(f"{source.symbol}: incomplete breaking event identity")
+                        continue
+                    event_key = f"{source.symbol}|{event.get('eventType')}|{day}|{fingerprint}"
+                    accepted.append({
+                        **event,
+                        "user_id": source.user_id,
+                        "entity_id": source.entity_id,
+                        "symbol": source.symbol,
+                        "name": source.name,
+                        "eventKey": event_key,
+                        "severity": breaking_catalyst_severity(confidence, source.allocation_pct),
+                        "sources": response.sources,
+                    })
 
-            accepted = list({(item["user_id"], item["eventKey"]): item for item in accepted}.values())
-            result.accepted_count = len(accepted)
-            for item in accepted:
-                notification_key = f"BREAKING_CATALYST|{item['eventKey']}"
-                message = (
-                    f"⚡ BREAKING CATALYST\n{item['symbol']} | {item.get('eventType')}\n"
-                    f"Severity: {item['severity']}\n{item.get('headline', '')}\n"
-                    f"{item.get('eventSummary', '')}\n{item.get('materialityReason', '')}"
-                )
-                if context.notification_queue.enqueue(
-                    user_id=item["user_id"], notification_key=notification_key,
-                    notification_type=self.name, entity_id=item["entity_id"],
-                    symbol=item["symbol"], event_key=item["eventKey"],
-                    severity=item["severity"], title=item.get("headline") or item["eventKey"],
-                    message=message, context=item,
-                ):
-                    result.notification_count += 1
-            context.db.commit()
-            result.diagnostics = {"lookbackHours": context.config.breaking_lookback_hours}
-        except Exception as exc:
-            context.db.rollback(); result.status = "FAILED"; result.errors.append(str(exc))
+        accepted = deduplicate_by(
+            accepted,
+            key=lambda item: (item["user_id"], item["eventKey"]),
+        )
+        result.accepted_count = len(accepted)
+        for item in accepted:
+            notification_key = f"BREAKING_CATALYST|{item['eventKey']}"
+            if context.notification_queue.enqueue(
+                user_id=item["user_id"],
+                notification_key=notification_key,
+                notification_type=self.name,
+                entity_id=item["entity_id"],
+                symbol=item["symbol"],
+                event_key=item["eventKey"],
+                severity=item["severity"],
+                title=item.get("headline") or item["eventKey"],
+                message=format_breaking_catalyst_message(item),
+                context=item,
+            ):
+                result.notification_count += 1
+        result.diagnostics = {
+            "lookbackHours": context.config.breaking_lookback_hours,
+        }
         return result
 
 

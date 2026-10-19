@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from config.settings import settings
-from db import SessionLocal
+from job_runtime.database import run_transactional
 from jobs.portfolio_intelligence.config import IntelligenceConfig
 from jobs.portfolio_intelligence.context import JobContext
 from llm.factory import create_provider
@@ -16,14 +16,14 @@ PROMPTS_ROOT = Path(__file__).resolve().parent / "prompts"
 
 def build_context(db) -> JobContext:
     config = IntelligenceConfig.load()
-    market_data_config = MarketDataConfig.from_settings(settings)
-
     return JobContext(
         db=db,
         config=config,
         research_llm=create_provider(config.research_llm),
         validation_llm=create_provider(config.validation_llm),
-        market_data=create_market_data_service(market_data_config),
+        market_data=create_market_data_service(
+            MarketDataConfig.from_settings(settings)
+        ),
         notification_queue=NotificationQueue(
             db,
             enabled=config.create_notifications,
@@ -33,14 +33,8 @@ def build_context(db) -> JobContext:
 
 
 def run_branch(branch) -> dict:
-    db = SessionLocal()
-    try:
-        context = build_context(db)
-        result = branch.execute(context)
-        db.commit()
+    def operation(db):
+        result = branch.execute(build_context(db))
         return result.to_dict()
-    except Exception:
-        db.rollback()
-        raise
-    finally:
-        db.close()
+
+    return run_transactional(operation)
