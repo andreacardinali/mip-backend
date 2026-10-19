@@ -28,9 +28,8 @@ class IntelligenceConfig:
     breaking_lookback_hours: int
     daily_move_min_pct: float
     min_history_rows: int
-    yahoo_range: str
-    yahoo_interval: str
-    market_data_timeout: float
+    history_range: str
+    history_interval: str
 
     @classmethod
     def load(cls) -> "IntelligenceConfig":
@@ -47,22 +46,37 @@ class IntelligenceConfig:
                 default_provider="ollama",
                 default_timeout=120.0,
             ),
-            create_notifications=_b("INTELLIGENCE_CREATE_NOTIFICATIONS", False),
+            create_notifications=_b(
+                "INTELLIGENCE_CREATE_NOTIFICATIONS",
+                False,
+            ),
             batch_size=_i("INTELLIGENCE_BATCH_SIZE", 4),
-            upcoming_window_days=_i("UPCOMING_CATALYST_WINDOW_DAYS", 7),
-            breaking_lookback_hours=_i("BREAKING_CATALYST_LOOKBACK_HOURS", 24),
+            upcoming_window_days=_i(
+                "UPCOMING_CATALYST_WINDOW_DAYS",
+                7,
+            ),
+            breaking_lookback_hours=_i(
+                "BREAKING_CATALYST_LOOKBACK_HOURS",
+                24,
+            ),
             daily_move_min_pct=_f("DAILY_MOVE_MIN_PCT", 3.0),
             min_history_rows=_i("MIN_HISTORY_ROWS", 50),
-            yahoo_range=settings.get("YAHOO_HISTORY_RANGE", "2y"),
-            yahoo_interval=settings.get("YAHOO_HISTORY_INTERVAL", "1d"),
-            market_data_timeout=_f("MARKET_DATA_HTTP_TIMEOUT", 30.0),
+            history_range=settings.get("YAHOO_HISTORY_RANGE", "2y"),
+            history_interval=settings.get(
+                "YAHOO_HISTORY_INTERVAL",
+                "1d",
+            ),
         )
-        if config.market_data_timeout <= 0:
-            raise ValueError("MARKET_DATA_HTTP_TIMEOUT must be > 0")
+
         if config.batch_size < 1:
             raise ValueError("INTELLIGENCE_BATCH_SIZE must be >= 1")
         if not 1 <= config.upcoming_window_days <= 30:
             raise ValueError(
                 "UPCOMING_CATALYST_WINDOW_DAYS must be between 1 and 30"
             )
+        if not str(config.history_range or "").strip():
+            raise ValueError("YAHOO_HISTORY_RANGE cannot be empty")
+        if not str(config.history_interval or "").strip():
+            raise ValueError("YAHOO_HISTORY_INTERVAL cannot be empty")
+
         return config

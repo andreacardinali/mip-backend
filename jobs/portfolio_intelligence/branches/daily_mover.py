@@ -4,11 +4,10 @@ from pathlib import Path
 
 from jobs.portfolio_intelligence.branches.base import IntelligenceBranch
 from jobs.portfolio_intelligence.evidence.validator import validated_sources
-from llm.base import LLMRequest
 from jobs.portfolio_intelligence.market.indicators import analyze, severity
-from jobs.portfolio_intelligence.market.yahoo import load_history
 from jobs.portfolio_intelligence.models import BranchResult
 from jobs.portfolio_intelligence.repositories.entities import load_candidates
+from llm.base import LLMRequest
 
 
 class DailyMoverBranch(IntelligenceBranch):
@@ -25,26 +24,35 @@ class DailyMoverBranch(IntelligenceBranch):
 
         for entity in entities:
             try:
-                rows = load_history(
+                bars = context.market_data.get_history(
                     entity.symbol,
-                    context.config.yahoo_range,
-                    context.config.yahoo_interval,
-                    context.config.market_data_timeout,
+                    period=context.config.history_range,
+                    interval=context.config.history_interval,
                 )
-                if len(rows) < context.config.min_history_rows:
+                if len(bars) < context.config.min_history_rows:
                     continue
+
+                rows = [bar.to_dict() for bar in bars]
                 tech = analyze(rows)
-                if not tech or abs(tech["dailyChangePct"]) < context.config.daily_move_min_pct:
+                if (
+                    not tech
+                    or abs(tech["dailyChangePct"])
+                    < context.config.daily_move_min_pct
+                ):
                     continue
+
                 observed = {
                     **entity.to_dict(),
                     **tech,
                     "allocationPct": entity.allocation_pct,
                     "portfolioImpactPct": (
-                        tech["dailyChangePct"] * entity.allocation_pct / 100
+                        tech["dailyChangePct"]
+                        * entity.allocation_pct
+                        / 100
                     ),
                     "severity": severity(
-                        tech["dailyChangePct"], entity.allocation_pct
+                        tech["dailyChangePct"],
+                        entity.allocation_pct,
                     ),
                 }
                 research = context.research_llm.generate_json(
@@ -61,10 +69,12 @@ class DailyMoverBranch(IntelligenceBranch):
                         prompt=validate_tpl.format(
                             observed=json.dumps(observed, default=str),
                             catalyst=json.dumps(
-                                research.data.get("catalyst"), default=str
+                                research.data.get("catalyst"),
+                                default=str,
                             ),
                             supports=json.dumps(
-                                research.data.get("supports") or research.sources,
+                                research.data.get("supports")
+                                or research.sources,
                                 default=str,
                             ),
                         ),
@@ -74,6 +84,7 @@ class DailyMoverBranch(IntelligenceBranch):
                 data = final.data
                 if data.get("symbol") != entity.symbol:
                     raise ValueError("Validation LLM symbol mismatch")
+
                 cause = bool(data.get("causeFound"))
                 indices = data.get("sourceIndicesUsed") or []
                 if not cause:
@@ -84,12 +95,16 @@ class DailyMoverBranch(IntelligenceBranch):
                             "sourceIndicesUsed": [],
                         }
                     )
+
                 accepted.append(
                     {
                         **observed,
                         **data,
                         "entity_id": entity.entity_id,
-                        "sourcesUsed": validated_sources(indices, research.sources),
+                        "sourcesUsed": validated_sources(
+                            indices,
+                            research.sources,
+                        ),
                     }
                 )
             except Exception as exc:
@@ -99,7 +114,8 @@ class DailyMoverBranch(IntelligenceBranch):
         try:
             for item in accepted:
                 observed_day = datetime.fromtimestamp(
-                    item["observedDate"], timezone.utc
+                    item["observedDate"],
+                    timezone.utc,
                 ).date().isoformat()
                 notification_key = (
                     f"DAILY_MOVER|{item['symbol']}|{observed_day}|"
@@ -141,4 +157,5 @@ class DailyMoverBranch(IntelligenceBranch):
 
 def run():
     from jobs.portfolio_intelligence.runtime import run_branch
+
     return run_branch(DailyMoverBranch())
