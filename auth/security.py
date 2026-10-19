@@ -20,6 +20,7 @@ class CurrentUser(TypedDict):
     email: str
     is_active: bool
 
+
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
 
