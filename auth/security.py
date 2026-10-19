@@ -18,7 +18,7 @@ class CurrentUser(TypedDict):
     user_id: str
     username: str
     email: str
-
+    is_active: bool
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
@@ -69,10 +69,15 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> CurrentUser:
         ).first()
 
         if not row:
-
             raise HTTPException(
                 status_code=401,
                 detail="User not found",
+            )
+
+        if not row.is_active:
+            raise HTTPException(
+                status_code=403,
+                detail="User is inactive",
             )
 
         return dict(row._mapping)
