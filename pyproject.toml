@@ -9,3 +9,9 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 ignore = ["E501"]
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = ["fastapi.Depends"]
+
+[tool.ruff.lint.per-file-ignores]
+"job_runtime/database.py" = ["UP047"]
+"jobs/portfolio_intelligence/utils/collections.py" = ["UP047"]

@@ -1,7 +1,0 @@
-Replace in jobs/portfolio_intelligence/branches/breaking_catalyst.py:
-
-from jobs.portfolio_intelligence.llm.base import LLMRequest
-
-with:
-
-from llm.base import LLMRequest
