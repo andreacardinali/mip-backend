@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from jobs.portfolio_intelligence.branches.base import IntelligenceBranch
-from jobs.portfolio_intelligence.evidence.validator import validated_sources
+from llm.evidence import select_sources
 from jobs.portfolio_intelligence.models import BranchResult
 from jobs.portfolio_intelligence.repositories.entities import load_candidates
 from jobs.portfolio_intelligence.scoring.daily_mover import (
@@ -104,7 +104,7 @@ class DailyMoverBranch(IntelligenceBranch):
                         **observed,
                         **data,
                         "entity_id": entity.entity_id,
-                        "sourcesUsed": validated_sources(
+                        "sourcesUsed": select_sources(
                             indices,
                             research.sources,
                         ),
