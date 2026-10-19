@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from sqlalchemy.orm import Session
 
 from jobs.portfolio_intelligence.config import IntelligenceConfig
-from jobs.portfolio_intelligence.llm.base import LLMProvider
+from llm.base import LLMProvider
 from notifications.queue import NotificationQueue
 
 

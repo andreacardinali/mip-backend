@@ -3,7 +3,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from jobs.portfolio_intelligence.branches.base import IntelligenceBranch
-from jobs.portfolio_intelligence.llm.base import LLMRequest
+from llm.base import LLMRequest
 from jobs.portfolio_intelligence.models import BranchResult
 from jobs.portfolio_intelligence.repositories.catalysts import recent_catalysts
 from jobs.portfolio_intelligence.repositories.entities import load_candidates

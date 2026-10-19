@@ -1,10 +1,7 @@
 from db import SessionLocal
 from jobs.portfolio_intelligence.config import IntelligenceConfig
 from jobs.portfolio_intelligence.context import JobContext
-from jobs.portfolio_intelligence.llm.factory import (
-    create_research_provider,
-    create_validation_provider,
-)
+from llm.factory import create_provider
 from notifications.queue import NotificationQueue
 
 
@@ -13,8 +10,8 @@ def build_context(db) -> JobContext:
     return JobContext(
         db=db,
         config=config,
-        research_llm=create_research_provider(config),
-        validation_llm=create_validation_provider(config),
+        research_llm=create_provider(config.research_llm),
+        validation_llm=create_provider(config.validation_llm),
         notification_queue=NotificationQueue(
             db,
             enabled=config.create_notifications,

@@ -4,7 +4,7 @@ from pathlib import Path
 
 from jobs.portfolio_intelligence.branches.base import IntelligenceBranch
 from jobs.portfolio_intelligence.evidence.validator import validated_sources
-from jobs.portfolio_intelligence.llm.base import LLMRequest
+from llm.base import LLMRequest
 from jobs.portfolio_intelligence.market.indicators import analyze, severity
 from jobs.portfolio_intelligence.market.yahoo import load_history
 from jobs.portfolio_intelligence.models import BranchResult

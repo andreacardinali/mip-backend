@@ -1,0 +1,7 @@
+Replace in jobs/portfolio_intelligence/branches/daily_mover.py:
+
+from jobs.portfolio_intelligence.llm.base import LLMRequest
+
+with:
+
+from llm.base import LLMRequest
