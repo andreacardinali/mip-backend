@@ -2,6 +2,7 @@ import json
 from datetime import UTC, datetime
 
 from job_runtime.collections import batched, deduplicate_by
+from jobs.portfolio_intelligence.batching import matched_batch_rows
 from jobs.portfolio_intelligence.messages import format_breaking_catalyst_message
 from jobs.portfolio_intelligence.models import BranchResult
 from jobs.portfolio_intelligence.parsing import (
@@ -39,13 +40,11 @@ class BreakingCatalystBranch:
                     max_tokens=8192,
                 )
             )
-            rows = response.data.get("results") or []
-            if len(rows) != len(batch):
-                raise ValueError("Breaking LLM result count mismatch")
-
-            for source, row in zip(batch, rows, strict=True):
-                if row.get("symbol") != source.symbol:
-                    raise ValueError("Breaking LLM symbol mismatch")
+            for source, row in matched_batch_rows(
+                batch,
+                response.data,
+                label="Breaking",
+            ):
                 for raw_event in row.get("events") or []:
                     try:
                         event = parse_breaking_event(raw_event)

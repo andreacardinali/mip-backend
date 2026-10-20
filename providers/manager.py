@@ -10,27 +10,28 @@ class MarketDataManager:
 
         self.fmp = FMPProvider()
 
-    #
-    # SEARCH
-    #
-    # Ghostfolio only
-    #
-
     def search_symbols(self, query, limit=20):
 
         return self.ghostfolio.search_symbols(query, limit)
 
-    #
-    # PROFILE
-    #
-    # Ghostfolio profile
-    # +
-    # FMP exchange metadata
-    #
+    def get_profile(
+        self,
+        symbol,
+        data_source="YAHOO",
+        full_refresh=False,
+        require_price=True,
+        **kwargs,
+    ):
 
-    def get_profile(self, symbol, full_refresh=False, **kwargs):
+        profile = self.ghostfolio.refresh_and_get_profile(
+            symbol,
+            data_source=data_source,
+            require_price=require_price,
+            **kwargs,
+        )
 
-        profile = self.ghostfolio.refresh_and_get_profile(symbol, **kwargs)
+        if not profile:
+            return None
 
         if full_refresh:
 

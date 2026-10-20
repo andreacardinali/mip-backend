@@ -47,8 +47,6 @@ async def upsert_watchlist(
 
     try:
 
-        user_id = "5fc35381-dfbf-4d67-8c4e-479bb279542b"
-
         watchlist_id = db.execute(
             text(
                 """

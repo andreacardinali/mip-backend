@@ -2,6 +2,7 @@ import json
 from datetime import date, timedelta
 
 from job_runtime.collections import batched, deduplicate_by
+from jobs.portfolio_intelligence.batching import matched_batch_rows
 from jobs.portfolio_intelligence.messages import format_upcoming_catalyst_message
 from jobs.portfolio_intelligence.models import BranchResult
 from jobs.portfolio_intelligence.parsing import (
@@ -52,13 +53,11 @@ class UpcomingCatalystBranch:
                     max_tokens=8192,
                 )
             )
-            rows = response.data.get("results") or []
-            if len(rows) != len(batch):
-                raise ValueError("Upcoming LLM result count mismatch")
-
-            for source, row in zip(batch, rows, strict=True):
-                if row.get("symbol") != source.symbol:
-                    raise ValueError("Upcoming LLM symbol mismatch")
+            for source, row in matched_batch_rows(
+                batch,
+                response.data,
+                label="Upcoming",
+            ):
                 for raw_event in row.get("events") or []:
                     try:
                         event = parse_upcoming_event(raw_event)
