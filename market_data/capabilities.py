@@ -10,6 +10,7 @@ class MarketDataCapability(StrEnum):
     LIVE_PRICE = "live_price"
     PRICE_HISTORY = "price_history"
     OHLCV = "ohlcv"
+    EXCHANGE_RATES = "exchange_rates"
 
 
 class InstrumentType(StrEnum):

@@ -5,6 +5,7 @@ from market_data.capabilities import (
 )
 from market_data.config import MarketDataConfig
 from market_data.models import (
+    ExchangeRateSnapshot,
     HistoryRequest,
     InstrumentProfile,
     InstrumentReference,
@@ -16,6 +17,7 @@ from market_data.models import (
 from market_data.service import MarketDataService
 
 __all__ = [
+    "ExchangeRateSnapshot",
     "HistoryRequest",
     "InstrumentProfile",
     "InstrumentReference",

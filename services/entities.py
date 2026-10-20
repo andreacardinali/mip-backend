@@ -8,7 +8,7 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from providers.manager import market_data
+from market_data.factory import market_data
 
 logger = logging.getLogger(__name__)
 ProgressCallback = Callable[[dict[str, Any]], None]

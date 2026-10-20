@@ -1,4 +1,6 @@
 from dataclasses import asdict, dataclass, field, replace
+from datetime import date
+from decimal import Decimal
 from typing import Any
 
 from market_data.capabilities import InstrumentType
@@ -157,3 +159,11 @@ class ExchangeReference:
     timezone: str | None = None
     source: str | None = None
     provider_code: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ExchangeRateSnapshot:
+    source: str
+    reference_date: date
+    base_currency: str
+    rates_to_usd: dict[str, Decimal]

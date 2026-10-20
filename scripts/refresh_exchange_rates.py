@@ -1,28 +1,17 @@
 import json
 
-from config.settings import settings
 from db import SessionLocal
-from http_client.retry import RetryPolicy
-from providers.exchange_rates.ecb import EcbExchangeRateProvider
+from market_data.factory import market_data
 from services.exchange_rates import refresh_exchange_rates
-
-
-def _provider():
-    return EcbExchangeRateProvider(
-        timeout=float(settings.get("EXCHANGE_RATES_HTTP_TIMEOUT", 30)),
-        retry_policy=RetryPolicy(
-            max_retries=int(settings.get("EXCHANGE_RATES_HTTP_MAX_RETRIES", 3)),
-            base_delay_seconds=float(
-                settings.get("EXCHANGE_RATES_HTTP_RETRY_BASE_SECONDS", 1.0)
-            ),
-        ),
-    )
 
 
 def main() -> int:
     db = SessionLocal()
     try:
-        result = refresh_exchange_rates(db, provider=_provider())
+        result = refresh_exchange_rates(
+            db,
+            market_data_service=market_data,
+        )
         db.commit()
         print(json.dumps(result, indent=2, default=str))
         return 1 if result["status"] == "FAILED" else 0

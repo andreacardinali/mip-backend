@@ -16,6 +16,7 @@ DEFAULT_ORDERS = {
     MarketDataCapability.LIVE_PRICE: ("eulerpool", "yahoo", "ghostfolio"),
     MarketDataCapability.PRICE_HISTORY: ("eulerpool", "yahoo"),
     MarketDataCapability.OHLCV: ("eulerpool", "yahoo"),
+    MarketDataCapability.EXCHANGE_RATES: ("ecb",),
 }
 
 

@@ -5,7 +5,7 @@ from sqlalchemy import text
 
 from auth.security import CurrentUser, get_current_user
 from db import SessionLocal
-from providers.manager import market_data
+from market_data.factory import market_data
 from services.market_price_refresh import enqueue_price_refresh
 
 router = APIRouter()

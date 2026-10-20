@@ -5,7 +5,7 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from providers.exchange_rates.base import ExchangeRateProvider
+from market_data.service import MarketDataService
 
 logger = logging.getLogger(__name__)
 
@@ -13,9 +13,9 @@ logger = logging.getLogger(__name__)
 def refresh_exchange_rates(
     db: Session,
     *,
-    provider: ExchangeRateProvider,
+    market_data_service: MarketDataService,
 ) -> dict[str, Any]:
-    snapshot = provider.get_latest_rates()
+    snapshot = market_data_service.get_exchange_rates()
     updated = 0
     errors: list[dict[str, str]] = []
 

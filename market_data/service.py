@@ -7,9 +7,11 @@ from market_data.exceptions import (
     AllProvidersFailedError,
     CapabilityUnavailableError,
     InstrumentNotFoundError,
+    InvalidProviderResponseError,
     ProviderTemporaryError,
 )
 from market_data.models import (
+    ExchangeRateSnapshot,
     HistoryRequest,
     InstrumentProfile,
     InstrumentReference,
@@ -60,6 +62,7 @@ class MarketDataService:
             except (
                 CapabilityUnavailableError,
                 InstrumentNotFoundError,
+                InvalidProviderResponseError,
                 ProviderTemporaryError,
             ) as error:
                 failures.append((provider.name, error))
@@ -84,14 +87,10 @@ class MarketDataService:
 
         profile = _merge_profiles(profiles)
         if include_quote:
-            quote = self.get_quote(
-                reference,
-                required=False,
-            )
+            quote = self.get_quote(reference, required=False)
 
             if quote:
                 quote_source = quote.source or "unknown"
-
                 profile = profile.with_fields(
                     last_price=quote.price,
                     price_timestamp=quote.timestamp,
@@ -127,6 +126,18 @@ class MarketDataService:
             interval=request.interval,
         )
 
+    def get_exchange_rates(
+        self,
+        *,
+        required: bool = True,
+    ) -> ExchangeRateSnapshot | None:
+        return self._first(
+            MarketDataCapability.EXCHANGE_RATES,
+            InstrumentType.UNKNOWN,
+            lambda provider: provider.get_exchange_rates(),
+            required=required,
+        )
+
     def _ordered(self, capability, instrument_type, interval=None):
         result = []
         for name in self.config.provider_orders[capability]:
@@ -134,7 +145,8 @@ class MarketDataService:
                 provider = self.registry.get(name)
             except ValueError:
                 logger.warning(
-                    "Configured market-data provider is not registered capability=%s provider=%s",
+                    "Configured market-data provider is not registered "
+                    "capability=%s provider=%s",
                     capability.value,
                     name,
                 )
@@ -173,6 +185,7 @@ class MarketDataService:
             except (
                 CapabilityUnavailableError,
                 InstrumentNotFoundError,
+                InvalidProviderResponseError,
                 ProviderTemporaryError,
             ) as error:
                 failures.append((provider.name, error))

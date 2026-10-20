@@ -1,11 +1,10 @@
-from io import BytesIO
-from urllib.error import HTTPError
+import httpx
 
 from market_data.capabilities import InstrumentType
 from market_data.exceptions import CapabilityUnavailableError
 from market_data.models import InstrumentReference
 from market_data.providers.eulerpool import EulerpoolProvider
-from market_data.providers.fmp import _normalize_transport_error
+from market_data.providers.fmp import _normalize_http_error
 
 
 class FakeEulerpoolProvider(EulerpoolProvider):
@@ -55,12 +54,12 @@ def test_equity_profile_resolves_primary_exchange():
 
 
 def test_fmp_402_is_capability_unavailable():
-    error = HTTPError(
-        url="https://example.invalid",
-        code=402,
-        msg="Payment Required",
-        hdrs=None,
-        fp=BytesIO(b""),
+    request = httpx.Request("GET", "https://example.invalid")
+    response = httpx.Response(402, request=request)
+    error = httpx.HTTPStatusError(
+        "Payment Required",
+        request=request,
+        response=response,
     )
-    normalized = _normalize_transport_error(error)
+    normalized = _normalize_http_error(error)
     assert isinstance(normalized, CapabilityUnavailableError)
