@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict 5nRBOc84QiHdZWnU56G3Yy4PXeiTB38aYuGFSrc1NwyMeYqJ8Um9BNnSXSiByUa
+\restrict yE14FeKF0lylwIzZOsdDMpuHTkbpnTuvg5m7gI1p89wv04RsguZBwPxscgZGdSj
 
 -- Dumped from database version 18.6 (Debian 18.6-1.pgdg13+2)
 -- Dumped by pg_dump version 18.6 (Debian 18.6-1.pgdg13+2)
@@ -149,6 +149,29 @@ BEGIN
         / v_to_rate;
 END;
 $$;
+
+
+--
+-- Name: sp_apply_instrument_reference_metadata(uuid, jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_apply_instrument_reference_metadata(p_instrument_id uuid, p_payload jsonb) RETURNS void
+    LANGUAGE plpgsql
+    AS $$
+DECLARE v_figi varchar(20); v_exch varchar(50);
+BEGIN
+ v_figi:=NULLIF(UPPER(TRIM(p_payload->>'figi')),'');
+ v_exch:=NULLIF(UPPER(TRIM(COALESCE(p_payload->>'openfigi_exch_code',CASE WHEN UPPER(TRIM(p_payload->>'metadata_source'))='OPENFIGI' THEN p_payload->>'exchange' END))),'');
+ IF v_figi IS NOT NULL AND EXISTS(SELECT 1 FROM instruments x WHERE x.figi=v_figi AND x.instrument_id<>p_instrument_id) THEN v_figi:=NULL; END IF;
+ UPDATE instruments SET
+  exchange=COALESCE(v_exch,exchange), openfigi_exch_code=COALESCE(v_exch,openfigi_exch_code),
+  figi=COALESCE(v_figi,figi), figi_composite=COALESCE(NULLIF(UPPER(TRIM(p_payload->>'figi_composite')),''),figi_composite),
+  figi_share_class=COALESCE(NULLIF(UPPER(TRIM(p_payload->>'figi_share_class')),''),figi_share_class),
+  market_sector=COALESCE(NULLIF(TRIM(p_payload->>'market_sector'),''),market_sector),
+  metadata_source=COALESCE(NULLIF(UPPER(TRIM(p_payload->>'metadata_source')),''),metadata_source),
+  metadata_refreshed_at=CASE WHEN NULLIF(TRIM(p_payload->>'metadata_source'),'') IS NOT NULL THEN now() ELSE metadata_refreshed_at END
+ WHERE instrument_id=p_instrument_id;
+END; $$;
 
 
 --
@@ -671,71 +694,11 @@ CREATE FUNCTION public.sp_get_entities_for_refresh(p_mode character varying DEFA
     LANGUAGE plpgsql
     AS $$
 BEGIN
-
-    IF UPPER(p_mode) NOT IN (
-        'MISSING',
-        'ALL',
-        'SYMBOL'
-    ) THEN
-        RAISE EXCEPTION
-            'Invalid refresh mode: %',
-            p_mode;
-    END IF;
-
-    IF (
-        UPPER(p_mode) = 'SYMBOL'
-        AND NULLIF(TRIM(p_symbol), '') IS NULL
-    ) THEN
-        RAISE EXCEPTION
-            'p_symbol is required when p_mode is SYMBOL';
-    END IF;
-
-    RETURN QUERY
-
-    SELECT
-        e.entity_id,
-        i.instrument_id,
-        i.symbol
-
-    FROM entities e
-
-    JOIN instruments i
-      ON i.entity_id = e.entity_id
-
-    WHERE
-        e.active = TRUE
-
-        AND
-        (
-            (
-                UPPER(p_mode) = 'MISSING'
-                AND
-                (
-                    UPPER(e.name) =
-                    UPPER(i.symbol)
-
-                    OR e.country_code IS NULL
-                    OR i.currency_code IS NULL
-                    OR i.data_source IS NULL
-                )
-            )
-
-            OR UPPER(p_mode) = 'ALL'
-
-            OR
-            (
-                UPPER(p_mode) = 'SYMBOL'
-                AND UPPER(i.symbol) =
-                    UPPER(TRIM(p_symbol))
-            )
-        )
-
-    ORDER BY
-        i.symbol,
-        i.instrument_id;
-
-END;
-$$;
+ IF UPPER(p_mode) NOT IN('MISSING','ALL','SYMBOL') THEN RAISE EXCEPTION 'Invalid refresh mode: %',p_mode; END IF;
+ IF UPPER(p_mode)='SYMBOL' AND NULLIF(TRIM(p_symbol),'') IS NULL THEN RAISE EXCEPTION 'p_symbol is required when p_mode is SYMBOL'; END IF;
+ RETURN QUERY SELECT e.entity_id,i.instrument_id,i.symbol FROM entities e JOIN instruments i ON i.entity_id=e.entity_id
+ WHERE e.active=TRUE AND ((UPPER(p_mode)='MISSING' AND (UPPER(e.name)=UPPER(i.symbol) OR e.country_code IS NULL OR i.currency_code IS NULL OR i.data_source IS NULL OR i.figi IS NULL OR i.openfigi_exch_code IS NULL)) OR UPPER(p_mode)='ALL' OR (UPPER(p_mode)='SYMBOL' AND UPPER(i.symbol)=UPPER(TRIM(p_symbol)))) ORDER BY i.symbol,i.instrument_id;
+END; $$;
 
 
 --
@@ -1319,38 +1282,34 @@ $$;
 -- Name: sp_get_watchlist_items(uuid, uuid); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.sp_get_watchlist_items(p_watchlist_id uuid, p_user_id uuid) RETURNS TABLE(watchlist_item_id uuid, watchlist_id uuid, entity_id uuid, priority smallint, target_price numeric, notes text, name character varying, symbol character varying, exchange character varying, last_price numeric)
-    LANGUAGE sql
+CREATE FUNCTION public.sp_get_watchlist_items(p_watchlist_id uuid, p_user_id uuid) RETURNS TABLE(watchlist_item_id uuid, watchlist_id uuid, entity_id uuid, priority smallint, target_price numeric, notes text, name character varying, instrument_id uuid, symbol character varying, exchange character varying, currency_code character, last_price numeric)
+    LANGUAGE sql STABLE
     AS $$
 SELECT
     wi.watchlist_item_id,
     wi.watchlist_id,
     wi.entity_id,
-
     wi.priority,
     wi.target_price,
     wi.notes,
-
     e.name,
-
+    i.instrument_id,
     i.symbol,
     i.exchange,
-	i.last_price
-
+    i.currency_code,
+    i.last_price
 FROM watchlist_items wi
-
 JOIN entities e
-ON e.entity_id =
-   wi.entity_id
-
+    ON e.entity_id = wi.entity_id
 LEFT JOIN instruments i
-ON i.entity_id =
-   e.entity_id
-
-WHERE wi.watchlist_id =
-      p_watchlist_id
-AND p_watchlist_id IN (SELECT watchlist_id FROM watchlists WHERE user_id = p_user_id)
-
+    ON i.entity_id = e.entity_id
+WHERE wi.watchlist_id = p_watchlist_id
+  AND EXISTS (
+      SELECT 1
+      FROM watchlists w
+      WHERE w.watchlist_id = p_watchlist_id
+        AND w.user_id = p_user_id
+  )
 ORDER BY
     i.symbol NULLS LAST,
     e.name;
@@ -2327,80 +2286,8 @@ $$;
 CREATE FUNCTION public.sp_search_local_assets(p_query character varying, p_limit integer DEFAULT 20) RETURNS jsonb
     LANGUAGE plpgsql
     AS $$
-DECLARE
-    v_result JSONB;
-BEGIN
-
-    SELECT
-        COALESCE(
-            jsonb_agg(row_data),
-            '[]'::jsonb
-        )
-    INTO v_result
-    FROM
-    (
-        SELECT
-            jsonb_build_object(
-                'symbol',
-                i.symbol,
-
-                'name',
-                e.name,
-
-                'exchange',
-                i.exchange,
-
-                'type',
-                i.instrument_type
-            ) AS row_data
-
-        FROM instruments i
-
-        JOIN entities e
-          ON e.entity_id =
-             i.entity_id
-
-        WHERE
-            LOWER(i.symbol)
-                LIKE LOWER(
-                    p_query || '%'
-                )
-            OR
-            LOWER(e.name)
-                LIKE LOWER(
-                    p_query || '%'
-                )
-
-        ORDER BY
-
-            CASE
-
-                WHEN LOWER(i.symbol)
-                     =
-                     LOWER(p_query)
-                THEN 1
-
-                WHEN LOWER(i.symbol)
-                     LIKE
-                     LOWER(
-                        p_query || '%'
-                     )
-                THEN 2
-
-                ELSE 3
-
-            END,
-
-            i.symbol
-
-        LIMIT p_limit
-
-    ) q;
-
-    RETURN v_result;
-
-END;
-$$;
+DECLARE v_result jsonb;
+BEGIN SELECT COALESCE(jsonb_agg(row_data),'[]'::jsonb) INTO v_result FROM(SELECT jsonb_build_object('symbol',i.symbol,'name',e.name,'exchange',COALESCE(i.openfigi_exch_code,i.exchange),'openfigi_exch_code',i.openfigi_exch_code,'figi',i.figi,'figi_composite',i.figi_composite,'figi_share_class',i.figi_share_class,'mic_code',i.mic_code,'market_sector',i.market_sector,'metadata_source',i.metadata_source,'currency',i.currency_code,'type',i.instrument_type,'data_source',i.data_source) row_data FROM instruments i JOIN entities e ON e.entity_id=i.entity_id WHERE LOWER(i.symbol) LIKE LOWER(p_query||'%') OR LOWER(e.name) LIKE LOWER(p_query||'%') ORDER BY CASE WHEN LOWER(i.symbol)=LOWER(p_query) THEN 1 WHEN LOWER(i.symbol) LIKE LOWER(p_query||'%') THEN 2 ELSE 3 END,i.symbol LIMIT p_limit)q; RETURN v_result; END; $$;
 
 
 --
@@ -3467,7 +3354,15 @@ CREATE TABLE public.instruments (
     data_source character varying(50),
     last_price numeric(20,8),
     created_at timestamp with time zone DEFAULT now(),
-    updated_at timestamp with time zone DEFAULT now()
+    updated_at timestamp with time zone DEFAULT now(),
+    mic_code character varying(10),
+    figi character varying(20),
+    figi_composite character varying(20),
+    figi_share_class character varying(20),
+    market_sector character varying(50),
+    metadata_source character varying(50),
+    metadata_refreshed_at timestamp with time zone,
+    openfigi_exch_code character varying(10)
 );
 
 
@@ -4257,14 +4152,6 @@ ALTER TABLE ONLY public.instruments
 
 
 --
--- Name: instruments instruments_symbol_exchange_key; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.instruments
-    ADD CONSTRAINT instruments_symbol_exchange_key UNIQUE (symbol, exchange);
-
-
---
 -- Name: market_price_refresh_queue market_price_refresh_queue_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -4691,6 +4578,27 @@ CREATE INDEX ix_holding_snapshots_portfolio ON public.portfolio_holdings_snapsho
 
 
 --
+-- Name: ix_instruments_mic_code; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_instruments_mic_code ON public.instruments USING btree (mic_code) WHERE (mic_code IS NOT NULL);
+
+
+--
+-- Name: ix_instruments_openfigi_exch_code; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_instruments_openfigi_exch_code ON public.instruments USING btree (openfigi_exch_code) WHERE (openfigi_exch_code IS NOT NULL);
+
+
+--
+-- Name: ix_instruments_symbol_exchange; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_instruments_symbol_exchange ON public.instruments USING btree (symbol, exchange);
+
+
+--
 -- Name: ix_market_price_refresh_due; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -4877,6 +4785,13 @@ CREATE UNIQUE INDEX uq_holding_snapshot ON public.portfolio_holdings_snapshots U
 --
 
 CREATE UNIQUE INDEX uq_instrument_alias ON public.instrument_aliases USING btree (alias_symbol);
+
+
+--
+-- Name: uq_instruments_figi; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_instruments_figi ON public.instruments USING btree (figi) WHERE (figi IS NOT NULL);
 
 
 --
@@ -5599,5 +5514,5 @@ ALTER TABLE ONLY public.watchlists
 -- PostgreSQL database dump complete
 --
 
-\unrestrict 5nRBOc84QiHdZWnU56G3Yy4PXeiTB38aYuGFSrc1NwyMeYqJ8Um9BNnSXSiByUa
+\unrestrict yE14FeKF0lylwIzZOsdDMpuHTkbpnTuvg5m7gI1p89wv04RsguZBwPxscgZGdSj
 

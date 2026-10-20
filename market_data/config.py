@@ -1,27 +1,47 @@
 from dataclasses import dataclass
 from typing import Protocol
 
+from market_data.capabilities import MarketDataCapability
+
 
 class SettingsReader(Protocol):
     def get(self, key: str, default=None): ...
 
 
-SUPPORTED_MARKET_DATA_PROVIDERS = {"yahoo"}
+DEFAULT_ORDERS = {
+    MarketDataCapability.SYMBOL_SEARCH: ("eulerpool", "ghostfolio", "fmp"),
+    MarketDataCapability.PROFILE: ("eulerpool", "ghostfolio", "fmp"),
+    MarketDataCapability.IDENTIFIERS: ("openfigi", "eulerpool", "ghostfolio"),
+    MarketDataCapability.EXCHANGE: ("eulerpool", "openfigi", "fmp"),
+    MarketDataCapability.LIVE_PRICE: ("eulerpool", "yahoo", "ghostfolio"),
+    MarketDataCapability.PRICE_HISTORY: ("eulerpool", "yahoo"),
+    MarketDataCapability.OHLCV: ("eulerpool", "yahoo"),
+}
+
+
+def _csv(value) -> tuple[str, ...]:
+    return tuple(
+        item.strip().lower() for item in str(value or "").split(",") if item.strip()
+    )
 
 
 @dataclass(frozen=True, slots=True)
 class MarketDataConfig:
-    provider: str
+    provider_orders: dict[MarketDataCapability, tuple[str, ...]]
     http_timeout: float
     http_max_retries: int
     http_retry_base_seconds: float
 
     @classmethod
     def from_settings(cls, settings: SettingsReader) -> "MarketDataConfig":
+        orders = {}
+        for capability, default in DEFAULT_ORDERS.items():
+            key = f"MARKET_DATA_{capability.value.upper()}_ORDER"
+            orders[capability] = _csv(settings.get(key, ",".join(default)))
         config = cls(
-            provider=str(settings.get("MARKET_DATA_PROVIDER", "yahoo")).strip().lower(),
+            provider_orders=orders,
             http_timeout=float(settings.get("MARKET_DATA_HTTP_TIMEOUT", 30.0)),
-            http_max_retries=int(settings.get("MARKET_DATA_HTTP_MAX_RETRIES", 3)),
+            http_max_retries=int(settings.get("MARKET_DATA_HTTP_MAX_RETRIES", 2)),
             http_retry_base_seconds=float(
                 settings.get("MARKET_DATA_HTTP_RETRY_BASE_SECONDS", 1.0)
             ),
@@ -30,11 +50,10 @@ class MarketDataConfig:
         return config
 
     def validate(self) -> None:
-        if self.provider not in SUPPORTED_MARKET_DATA_PROVIDERS:
-            raise ValueError(f"Unsupported MARKET_DATA_PROVIDER: {self.provider}")
         if self.http_timeout <= 0:
             raise ValueError("MARKET_DATA_HTTP_TIMEOUT must be > 0")
         if self.http_max_retries < 0:
             raise ValueError("MARKET_DATA_HTTP_MAX_RETRIES must be >= 0")
-        if self.http_retry_base_seconds < 0:
-            raise ValueError("MARKET_DATA_HTTP_RETRY_BASE_SECONDS must be >= 0")
+        for capability, providers in self.provider_orders.items():
+            if not providers:
+                raise ValueError(f"No provider configured for {capability.value}")

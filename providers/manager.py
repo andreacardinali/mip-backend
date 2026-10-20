@@ -1,18 +1,10 @@
-from providers.fmp import FMPProvider
-from providers.ghostfolio import GhostfolioProvider
+from market_data import InstrumentReference, InstrumentType
+from market_data.factory import market_data as service
 
 
 class MarketDataManager:
-
-    def __init__(self):
-
-        self.ghostfolio = GhostfolioProvider()
-
-        self.fmp = FMPProvider()
-
     def search_symbols(self, query, limit=20):
-
-        return self.ghostfolio.search_symbols(query, limit)
+        return [row.to_dict() for row in service.search(query, limit=limit)]
 
     def get_profile(
         self,
@@ -22,34 +14,12 @@ class MarketDataManager:
         require_price=True,
         **kwargs,
     ):
-
-        profile = self.ghostfolio.refresh_and_get_profile(
-            symbol,
-            data_source=data_source,
-            require_price=require_price,
-            **kwargs,
+        profile = service.get_profile(
+            InstrumentReference(symbol=symbol, instrument_type=InstrumentType.UNKNOWN),
+            required_fields={"name"},
+            include_quote=require_price,
         )
-
-        if not profile:
-            return None
-
-        if full_refresh:
-
-            try:
-
-                metadata = self.fmp.find_symbol_metadata(symbol)
-
-                if metadata:
-
-                    profile["exchange"] = metadata.get("exchange")
-
-                    profile["exchangeFullName"] = metadata.get("exchangeFullName")
-
-            except Exception as ex:
-
-                print(f"FMP enrichment failed for {symbol}: {ex}")
-
-        return profile
+        return profile.to_import_payload() if profile else None
 
 
 market_data = MarketDataManager()

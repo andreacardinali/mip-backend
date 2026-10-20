@@ -20,6 +20,8 @@ def get_watchlist_items(
                 """
                 SELECT
                     w.*,
+                    i.instrument_id,
+                    i.currency_code,
                     COALESCE(
                         q.status,
                         CASE
@@ -31,15 +33,22 @@ def get_watchlist_items(
                     q.max_attempts AS price_refresh_max_attempts,
                     q.next_attempt_at AS price_refresh_next_attempt_at,
                     q.last_error AS price_refresh_error
-                FROM sp_get_watchlist_items(:watchlist_id, :user_id) w
+                FROM sp_get_watchlist_items(
+                    CAST(:watchlist_id AS uuid),
+                    CAST(:user_id AS uuid)
+                ) w
                 LEFT JOIN instruments i
                     ON i.entity_id = w.entity_id
                    AND i.symbol = w.symbol
+                   AND i.exchange IS NOT DISTINCT FROM w.exchange
                 LEFT JOIN market_price_refresh_queue q
                     ON q.instrument_id = i.instrument_id
                 """
             ),
-            {"watchlist_id": watchlist_id, "user_id": user_id},
+            {
+                "watchlist_id": watchlist_id,
+                "user_id": user_id,
+            },
         )
         return [dict(row._mapping) for row in rows]
     finally:
@@ -58,13 +67,13 @@ def upsert_watchlist_item(
             text(
                 """
                 SELECT sp_upsert_watchlist_item(
-                    :watchlist_item_id,
-                    :watchlist_id,
-                    :user_id,
-                    :entity_id,
-                    :priority,
-                    :target_price,
-                    :notes
+                    CAST(:watchlist_item_id AS uuid),
+                    CAST(:watchlist_id AS uuid),
+                    CAST(:user_id AS uuid),
+                    CAST(:entity_id AS uuid),
+                    CAST(:priority AS smallint),
+                    CAST(:target_price AS numeric),
+                    CAST(:notes AS text)
                 )
                 """
             ),
@@ -79,7 +88,10 @@ def upsert_watchlist_item(
             },
         ).scalar()
         db.commit()
-        return {"watchlist_item_id": str(item_id), "status": "saved"}
+        return {
+            "watchlist_item_id": str(item_id),
+            "status": "saved",
+        }
     except Exception:
         db.rollback()
         raise
@@ -96,8 +108,18 @@ def delete_watchlist_item(
     db = SessionLocal()
     try:
         deleted = db.execute(
-            text("SELECT sp_delete_watchlist_item(:watchlist_item_id, :user_id)"),
-            {"watchlist_item_id": watchlist_item_id, "user_id": user_id},
+            text(
+                """
+                SELECT sp_delete_watchlist_item(
+                    CAST(:watchlist_item_id AS uuid),
+                    CAST(:user_id AS uuid)
+                )
+                """
+            ),
+            {
+                "watchlist_item_id": watchlist_item_id,
+                "user_id": user_id,
+            },
         ).scalar()
         db.commit()
         return {"deleted": deleted}

@@ -31,13 +31,26 @@ def _enqueue_missing_price(
     )
 
 
-@router.post("/entity")
-def import_entity(
-    payload: dict,
-    current_user: CurrentUser = Depends(get_current_user),
-):
-    db = SessionLocal()
+def _persist_reference_metadata(db, instrument_id, profile: dict) -> None:
+    db.execute(
+        text(
+            """
+            SELECT sp_apply_instrument_reference_metadata(
+                CAST(:instrument_id AS uuid),
+                CAST(:payload AS jsonb)
+            )
+            """
+        ),
+        {
+            "instrument_id": instrument_id,
+            "payload": json.dumps(profile, default=str),
+        },
+    )
 
+
+@router.post("/entity")
+def import_entity(payload: dict, current_user: CurrentUser = Depends(get_current_user)):
+    db = SessionLocal()
     try:
         symbol = str(payload.get("symbol") or "").strip().upper()
         if not symbol:
@@ -45,13 +58,13 @@ def import_entity(
 
         requested_data_source = _clean_data_source(payload.get("data_source"))
         symbol_info = db.execute(
-            text("SELECT sp_get_symbol(:symbol, 168)"),
-            {"symbol": symbol},
+            text("SELECT sp_get_symbol(:symbol, 168)"), {"symbol": symbol}
         ).scalar()
-
-        local_payload = None
-        if symbol_info and symbol_info.get("found"):
-            local_payload = symbol_info.get("payload")
+        local_payload = (
+            symbol_info.get("payload")
+            if symbol_info and symbol_info.get("found")
+            else None
+        )
 
         if (
             symbol_info
@@ -78,7 +91,6 @@ def import_entity(
         provider_data_source = _clean_data_source(
             (local_payload or {}).get("data_source") or requested_data_source
         )
-
         if not profile:
             profile = market_data.get_profile(
                 symbol,
@@ -90,10 +102,7 @@ def import_entity(
         if not profile:
             if local_payload:
                 job_id = _enqueue_missing_price(
-                    db,
-                    local_payload,
-                    symbol,
-                    provider_data_source,
+                    db, local_payload, symbol, provider_data_source
                 )
                 db.commit()
                 return {
@@ -108,22 +117,17 @@ def import_entity(
             raise HTTPException(status_code=404, detail="symbol not found")
 
         result = db.execute(
-            text(
-                """
-                SELECT *
-                FROM sp_import_asset_profile(CAST(:payload AS jsonb))
-                """
-            ),
+            text("SELECT * FROM sp_import_asset_profile(CAST(:payload AS jsonb))"),
             {"payload": json.dumps(profile)},
         ).first()
-
         if not result:
             raise RuntimeError("sp_import_asset_profile returned no row")
+
+        _persist_reference_metadata(db, result.instrument_id, profile)
 
         price_available = profile.get("last_price") is not None
         refresh_status = "NOT_REQUIRED"
         refresh_job_id = None
-
         if not price_available:
             refresh_job_id = enqueue_price_refresh(
                 db,
@@ -134,7 +138,6 @@ def import_entity(
             refresh_status = "QUEUED"
 
         db.commit()
-
         return {
             "entity_id": str(result.entity_id),
             "instrument_id": str(result.instrument_id),
@@ -144,7 +147,6 @@ def import_entity(
             "price_refresh_status": refresh_status,
             "price_refresh_job_id": refresh_job_id,
         }
-
     except HTTPException:
         db.rollback()
         raise

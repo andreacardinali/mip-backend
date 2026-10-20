@@ -1,0 +1,8 @@
+In the current GhostfolioProvider, Yahoo/Ghostfolio already supplies these profile fields:
+- figi
+- figiComposite
+- figiShareClass
+
+No change to providers/ghostfolio.py is required. OpenFIGI first maps by the existing
+profile FIGI. Search rows, which do not contain FIGI, are mapped in one batch by ticker
+and currency and accepted only when the match is sufficiently unambiguous.

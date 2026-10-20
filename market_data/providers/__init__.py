@@ -1,3 +1,1 @@
-from market_data.providers.yahoo import YahooMarketDataProvider
-
-__all__ = ["YahooMarketDataProvider"]
+"""Market-data provider plugins."""
