@@ -1,7 +1,6 @@
 import json
 from datetime import UTC, datetime
 
-from jobs.portfolio_intelligence.branches.base import IntelligenceBranch
 from jobs.portfolio_intelligence.messages import format_daily_mover_message
 from jobs.portfolio_intelligence.models import BranchResult
 from jobs.portfolio_intelligence.parsing import parse_daily_validation
@@ -13,7 +12,7 @@ from market_analysis.technical import analyze_price_bars
 from notifications.diagnostics import NotificationDiagnostics
 
 
-class DailyMoverBranch(IntelligenceBranch):
+class DailyMoverBranch:
     name = "DAILY_MOVER"
 
     def execute(self, context):

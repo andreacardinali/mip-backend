@@ -2,7 +2,6 @@ import json
 from datetime import date, timedelta
 
 from job_runtime.collections import batched, deduplicate_by
-from jobs.portfolio_intelligence.branches.base import IntelligenceBranch
 from jobs.portfolio_intelligence.messages import format_upcoming_catalyst_message
 from jobs.portfolio_intelligence.models import BranchResult
 from jobs.portfolio_intelligence.parsing import (
@@ -16,7 +15,7 @@ from llm.base import LLMRequest
 from notifications.diagnostics import NotificationDiagnostics
 
 
-class UpcomingCatalystBranch(IntelligenceBranch):
+class UpcomingCatalystBranch:
     name = "UPCOMING_CATALYST"
 
     def execute(self, context):

@@ -2,7 +2,6 @@ import json
 from datetime import UTC, datetime
 
 from job_runtime.collections import batched, deduplicate_by
-from jobs.portfolio_intelligence.branches.base import IntelligenceBranch
 from jobs.portfolio_intelligence.messages import format_breaking_catalyst_message
 from jobs.portfolio_intelligence.models import BranchResult
 from jobs.portfolio_intelligence.parsing import (
@@ -15,7 +14,7 @@ from llm.base import LLMRequest
 from notifications.diagnostics import NotificationDiagnostics
 
 
-class BreakingCatalystBranch(IntelligenceBranch):
+class BreakingCatalystBranch:
     name = "BREAKING_CATALYST"
 
     def execute(self, context):

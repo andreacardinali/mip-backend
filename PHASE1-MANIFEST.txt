@@ -1,0 +1,26 @@
+Portfolio Intelligence centralization, phase 1
+Base commit: a891d010fcf73f767229a00cff285f7da2a26926
+
+Added:
+- job_runtime/collections.py
+- notifications/diagnostics.py
+
+Updated:
+- notifications/__init__.py
+- jobs/portfolio_intelligence/branches/daily_mover.py
+- jobs/portfolio_intelligence/branches/upcoming_catalyst.py
+- jobs/portfolio_intelligence/branches/breaking_catalyst.py
+- tests/test_portfolio_intelligence_refactor.py
+- tests/test_notification_enqueue.py
+
+Removed by cleanup script:
+- jobs/portfolio_intelligence/notifications.py
+- jobs/portfolio_intelligence/utils/collections.py
+- jobs/portfolio_intelligence/utils/__init__.py
+- jobs/portfolio_intelligence/utils/
+
+Apply:
+1. unzip -o mip-portfolio-intelligence-phase1.zip -d /opt/mip/mip-backend
+2. cd /opt/mip/mip-backend
+3. bash scripts/apply_portfolio_intelligence_phase1_cleanup.sh
+4. ./scripts/check.sh
