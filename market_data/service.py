@@ -47,9 +47,9 @@ class MarketDataService:
     ) -> InstrumentProfile | None:
         profiles = []
         failures = []
-        for provider in self._ordered(
-            MarketDataCapability.PROFILE, reference.instrument_type
-        ):
+        capability = MarketDataCapability.PROFILE
+
+        for provider in self._ordered(capability, reference.instrument_type):
             try:
                 profile = provider.get_profile(reference)
                 if profile:
@@ -57,19 +57,31 @@ class MarketDataService:
                     merged = _merge_profiles(profiles)
                     if _has_fields(merged, required_fields or set()):
                         break
-            except (CapabilityUnavailableError, InstrumentNotFoundError) as error:
+            except (
+                CapabilityUnavailableError,
+                InstrumentNotFoundError,
+                ProviderTemporaryError,
+            ) as error:
                 failures.append((provider.name, error))
-            except ProviderTemporaryError as error:
-                failures.append((provider.name, error))
-                logger.warning(
-                    "Temporary profile failure provider=%s error=%s",
+                logger.info(
+                    "Market data fallback capability=%s provider=%s error=%s",
+                    capability.value,
                     provider.name,
                     error,
                 )
+            except Exception as error:
+                failures.append((provider.name, error))
+                logger.exception(
+                    "Unexpected provider failure capability=%s provider=%s",
+                    capability.value,
+                    provider.name,
+                )
+
         if not profiles:
             if failures:
                 logger.info("No profile found failures=%s", failures)
             return None
+
         profile = _merge_profiles(profiles)
         if include_quote and profile.last_price is None:
             quote = self.get_quote(reference, required=False)
@@ -85,13 +97,12 @@ class MarketDataService:
         return profile
 
     def get_quote(self, reference: InstrumentReference, *, required: bool = True):
-        result = self._first(
+        return self._first(
             MarketDataCapability.LIVE_PRICE,
             reference.instrument_type,
             lambda provider: provider.get_quote(reference),
             required=required,
         )
-        return result
 
     def get_price_history(self, request: HistoryRequest):
         return self._first(
@@ -115,9 +126,16 @@ class MarketDataService:
             try:
                 provider = self.registry.get(name)
             except ValueError:
+                logger.warning(
+                    "Configured market-data provider is not registered capability=%s provider=%s",
+                    capability.value,
+                    name,
+                )
                 continue
             if provider.capabilities.supports(
-                capability, instrument_type=instrument_type, interval=interval
+                capability,
+                instrument_type=instrument_type,
+                interval=interval,
             ):
                 result.append(provider)
         return result
@@ -138,7 +156,7 @@ class MarketDataService:
                 if value is not None and value != []:
                     logger.debug(
                         "Market data resolved capability=%s provider=%s",
-                        capability,
+                        capability.value,
                         provider.name,
                     )
                     return value
@@ -157,6 +175,14 @@ class MarketDataService:
                     provider.name,
                     error,
                 )
+            except Exception as error:
+                failures.append((provider.name, error))
+                logger.exception(
+                    "Unexpected provider failure capability=%s provider=%s",
+                    capability.value,
+                    provider.name,
+                )
+
         if required:
             raise AllProvidersFailedError(capability.value, failures)
         return None
@@ -170,6 +196,7 @@ def _merge_profiles(profiles: list[InstrumentProfile]) -> InstrumentProfile:
     first = profiles[0]
     values = {}
     provenance = {}
+
     for descriptor in fields(InstrumentProfile):
         if descriptor.name == "provenance":
             continue
@@ -181,6 +208,7 @@ def _merge_profiles(profiles: list[InstrumentProfile]) -> InstrumentProfile:
                 provenance[descriptor.name] = profile.source or "unknown"
                 break
         values[descriptor.name] = value
+
     values["symbol"] = values["symbol"] or first.symbol
     values["name"] = values["name"] or first.name
     values["instrument_type"] = values["instrument_type"] or InstrumentType.UNKNOWN
