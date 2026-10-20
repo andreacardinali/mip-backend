@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict pgvupEaNrA5ndsEurlpBhc6EeUaGtZH7Tgr5PS1KGInJFIotx06aBKcVW9GM0eB
+\restrict zoHiQYecIxBLfYLbS1XcGEImmF5CRe2tJqpZC4AEXweB8UnkChtftF3iWcOMkeI
 
 -- Dumped from database version 18.6 (Debian 18.6-1.pgdg13+2)
 -- Dumped by pg_dump version 18.6 (Debian 18.6-1.pgdg13+2)
@@ -393,6 +393,122 @@ BEGIN
     RETURN v_deleted > 0;
 
 END;
+$$;
+
+
+--
+-- Name: sp_enqueue_market_price_refresh(uuid, character varying, character varying); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_enqueue_market_price_refresh(p_instrument_id uuid, p_symbol character varying, p_data_source character varying) RETURNS uuid
+    LANGUAGE sql
+    AS $$
+    INSERT INTO market_price_refresh_queue
+    (
+        instrument_id,
+        symbol,
+        data_source,
+        status,
+        attempt_count,
+        next_attempt_at,
+        locked_at,
+        locked_by,
+        last_error,
+        completed_at,
+        updated_at
+    )
+    VALUES
+    (
+        p_instrument_id,
+        UPPER(TRIM(p_symbol)),
+        COALESCE(
+            NULLIF(
+                UPPER(TRIM(p_data_source)),
+                ''
+            ),
+            'YAHOO'
+        ),
+        'PENDING',
+        0,
+        now(),
+        NULL,
+        NULL,
+        NULL,
+        NULL,
+        now()
+    )
+    ON CONFLICT
+    (
+        instrument_id
+    )
+    DO UPDATE SET
+        symbol =
+            EXCLUDED.symbol,
+
+        data_source =
+            EXCLUDED.data_source,
+
+        status =
+            CASE
+                WHEN
+                    market_price_refresh_queue.status =
+                    'PROCESSING'
+                THEN
+                    market_price_refresh_queue.status
+                ELSE
+                    'PENDING'
+            END,
+
+        attempt_count =
+            CASE
+                WHEN
+                    market_price_refresh_queue.status =
+                    'PROCESSING'
+                THEN
+                    market_price_refresh_queue.attempt_count
+                ELSE
+                    0
+            END,
+
+        next_attempt_at =
+            CASE
+                WHEN
+                    market_price_refresh_queue.status =
+                    'PROCESSING'
+                THEN
+                    market_price_refresh_queue.next_attempt_at
+                ELSE
+                    now()
+            END,
+
+        locked_at =
+            CASE
+                WHEN
+                    market_price_refresh_queue.status =
+                    'PROCESSING'
+                THEN
+                    market_price_refresh_queue.locked_at
+                ELSE
+                    NULL
+            END,
+
+        locked_by =
+            CASE
+                WHEN
+                    market_price_refresh_queue.status =
+                    'PROCESSING'
+                THEN
+                    market_price_refresh_queue.locked_by
+                ELSE
+                    NULL
+            END,
+
+        last_error = NULL,
+        completed_at = NULL,
+        updated_at = now()
+
+    RETURNING
+        market_price_refresh_queue.job_id
 $$;
 
 
@@ -3356,6 +3472,30 @@ CREATE TABLE public.instruments (
 
 
 --
+-- Name: market_price_refresh_queue; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.market_price_refresh_queue (
+    job_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    instrument_id uuid NOT NULL,
+    symbol character varying(50) NOT NULL,
+    data_source character varying(50) DEFAULT 'YAHOO'::character varying NOT NULL,
+    status character varying(20) DEFAULT 'PENDING'::character varying NOT NULL,
+    attempt_count integer DEFAULT 0 NOT NULL,
+    max_attempts integer DEFAULT 6 NOT NULL,
+    next_attempt_at timestamp with time zone DEFAULT now() NOT NULL,
+    locked_at timestamp with time zone,
+    locked_by character varying(150),
+    last_error text,
+    completed_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ck_market_price_refresh_attempts CHECK (((attempt_count >= 0) AND (max_attempts > 0))),
+    CONSTRAINT ck_market_price_refresh_status CHECK (((status)::text = ANY ((ARRAY['PENDING'::character varying, 'PROCESSING'::character varying, 'RETRY'::character varying, 'COMPLETED'::character varying, 'FAILED'::character varying])::text[])))
+);
+
+
+--
 -- Name: market_search_cache; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -4125,6 +4265,14 @@ ALTER TABLE ONLY public.instruments
 
 
 --
+-- Name: market_price_refresh_queue market_price_refresh_queue_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.market_price_refresh_queue
+    ADD CONSTRAINT market_price_refresh_queue_pkey PRIMARY KEY (job_id);
+
+
+--
 -- Name: market_search_cache market_search_cache_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -4445,6 +4593,14 @@ ALTER TABLE ONLY public.tags
 
 
 --
+-- Name: market_price_refresh_queue uq_market_price_refresh_instrument; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.market_price_refresh_queue
+    ADD CONSTRAINT uq_market_price_refresh_instrument UNIQUE (instrument_id);
+
+
+--
 -- Name: users uq_users_email; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -4532,6 +4688,13 @@ CREATE INDEX ix_holding_snapshots_instrument ON public.portfolio_holdings_snapsh
 --
 
 CREATE INDEX ix_holding_snapshots_portfolio ON public.portfolio_holdings_snapshots USING btree (portfolio_id);
+
+
+--
+-- Name: ix_market_price_refresh_due; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_market_price_refresh_due ON public.market_price_refresh_queue USING btree (status, next_attempt_at) WHERE ((status)::text = ANY ((ARRAY['PENDING'::character varying, 'RETRY'::character varying])::text[]));
 
 
 --
@@ -5153,6 +5316,14 @@ ALTER TABLE ONLY public.instruments
 
 
 --
+-- Name: market_price_refresh_queue market_price_refresh_queue_instrument_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.market_price_refresh_queue
+    ADD CONSTRAINT market_price_refresh_queue_instrument_id_fkey FOREIGN KEY (instrument_id) REFERENCES public.instruments(instrument_id) ON DELETE CASCADE;
+
+
+--
 -- Name: news news_cluster_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -5428,5 +5599,5 @@ ALTER TABLE ONLY public.watchlists
 -- PostgreSQL database dump complete
 --
 
-\unrestrict pgvupEaNrA5ndsEurlpBhc6EeUaGtZH7Tgr5PS1KGInJFIotx06aBKcVW9GM0eB
+\unrestrict zoHiQYecIxBLfYLbS1XcGEImmF5CRe2tJqpZC4AEXweB8UnkChtftF3iWcOMkeI
 

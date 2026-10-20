@@ -174,32 +174,62 @@ class GhostfolioProvider:
         symbol: str,
         data_source: str = "YAHOO",
         timeout_seconds: int = 20,
+        price_timeout_seconds: int = 3,
         require_price: bool = True,
     ):
         self.refresh_profile(symbol=symbol, data_source=data_source)
         time.sleep(1)
-        deadline = time.monotonic() + timeout_seconds
+
+        profile_deadline = time.monotonic() + timeout_seconds
+        price_deadline = None
         last_profile = None
 
-        while time.monotonic() < deadline:
+        while time.monotonic() < profile_deadline:
             try:
                 last_profile = self.get_profile(
                     symbol=symbol,
                     data_source=data_source,
                 )
-                complete = (
+
+                complete = bool(
                     last_profile
                     and last_profile.get("symbol")
                     and last_profile.get("name")
                 )
-                price_ready = (
-                    (not require_price or last_profile.get("last_price") is not None)
-                    if last_profile
-                    else False
-                )
 
-                if complete and price_ready:
+                if not complete:
+                    time.sleep(1)
+                    continue
+
+                if not require_price or last_profile.get("last_price") is not None:
                     return last_profile
+
+                if price_deadline is None:
+                    price_deadline = time.monotonic() + price_timeout_seconds
+
+                    print(
+                        "GHOSTFOLIO PRICE WAIT STARTED",
+                        {
+                            "symbol": symbol,
+                            "data_source": data_source,
+                            "price_timeout_seconds": price_timeout_seconds,
+                        },
+                        flush=True,
+                    )
+
+                if time.monotonic() >= price_deadline:
+                    print(
+                        "GHOSTFOLIO PRICE TIMEOUT",
+                        {
+                            "symbol": symbol,
+                            "data_source": data_source,
+                            "price_timeout_seconds": price_timeout_seconds,
+                            "profile_available": True,
+                        },
+                        flush=True,
+                    )
+                    return last_profile
+
             except GhostfolioProfileNotFoundError:
                 return None
             except Exception as error:
@@ -212,6 +242,7 @@ class GhostfolioProvider:
                     },
                     flush=True,
                 )
+
             time.sleep(1)
 
         print(
@@ -220,6 +251,7 @@ class GhostfolioProvider:
                 "symbol": symbol,
                 "data_source": data_source,
                 "timeout_seconds": timeout_seconds,
+                "profile_available": bool(last_profile),
                 "price_available": bool(
                     last_profile and last_profile.get("last_price") is not None
                 ),

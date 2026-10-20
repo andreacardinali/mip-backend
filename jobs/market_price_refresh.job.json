@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "job_key": "market_price_refresh_dispatcher",
+  "job_name": "Market Price Refresh Dispatcher",
+  "python_module": "jobs.market_price_refresh.worker",
+  "trigger": {
+    "type": "interval",
+    "interval_minutes": 1
+  },
+  "enabled_by_default": true
+}
