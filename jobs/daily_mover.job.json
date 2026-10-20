@@ -2,7 +2,7 @@
   "schema_version": 1,
   "job_key": "portfolio_intelligence_daily_movers",
   "job_name": "Portfolio Intelligence - Daily Movers",
-  "python_module": "jobs.portfolio_intelligence.daily_mover",
+  "python_module": "jobs.portfolio_intelligence.branches.daily_mover",
   "trigger": {
     "type": "cron",
     "cron_expression": "0,30 9-21 * * *"
