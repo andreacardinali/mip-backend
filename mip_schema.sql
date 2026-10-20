@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict LWzHvucViYOGWt5sNsq8P6hlxPaNgb1Ky1TAVGYqPn97ae90OdpouC8L4xzCa5a
+\restrict SuGG7r0RKqgwzurGDFJBXvkkX72OmNFQDFafuuC8fFEtB1Z4RNowInmGUjMN1Eb
 
 -- Dumped from database version 18.6 (Debian 18.6-1.pgdg13+2)
 -- Dumped by pg_dump version 18.6 (Debian 18.6-1.pgdg13+2)
@@ -158,20 +158,73 @@ $$;
 CREATE FUNCTION public.sp_apply_instrument_reference_metadata(p_instrument_id uuid, p_payload jsonb) RETURNS void
     LANGUAGE plpgsql
     AS $$
-DECLARE v_figi varchar(20); v_exch varchar(50);
+DECLARE
+    v_source_code varchar;
+    v_identifiers jsonb;
+    v_item record;
 BEGIN
- v_figi:=NULLIF(UPPER(TRIM(p_payload->>'figi')),'');
- v_exch:=NULLIF(UPPER(TRIM(COALESCE(p_payload->>'openfigi_exch_code',CASE WHEN UPPER(TRIM(p_payload->>'metadata_source'))='OPENFIGI' THEN p_payload->>'exchange' END))),'');
- IF v_figi IS NOT NULL AND EXISTS(SELECT 1 FROM instruments x WHERE x.figi=v_figi AND x.instrument_id<>p_instrument_id) THEN v_figi:=NULL; END IF;
- UPDATE instruments SET
-  exchange=COALESCE(v_exch,exchange), openfigi_exch_code=COALESCE(v_exch,openfigi_exch_code),
-  figi=COALESCE(v_figi,figi), figi_composite=COALESCE(NULLIF(UPPER(TRIM(p_payload->>'figi_composite')),''),figi_composite),
-  figi_share_class=COALESCE(NULLIF(UPPER(TRIM(p_payload->>'figi_share_class')),''),figi_share_class),
-  market_sector=COALESCE(NULLIF(TRIM(p_payload->>'market_sector'),''),market_sector),
-  metadata_source=COALESCE(NULLIF(UPPER(TRIM(p_payload->>'metadata_source')),''),metadata_source),
-  metadata_refreshed_at=CASE WHEN NULLIF(TRIM(p_payload->>'metadata_source'),'') IS NOT NULL THEN now() ELSE metadata_refreshed_at END
- WHERE instrument_id=p_instrument_id;
-END; $$;
+    IF NOT EXISTS (
+        SELECT 1 FROM instruments WHERE instrument_id = p_instrument_id
+    ) THEN
+        RAISE EXCEPTION 'Instrument not found: %', p_instrument_id;
+    END IF;
+
+    v_source_code := UPPER(NULLIF(TRIM(COALESCE(
+        p_payload->>'source',
+        p_payload->>'data_source',
+        p_payload->>'metadata_source'
+    )), ''));
+
+    v_identifiers := COALESCE(p_payload->'identifiers', '{}'::jsonb)
+        || jsonb_strip_nulls(jsonb_build_object(
+            'ISIN', p_payload->>'isin',
+            'WKN', p_payload->>'wkn',
+            'FIGI', p_payload->>'figi',
+            'FIGI_COMPOSITE', p_payload->>'figi_composite',
+            'FIGI_SHARE_CLASS', p_payload->>'figi_share_class'
+        ));
+
+    FOR v_item IN
+        SELECT key, value #>> '{}' AS value
+        FROM jsonb_each(v_identifiers)
+    LOOP
+        IF EXISTS (
+            SELECT 1 FROM identity_types
+            WHERE code = UPPER(v_item.key)
+              AND target_kind = 'INSTRUMENT'
+        ) THEN
+            PERFORM sp_upsert_identity(
+                'INSTRUMENT',
+                p_instrument_id,
+                UPPER(v_item.key),
+                v_item.value,
+                v_source_code,
+                NULL,
+                NULL,
+                p_payload
+            );
+        END IF;
+    END LOOP;
+
+    UPDATE instruments i
+    SET price_source_id = COALESCE(
+            (
+                SELECT es.system_id
+                FROM external_systems es
+                WHERE es.code = UPPER(NULLIF(TRIM(COALESCE(
+                    p_payload->>'price_source',
+                    p_payload->>'data_source'
+                )), ''))
+            ),
+            i.price_source_id
+        ),
+        price_as_of = COALESCE(
+            to_timestamp(NULLIF(p_payload->>'price_timestamp', '')::double precision),
+            i.price_as_of
+        )
+    WHERE i.instrument_id = p_instrument_id;
+END;
+$$;
 
 
 --
@@ -694,11 +747,31 @@ CREATE FUNCTION public.sp_get_entities_for_refresh(p_mode character varying DEFA
     LANGUAGE plpgsql
     AS $$
 BEGIN
- IF UPPER(p_mode) NOT IN('MISSING','ALL','SYMBOL') THEN RAISE EXCEPTION 'Invalid refresh mode: %',p_mode; END IF;
- IF UPPER(p_mode)='SYMBOL' AND NULLIF(TRIM(p_symbol),'') IS NULL THEN RAISE EXCEPTION 'p_symbol is required when p_mode is SYMBOL'; END IF;
- RETURN QUERY SELECT e.entity_id,i.instrument_id,i.symbol FROM entities e JOIN instruments i ON i.entity_id=e.entity_id
- WHERE e.active=TRUE AND ((UPPER(p_mode)='MISSING' AND (UPPER(e.name)=UPPER(i.symbol) OR e.country_code IS NULL OR i.currency_code IS NULL OR i.data_source IS NULL OR i.figi IS NULL OR i.openfigi_exch_code IS NULL)) OR UPPER(p_mode)='ALL' OR (UPPER(p_mode)='SYMBOL' AND UPPER(i.symbol)=UPPER(TRIM(p_symbol)))) ORDER BY i.symbol,i.instrument_id;
-END; $$;
+    IF UPPER(p_mode) NOT IN ('MISSING', 'ALL', 'SYMBOL') THEN
+        RAISE EXCEPTION 'Invalid refresh mode: %', p_mode;
+    END IF;
+    IF UPPER(p_mode) = 'SYMBOL' AND NULLIF(TRIM(p_symbol), '') IS NULL THEN
+        RAISE EXCEPTION 'p_symbol is required when p_mode is SYMBOL';
+    END IF;
+
+    RETURN QUERY
+    SELECT e.entity_id, i.instrument_id, i.symbol
+    FROM entities e
+    JOIN instruments i ON i.entity_id = e.entity_id
+    WHERE e.active = true
+      AND (
+          (UPPER(p_mode) = 'MISSING' AND (
+              UPPER(e.name) = UPPER(i.symbol)
+              OR e.country_code IS NULL
+              OR i.currency_code IS NULL
+              OR i.exchange IS NULL
+          ))
+          OR UPPER(p_mode) = 'ALL'
+          OR (UPPER(p_mode) = 'SYMBOL' AND UPPER(i.symbol) = UPPER(TRIM(p_symbol)))
+      )
+    ORDER BY i.symbol, i.instrument_id;
+END;
+$$;
 
 
 --
@@ -2284,10 +2357,48 @@ $$;
 --
 
 CREATE FUNCTION public.sp_search_local_assets(p_query character varying, p_limit integer DEFAULT 20) RETURNS jsonb
-    LANGUAGE plpgsql
+    LANGUAGE sql STABLE
     AS $$
-DECLARE v_result jsonb;
-BEGIN SELECT COALESCE(jsonb_agg(row_data),'[]'::jsonb) INTO v_result FROM(SELECT jsonb_build_object('symbol',i.symbol,'name',e.name,'exchange',COALESCE(i.openfigi_exch_code,i.exchange),'openfigi_exch_code',i.openfigi_exch_code,'figi',i.figi,'figi_composite',i.figi_composite,'figi_share_class',i.figi_share_class,'mic_code',i.mic_code,'market_sector',i.market_sector,'metadata_source',i.metadata_source,'currency',i.currency_code,'type',i.instrument_type,'data_source',i.data_source) row_data FROM instruments i JOIN entities e ON e.entity_id=i.entity_id WHERE LOWER(i.symbol) LIKE LOWER(p_query||'%') OR LOWER(e.name) LIKE LOWER(p_query||'%') ORDER BY CASE WHEN LOWER(i.symbol)=LOWER(p_query) THEN 1 WHEN LOWER(i.symbol) LIKE LOWER(p_query||'%') THEN 2 ELSE 3 END,i.symbol LIMIT p_limit)q; RETURN v_result; END; $$;
+SELECT COALESCE(jsonb_agg(row_data), '[]'::jsonb)
+FROM (
+    SELECT jsonb_build_object(
+        'symbol', i.symbol,
+        'name', e.name,
+        'exchange', i.exchange,
+        'currency', i.currency_code,
+        'type', i.instrument_type,
+        'identifiers', COALESCE(ids.identifiers, '{}'::jsonb),
+        'data_source', ps.code
+    ) AS row_data
+    FROM instruments i
+    JOIN entities e ON e.entity_id = i.entity_id
+    LEFT JOIN external_systems ps ON ps.system_id = i.price_source_id
+    LEFT JOIN LATERAL (
+        SELECT jsonb_object_agg(it.code, id.identity_value) AS identifiers
+        FROM instrument_identities ii
+        JOIN identities id ON id.identity_id = ii.identity_id
+        JOIN identity_types it ON it.identity_type_id = id.identity_type_id
+        WHERE ii.instrument_id = i.instrument_id
+    ) ids ON true
+    WHERE LOWER(i.symbol) LIKE LOWER(p_query || '%')
+       OR LOWER(e.name) LIKE LOWER(p_query || '%')
+       OR EXISTS (
+            SELECT 1
+            FROM instrument_identities ii2
+            JOIN identities id2 ON id2.identity_id = ii2.identity_id
+            WHERE ii2.instrument_id = i.instrument_id
+              AND id2.normalized_value LIKE UPPER(p_query || '%')
+       )
+    ORDER BY
+        CASE
+            WHEN LOWER(i.symbol) = LOWER(p_query) THEN 1
+            WHEN LOWER(i.symbol) LIKE LOWER(p_query || '%') THEN 2
+            ELSE 3
+        END,
+        i.symbol
+    LIMIT p_limit
+) q;
+$$;
 
 
 --
@@ -2704,6 +2815,93 @@ BEGIN
 
     RETURN v_entity_id;
 
+END;
+$$;
+
+
+--
+-- Name: sp_upsert_identity(character varying, uuid, character varying, character varying, character varying, character varying, numeric, jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_upsert_identity(p_target_kind character varying, p_target_id uuid, p_identity_code character varying, p_identity_value character varying, p_system_code character varying DEFAULT NULL::character varying, p_source_reference character varying DEFAULT NULL::character varying, p_confidence numeric DEFAULT NULL::numeric, p_raw_payload jsonb DEFAULT NULL::jsonb) RETURNS uuid
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_target_kind varchar;
+    v_identity_code varchar;
+    v_value varchar;
+    v_normalized varchar;
+    v_identity_type_id uuid;
+    v_identity_id uuid;
+    v_system_id uuid;
+BEGIN
+    v_target_kind := UPPER(TRIM(p_target_kind));
+    v_identity_code := UPPER(TRIM(p_identity_code));
+    v_value := NULLIF(TRIM(p_identity_value), '');
+
+    IF v_value IS NULL THEN
+        RETURN NULL;
+    END IF;
+
+    SELECT identity_type_id, target_kind
+    INTO v_identity_type_id, v_target_kind
+    FROM identity_types
+    WHERE code = v_identity_code
+      AND target_kind = UPPER(TRIM(p_target_kind));
+
+    IF v_identity_type_id IS NULL THEN
+        RAISE EXCEPTION 'Identity type % is not valid for %',
+            p_identity_code, p_target_kind;
+    END IF;
+
+    v_normalized := UPPER(v_value);
+
+    INSERT INTO identities (
+        identity_type_id,
+        identity_value,
+        normalized_value
+    ) VALUES (
+        v_identity_type_id,
+        v_value,
+        v_normalized
+    )
+    ON CONFLICT (identity_type_id, normalized_value) DO UPDATE
+    SET identity_value = EXCLUDED.identity_value,
+        updated_at = now()
+    RETURNING identity_id INTO v_identity_id;
+
+    IF v_target_kind = 'ENTITY' THEN
+        INSERT INTO entity_identities (entity_id, identity_id)
+        VALUES (p_target_id, v_identity_id)
+        ON CONFLICT DO NOTHING;
+    ELSE
+        INSERT INTO instrument_identities (instrument_id, identity_id)
+        VALUES (p_target_id, v_identity_id)
+        ON CONFLICT DO NOTHING;
+    END IF;
+
+    IF NULLIF(TRIM(p_system_code), '') IS NOT NULL THEN
+        SELECT system_id INTO v_system_id
+        FROM external_systems
+        WHERE code = UPPER(TRIM(p_system_code));
+
+        INSERT INTO identity_observations (
+            identity_id,
+            system_id,
+            source_reference,
+            confidence,
+            raw_payload
+        ) VALUES (
+            v_identity_id,
+            v_system_id,
+            NULLIF(TRIM(p_source_reference), ''),
+            p_confidence,
+            p_raw_payload
+        )
+        ON CONFLICT DO NOTHING;
+    END IF;
+
+    RETURN v_identity_id;
 END;
 $$;
 
@@ -3144,6 +3342,19 @@ CREATE TABLE public.entity_aliases (
 
 
 --
+-- Name: entity_identities; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.entity_identities (
+    entity_id uuid NOT NULL,
+    identity_id uuid NOT NULL,
+    is_primary boolean DEFAULT false NOT NULL,
+    verified_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
 -- Name: entity_impact_history; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -3242,6 +3453,20 @@ CREATE TABLE public.exchange_rates (
 
 
 --
+-- Name: exchange_source_mappings; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.exchange_source_mappings (
+    exchange character varying(20) NOT NULL,
+    system_id uuid NOT NULL,
+    source_exchange_code character varying(100) NOT NULL,
+    source_exchange_name character varying(255),
+    observed_at timestamp with time zone DEFAULT now() NOT NULL,
+    raw_payload jsonb
+);
+
+
+--
 -- Name: exchanges; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -3264,7 +3489,13 @@ CREATE TABLE public.exchanges (
 CREATE TABLE public.external_systems (
     system_id uuid DEFAULT gen_random_uuid() NOT NULL,
     name character varying(100),
-    system_type character varying(50)
+    system_type character varying(50),
+    code character varying(50),
+    base_url text,
+    config jsonb DEFAULT '{}'::jsonb NOT NULL,
+    active boolean DEFAULT true NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
 
@@ -3285,6 +3516,55 @@ CREATE TABLE public.filings (
     raw_payload jsonb,
     created_at timestamp with time zone DEFAULT now(),
     filing_subtype character varying(50)
+);
+
+
+--
+-- Name: identities; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.identities (
+    identity_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    identity_type_id uuid NOT NULL,
+    identity_value character varying(255) NOT NULL,
+    normalized_value character varying(255) NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: identity_observations; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.identity_observations (
+    identity_observation_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    identity_id uuid NOT NULL,
+    system_id uuid,
+    source_reference character varying(255),
+    confidence numeric(5,4),
+    observed_at timestamp with time zone DEFAULT now() NOT NULL,
+    valid_from timestamp with time zone,
+    valid_to timestamp with time zone,
+    raw_payload jsonb,
+    CONSTRAINT ck_identity_observations_confidence CHECK (((confidence IS NULL) OR ((confidence >= (0)::numeric) AND (confidence <= (1)::numeric))))
+);
+
+
+--
+-- Name: identity_types; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.identity_types (
+    identity_type_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    code character varying(50) NOT NULL,
+    target_kind character varying(20) NOT NULL,
+    description text,
+    value_pattern text,
+    case_sensitive boolean DEFAULT false NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ck_identity_types_target_kind CHECK (((target_kind)::text = ANY ((ARRAY['ENTITY'::character varying, 'INSTRUMENT'::character varying])::text[])))
 );
 
 
@@ -3315,6 +3595,23 @@ CREATE TABLE public.instrument_aliases (
 
 
 --
+-- Name: instrument_consolidation_audit; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.instrument_consolidation_audit (
+    consolidation_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    duplicate_instrument_id uuid NOT NULL,
+    canonical_instrument_id uuid NOT NULL,
+    duplicate_entity_id uuid NOT NULL,
+    canonical_entity_id uuid NOT NULL,
+    symbol character varying(50) NOT NULL,
+    exchange character varying(50),
+    consolidated_at timestamp with time zone DEFAULT now() NOT NULL,
+    details jsonb DEFAULT '{}'::jsonb NOT NULL
+);
+
+
+--
 -- Name: instrument_entity_exposure; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -3324,6 +3621,19 @@ CREATE TABLE public.instrument_entity_exposure (
     entity_id uuid,
     weight numeric(10,6),
     effective_date date
+);
+
+
+--
+-- Name: instrument_identities; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.instrument_identities (
+    instrument_id uuid NOT NULL,
+    identity_id uuid NOT NULL,
+    is_primary boolean DEFAULT false NOT NULL,
+    verified_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
 
@@ -3355,14 +3665,9 @@ CREATE TABLE public.instruments (
     last_price numeric(20,8),
     created_at timestamp with time zone DEFAULT now(),
     updated_at timestamp with time zone DEFAULT now(),
-    mic_code character varying(10),
-    figi character varying(20),
-    figi_composite character varying(20),
-    figi_share_class character varying(20),
     market_sector character varying(50),
-    metadata_source character varying(50),
-    metadata_refreshed_at timestamp with time zone,
-    openfigi_exch_code character varying(10)
+    price_source_id uuid,
+    price_as_of timestamp with time zone
 );
 
 
@@ -4016,6 +4321,14 @@ ALTER TABLE ONLY public.entity_aliases
 
 
 --
+-- Name: entity_identities entity_identities_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.entity_identities
+    ADD CONSTRAINT entity_identities_pkey PRIMARY KEY (entity_id, identity_id);
+
+
+--
 -- Name: entity_metrics entity_metrics_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -4072,6 +4385,14 @@ ALTER TABLE ONLY public.exchange_rates
 
 
 --
+-- Name: exchange_source_mappings exchange_source_mappings_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.exchange_source_mappings
+    ADD CONSTRAINT exchange_source_mappings_pkey PRIMARY KEY (exchange, system_id, source_exchange_code);
+
+
+--
 -- Name: exchanges exchanges_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -4104,6 +4425,38 @@ ALTER TABLE ONLY public.filings
 
 
 --
+-- Name: identities identities_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.identities
+    ADD CONSTRAINT identities_pkey PRIMARY KEY (identity_id);
+
+
+--
+-- Name: identity_observations identity_observations_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.identity_observations
+    ADD CONSTRAINT identity_observations_pkey PRIMARY KEY (identity_observation_id);
+
+
+--
+-- Name: identity_types identity_types_code_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.identity_types
+    ADD CONSTRAINT identity_types_code_key UNIQUE (code);
+
+
+--
+-- Name: identity_types identity_types_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.identity_types
+    ADD CONSTRAINT identity_types_pkey PRIMARY KEY (identity_type_id);
+
+
+--
 -- Name: entity_impact_history impact_history_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -4128,11 +4481,35 @@ ALTER TABLE ONLY public.instrument_aliases
 
 
 --
+-- Name: instrument_consolidation_audit instrument_consolidation_audit_duplicate_instrument_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.instrument_consolidation_audit
+    ADD CONSTRAINT instrument_consolidation_audit_duplicate_instrument_id_key UNIQUE (duplicate_instrument_id);
+
+
+--
+-- Name: instrument_consolidation_audit instrument_consolidation_audit_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.instrument_consolidation_audit
+    ADD CONSTRAINT instrument_consolidation_audit_pkey PRIMARY KEY (consolidation_id);
+
+
+--
 -- Name: instrument_entity_exposure instrument_exposure_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.instrument_entity_exposure
     ADD CONSTRAINT instrument_exposure_pkey PRIMARY KEY (exposure_id);
+
+
+--
+-- Name: instrument_identities instrument_identities_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.instrument_identities
+    ADD CONSTRAINT instrument_identities_pkey PRIMARY KEY (instrument_id, identity_id);
 
 
 --
@@ -4480,6 +4857,14 @@ ALTER TABLE ONLY public.tags
 
 
 --
+-- Name: identities uq_identities_type_value; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.identities
+    ADD CONSTRAINT uq_identities_type_value UNIQUE (identity_type_id, normalized_value);
+
+
+--
 -- Name: market_price_refresh_queue uq_market_price_refresh_instrument; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -4557,6 +4942,13 @@ CREATE INDEX idx_market_search_cache_created ON public.market_search_cache USING
 
 
 --
+-- Name: ix_exchange_source_mappings_exchange; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_exchange_source_mappings_exchange ON public.exchange_source_mappings USING btree (exchange);
+
+
+--
 -- Name: ix_holding_snapshots_date; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -4578,17 +4970,17 @@ CREATE INDEX ix_holding_snapshots_portfolio ON public.portfolio_holdings_snapsho
 
 
 --
--- Name: ix_instruments_mic_code; Type: INDEX; Schema: public; Owner: -
+-- Name: ix_identities_normalized_value; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX ix_instruments_mic_code ON public.instruments USING btree (mic_code) WHERE (mic_code IS NOT NULL);
+CREATE INDEX ix_identities_normalized_value ON public.identities USING btree (normalized_value);
 
 
 --
--- Name: ix_instruments_openfigi_exch_code; Type: INDEX; Schema: public; Owner: -
+-- Name: ix_instrument_identities_identity; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX ix_instruments_openfigi_exch_code ON public.instruments USING btree (openfigi_exch_code) WHERE (openfigi_exch_code IS NOT NULL);
+CREATE INDEX ix_instrument_identities_identity ON public.instrument_identities USING btree (identity_id);
 
 
 --
@@ -4767,6 +5159,13 @@ CREATE UNIQUE INDEX uq_entity_score ON public.entity_scores USING btree (entity_
 
 
 --
+-- Name: uq_external_systems_code; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_external_systems_code ON public.external_systems USING btree (code) WHERE (code IS NOT NULL);
+
+
+--
 -- Name: uq_filings; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -4781,17 +5180,17 @@ CREATE UNIQUE INDEX uq_holding_snapshot ON public.portfolio_holdings_snapshots U
 
 
 --
+-- Name: uq_identity_observation_source; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_identity_observation_source ON public.identity_observations USING btree (identity_id, system_id, COALESCE(source_reference, ''::character varying));
+
+
+--
 -- Name: uq_instrument_alias; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE UNIQUE INDEX uq_instrument_alias ON public.instrument_aliases USING btree (alias_symbol);
-
-
---
--- Name: uq_instruments_figi; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE UNIQUE INDEX uq_instruments_figi ON public.instruments USING btree (figi) WHERE (figi IS NOT NULL);
 
 
 --
@@ -5071,6 +5470,22 @@ ALTER TABLE ONLY public.entity_aliases
 
 
 --
+-- Name: entity_identities entity_identities_entity_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.entity_identities
+    ADD CONSTRAINT entity_identities_entity_id_fkey FOREIGN KEY (entity_id) REFERENCES public.entities(entity_id) ON DELETE CASCADE;
+
+
+--
+-- Name: entity_identities entity_identities_identity_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.entity_identities
+    ADD CONSTRAINT entity_identities_identity_id_fkey FOREIGN KEY (identity_id) REFERENCES public.identities(identity_id) ON DELETE CASCADE;
+
+
+--
 -- Name: entity_metrics entity_metrics_entity_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -5159,11 +5574,51 @@ ALTER TABLE ONLY public.etf_constituents
 
 
 --
+-- Name: exchange_source_mappings exchange_source_mappings_exchange_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.exchange_source_mappings
+    ADD CONSTRAINT exchange_source_mappings_exchange_fkey FOREIGN KEY (exchange) REFERENCES public.exchanges(exchange) ON DELETE CASCADE;
+
+
+--
+-- Name: exchange_source_mappings exchange_source_mappings_system_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.exchange_source_mappings
+    ADD CONSTRAINT exchange_source_mappings_system_id_fkey FOREIGN KEY (system_id) REFERENCES public.external_systems(system_id) ON DELETE CASCADE;
+
+
+--
 -- Name: filings filings_entity_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.filings
     ADD CONSTRAINT filings_entity_id_fkey FOREIGN KEY (entity_id) REFERENCES public.entities(entity_id);
+
+
+--
+-- Name: identities identities_identity_type_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.identities
+    ADD CONSTRAINT identities_identity_type_id_fkey FOREIGN KEY (identity_type_id) REFERENCES public.identity_types(identity_type_id);
+
+
+--
+-- Name: identity_observations identity_observations_identity_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.identity_observations
+    ADD CONSTRAINT identity_observations_identity_id_fkey FOREIGN KEY (identity_id) REFERENCES public.identities(identity_id) ON DELETE CASCADE;
+
+
+--
+-- Name: identity_observations identity_observations_system_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.identity_observations
+    ADD CONSTRAINT identity_observations_system_id_fkey FOREIGN KEY (system_id) REFERENCES public.external_systems(system_id) ON DELETE SET NULL;
 
 
 --
@@ -5207,6 +5662,22 @@ ALTER TABLE ONLY public.instrument_entity_exposure
 
 
 --
+-- Name: instrument_identities instrument_identities_identity_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.instrument_identities
+    ADD CONSTRAINT instrument_identities_identity_id_fkey FOREIGN KEY (identity_id) REFERENCES public.identities(identity_id) ON DELETE CASCADE;
+
+
+--
+-- Name: instrument_identities instrument_identities_instrument_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.instrument_identities
+    ADD CONSTRAINT instrument_identities_instrument_id_fkey FOREIGN KEY (instrument_id) REFERENCES public.instruments(instrument_id) ON DELETE CASCADE;
+
+
+--
 -- Name: instrument_relations instrument_relations_child_instrument_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -5228,6 +5699,14 @@ ALTER TABLE ONLY public.instrument_relations
 
 ALTER TABLE ONLY public.instruments
     ADD CONSTRAINT instruments_entity_id_fkey FOREIGN KEY (entity_id) REFERENCES public.entities(entity_id) ON DELETE CASCADE;
+
+
+--
+-- Name: instruments instruments_price_source_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.instruments
+    ADD CONSTRAINT instruments_price_source_id_fkey FOREIGN KEY (price_source_id) REFERENCES public.external_systems(system_id);
 
 
 --
@@ -5514,5 +5993,5 @@ ALTER TABLE ONLY public.watchlists
 -- PostgreSQL database dump complete
 --
 
-\unrestrict LWzHvucViYOGWt5sNsq8P6hlxPaNgb1Ky1TAVGYqPn97ae90OdpouC8L4xzCa5a
+\unrestrict SuGG7r0RKqgwzurGDFJBXvkkX72OmNFQDFafuuC8fFEtB1Z4RNowInmGUjMN1Eb
 

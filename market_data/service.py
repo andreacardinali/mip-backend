@@ -83,15 +83,22 @@ class MarketDataService:
             return None
 
         profile = _merge_profiles(profiles)
-        if include_quote and profile.last_price is None:
-            quote = self.get_quote(reference, required=False)
+        if include_quote:
+            quote = self.get_quote(
+                reference,
+                required=False,
+            )
+
             if quote:
+                quote_source = quote.source or "unknown"
+
                 profile = profile.with_fields(
                     last_price=quote.price,
                     price_timestamp=quote.timestamp,
                     provenance={
                         **profile.provenance,
-                        "last_price": quote.source or "unknown",
+                        "last_price": quote_source,
+                        "price_timestamp": quote_source,
                     },
                 )
         return profile

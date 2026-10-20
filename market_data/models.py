@@ -70,12 +70,26 @@ class InstrumentProfile:
         return replace(self, **values)
 
     def to_import_payload(self) -> dict[str, Any]:
+        profile_source = (self.source or "").upper() or None
+        price_source = (self.provenance.get("last_price") or "").upper() or None
+        identifiers = {
+            key: value
+            for key, value in (
+                ("ISIN", self.isin),
+                ("WKN", self.wkn),
+                ("FIGI", self.figi),
+                ("FIGI_COMPOSITE", self.figi_composite),
+                ("FIGI_SHARE_CLASS", self.figi_share_class),
+            )
+            if value
+        }
         return {
             "symbol": self.symbol,
             "name": self.name,
             "instrument_type": self.instrument_type.value,
             "currency": self.currency,
             "country_code": self.country_code,
+            "identifiers": identifiers,
             "isin": self.isin,
             "wkn": self.wkn,
             "figi": self.figi,
@@ -88,8 +102,11 @@ class InstrumentProfile:
             "website": self.website,
             "description": self.description,
             "last_price": self.last_price,
+            "price_timestamp": self.price_timestamp,
+            "price_source": price_source,
             "market_sector": self.market_sector,
-            "data_source": (self.source or "").upper() or None,
+            "source": profile_source,
+            "data_source": profile_source,
         }
 
 
