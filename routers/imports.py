@@ -5,7 +5,9 @@ from sqlalchemy import text
 
 from auth.security import CurrentUser, get_current_user
 from db import SessionLocal
+from market_data.capabilities import InstrumentType
 from market_data.factory import market_data
+from market_data.models import InstrumentReference
 from services.market_price_refresh import enqueue_price_refresh
 
 router = APIRouter()
@@ -16,13 +18,24 @@ def _clean_data_source(value) -> str:
     return cleaned or "YAHOO"
 
 
+def _clean_optional(value):
+    text_value = str(value or "").strip()
+    return text_value or None
+
+
+def _instrument_type(value) -> InstrumentType:
+    normalized = str(value or "").strip().upper()
+    try:
+        return InstrumentType(normalized)
+    except ValueError:
+        return InstrumentType.UNKNOWN
+
+
 def _has_price(payload) -> bool:
     return isinstance(payload, dict) and payload.get("last_price") is not None
 
 
-def _enqueue_missing_price(
-    db, local_payload: dict, symbol: str, data_source: str
-) -> str:
+def _enqueue_missing_price(db, local_payload, symbol, data_source):
     return enqueue_price_refresh(
         db,
         instrument_id=local_payload["instrument_id"],
@@ -31,7 +44,7 @@ def _enqueue_missing_price(
     )
 
 
-def _persist_reference_metadata(db, instrument_id, profile: dict) -> None:
+def _persist_reference_metadata(db, instrument_id, profile):
     db.execute(
         text(
             """
@@ -49,7 +62,10 @@ def _persist_reference_metadata(db, instrument_id, profile: dict) -> None:
 
 
 @router.post("/entity")
-def import_entity(payload: dict, current_user: CurrentUser = Depends(get_current_user)):
+def import_entity(
+    payload: dict,
+    current_user: CurrentUser = Depends(get_current_user),
+):
     db = SessionLocal()
     try:
         symbol = str(payload.get("symbol") or "").strip().upper()
@@ -57,8 +73,18 @@ def import_entity(payload: dict, current_user: CurrentUser = Depends(get_current
             raise HTTPException(status_code=422, detail="symbol is required")
 
         requested_data_source = _clean_data_source(payload.get("data_source"))
+        requested_isin = _clean_optional(payload.get("isin"))
+        requested_currency = _clean_optional(payload.get("currency"))
+        requested_exchange = _clean_optional(
+            payload.get("exchange_code") or payload.get("exchange")
+        )
+        requested_type = _instrument_type(
+            payload.get("instrument_type") or payload.get("type")
+        )
+
         symbol_info = db.execute(
-            text("SELECT sp_get_symbol(:symbol, 168)"), {"symbol": symbol}
+            text("SELECT sp_get_symbol(:symbol, 168)"),
+            {"symbol": symbol},
         ).scalar()
         local_payload = (
             symbol_info.get("payload")
@@ -78,31 +104,46 @@ def import_entity(payload: dict, current_user: CurrentUser = Depends(get_current
                 "source": "LOCAL",
                 "price_available": True,
                 "price_refresh_status": "NOT_REQUIRED",
+                "price_refresh_job_id": None,
             }
-
-        profile = None
-        if (
-            symbol_info
-            and symbol_info.get("source") == "CACHE"
-            and _has_price(local_payload)
-        ):
-            profile = local_payload
 
         provider_data_source = _clean_data_source(
             (local_payload or {}).get("data_source") or requested_data_source
         )
-        if not profile:
-            profile = market_data.get_profile(
-                symbol,
-                data_source=provider_data_source,
-                require_price=True,
-                price_timeout_seconds=3,
-            )
 
-        if not profile:
+        profile_payload = None
+        if (
+            symbol_info
+            and symbol_info.get("source") == "CACHE"
+            and _has_price(local_payload)
+            and not requested_isin
+            and not requested_currency
+            and not requested_exchange
+        ):
+            profile_payload = local_payload
+
+        if profile_payload is None:
+            reference = InstrumentReference(
+                symbol=symbol,
+                isin=requested_isin,
+                instrument_type=requested_type,
+                currency=requested_currency,
+                exchange_code=requested_exchange,
+            )
+            profile = market_data.get_profile(
+                reference,
+                required_fields={"name"},
+                include_quote=True,
+            )
+            profile_payload = profile.to_import_payload() if profile else None
+
+        if not profile_payload:
             if local_payload:
                 job_id = _enqueue_missing_price(
-                    db, local_payload, symbol, provider_data_source
+                    db,
+                    local_payload,
+                    symbol,
+                    provider_data_source,
                 )
                 db.commit()
                 return {
@@ -116,16 +157,30 @@ def import_entity(payload: dict, current_user: CurrentUser = Depends(get_current
                 }
             raise HTTPException(status_code=404, detail="symbol not found")
 
+        # The selected symbol is the listing identity. Do not let a profile
+        # resolved through a shared ISIN silently replace it with another
+        # currency/listing.
+        profile_payload["symbol"] = symbol
+        if requested_isin:
+            profile_payload["isin"] = requested_isin
+            profile_payload.setdefault("identifiers", {})["ISIN"] = requested_isin
+        if requested_currency:
+            profile_payload["currency"] = requested_currency.upper()
+        if requested_exchange:
+            profile_payload["exchange"] = requested_exchange.upper()
+        if requested_type != InstrumentType.UNKNOWN:
+            profile_payload["instrument_type"] = requested_type.value
+
         result = db.execute(
             text("SELECT * FROM sp_import_asset_profile(CAST(:payload AS jsonb))"),
-            {"payload": json.dumps(profile)},
+            {"payload": json.dumps(profile_payload, default=str)},
         ).first()
         if not result:
             raise RuntimeError("sp_import_asset_profile returned no row")
 
-        _persist_reference_metadata(db, result.instrument_id, profile)
+        _persist_reference_metadata(db, result.instrument_id, profile_payload)
 
-        price_available = profile.get("last_price") is not None
+        price_available = profile_payload.get("last_price") is not None
         refresh_status = "NOT_REQUIRED"
         refresh_job_id = None
         if not price_available:

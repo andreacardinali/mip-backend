@@ -75,12 +75,13 @@ class EulerpoolProvider:
         self.retry_policy = retry_policy or RetryPolicy()
         self._client = client
         self._exchange_cache = None
+        self._exact_listing_cache = {}
 
     def search(self, query, *, limit=20):
         payload = self._get(f"/screener/search/{quote(query, safe='')}")
         if not isinstance(payload, list):
             return []
-        return [
+        results = [
             InstrumentSearchResult(
                 symbol=str(item.get("ticker") or ""),
                 name=str(item.get("name") or item.get("ticker") or ""),
@@ -93,57 +94,116 @@ class EulerpoolProvider:
             for item in payload[:limit]
             if item.get("ticker")
         ]
+        if _looks_like_isin(query):
+            return [self._enrich_search_result(item) for item in results]
+        return results
+
+    def _enrich_search_result(self, result):
+        try:
+            profile = self.get_profile(
+                type(
+                    "Reference",
+                    (),
+                    {
+                        "symbol": result.symbol,
+                        "isin": result.isin,
+                        "instrument_type": result.instrument_type,
+                        "currency": (
+                            result.currency or _listing_hints(result.symbol)[0]
+                        ),
+                        "exchange_code": (
+                            result.exchange_code or _listing_hints(result.symbol)[1]
+                        ),
+                    },
+                )()
+            )
+        except InstrumentNotFoundError:
+            return result
+        return InstrumentSearchResult(
+            symbol=result.symbol,
+            name=result.name or profile.name,
+            instrument_type=(
+                result.instrument_type
+                if result.instrument_type != InstrumentType.UNKNOWN
+                else profile.instrument_type
+            ),
+            currency=profile.currency or result.currency,
+            isin=result.isin or profile.isin,
+            wkn=result.wkn or profile.wkn,
+            exchange_code=profile.exchange_code,
+            exchange_name=profile.exchange_name,
+            source=self.name,
+        )
 
     def get_profile(self, instrument):
-        identifier = instrument.isin or instrument.symbol
-        if not identifier:
-            raise InstrumentNotFoundError("Eulerpool requires ISIN or symbol")
-
-        if instrument.instrument_type in {InstrumentType.ETF, InstrumentType.ETP}:
-            resources = ["etf"]
-        elif instrument.instrument_type == InstrumentType.STOCK:
-            resources = ["equity"]
-        else:
-            resources = ["equity", "etf"]
-
-        for resource in resources:
-            try:
-                profile = self._get(f"/{resource}/profile/{quote(identifier, safe='')}")
-            except InstrumentNotFoundError:
-                continue
-
-            symbol = (
-                profile.get("symbol")
-                or instrument.symbol
-                or profile.get("ticker")
-                or identifier
+        identifiers = [value for value in (instrument.symbol, instrument.isin) if value]
+        if not identifiers:
+            raise InstrumentNotFoundError("Eulerpool requires symbol or ISIN")
+        resources = (
+            ["etf"]
+            if instrument.instrument_type in {InstrumentType.ETF, InstrumentType.ETP}
+            else (
+                ["equity"]
+                if instrument.instrument_type == InstrumentType.STOCK
+                else ["equity", "etf"]
             )
-            exchange_name = _primary_exchange_name(profile)
-            if not exchange_name:
-                exchange_name = self._fetch_primary_exchange(identifier)
-            exchange = self._resolve_exchange(exchange_name)
-
-            return InstrumentProfile(
-                symbol=symbol,
-                name=profile.get("name") or symbol,
-                instrument_type=(
-                    InstrumentType.ETF if resource == "etf" else InstrumentType.STOCK
-                ),
-                currency=profile.get("currency") or instrument.currency,
-                country_code=profile.get("country") or profile.get("domicile"),
-                isin=profile.get("isin") or instrument.isin,
-                wkn=profile.get("wkn"),
-                exchange_code=exchange.code if exchange else None,
-                exchange_name=exchange_name or (exchange.name if exchange else None),
-                sector=profile.get("sector") or profile.get("assetClass"),
-                industry=profile.get("industry") or profile.get("investmentSegment"),
-                website=profile.get("website"),
-                description=profile.get("description"),
-                last_price=_number(profile.get("latestQuotes")),
-                source=self.name,
-            )
-
-        raise InstrumentNotFoundError(identifier)
+        )
+        for identifier in identifiers:
+            for resource in resources:
+                try:
+                    profile = self._get(
+                        f"/{resource}/profile/{quote(identifier, safe='')}"
+                    )
+                except InstrumentNotFoundError:
+                    continue
+                symbol = (
+                    instrument.symbol
+                    or profile.get("symbol")
+                    or profile.get("ticker")
+                    or identifier
+                )
+                hinted_currency, hinted_exchange = _listing_hints(symbol)
+                exchange_name = _primary_exchange_name(profile)
+                if not exchange_name and not (
+                    instrument.exchange_code or hinted_exchange
+                ):
+                    exchange_name = self._fetch_primary_exchange(identifier)
+                exchange = self._resolve_exchange(exchange_name)
+                return InstrumentProfile(
+                    symbol=symbol,
+                    name=profile.get("name") or symbol,
+                    instrument_type=(
+                        InstrumentType.ETF
+                        if resource == "etf"
+                        else InstrumentType.STOCK
+                    ),
+                    currency=(
+                        instrument.currency
+                        or hinted_currency
+                        or profile.get("currency")
+                    ),
+                    country_code=profile.get("country") or profile.get("domicile"),
+                    isin=instrument.isin or profile.get("isin"),
+                    wkn=profile.get("wkn"),
+                    exchange_code=(
+                        instrument.exchange_code
+                        or hinted_exchange
+                        or (exchange.code if exchange else None)
+                    ),
+                    exchange_name=(
+                        exchange_name
+                        or (exchange.name if exchange else None)
+                        or _exchange_name(hinted_exchange)
+                    ),
+                    sector=profile.get("sector") or profile.get("assetClass"),
+                    industry=profile.get("industry")
+                    or profile.get("investmentSegment"),
+                    website=profile.get("website"),
+                    description=profile.get("description"),
+                    last_price=_number(profile.get("latestQuotes")),
+                    source=self.name,
+                )
+        raise InstrumentNotFoundError(identifiers[0])
 
     def get_quote(self, instrument):
         request = type("Request", (), {"instrument": instrument})()
@@ -160,9 +220,16 @@ class EulerpoolProvider:
 
     def get_price_history(self, request):
         instrument = request.instrument
-        identifier = instrument.isin or instrument.symbol
-        if not identifier:
-            raise InstrumentNotFoundError("Eulerpool requires ISIN or symbol")
+        if instrument.symbol:
+            if not self._supports_exact_listing(instrument.symbol):
+                raise InstrumentNotFoundError(
+                    f"Eulerpool does not resolve exact listing {instrument.symbol}"
+                )
+            identifiers = [instrument.symbol]
+        elif instrument.isin:
+            identifiers = [instrument.isin]
+        else:
+            raise InstrumentNotFoundError("Eulerpool requires symbol or ISIN")
 
         resources = (
             ["etf", "equity"]
@@ -170,73 +237,79 @@ class EulerpoolProvider:
             in {InstrumentType.ETF, InstrumentType.ETP, InstrumentType.UNKNOWN}
             else ["equity"]
         )
-
-        for resource in resources:
-            try:
-                payload = self._get(f"/{resource}/quotes/{quote(identifier, safe='')}")
-            except InstrumentNotFoundError:
-                continue
-
-            rows = []
-            if isinstance(payload, list):
-                for item in payload:
-                    if (
-                        isinstance(item, list)
-                        and len(item) >= 2
-                        and item[0] is not None
-                        and item[1] is not None
-                    ):
-                        timestamp = int(item[0])
-                        if timestamp > 10_000_000_000:
-                            timestamp //= 1000
-                        rows.append(
-                            PricePoint(
-                                timestamp,
-                                float(item[1]),
-                                instrument.currency,
+        for identifier in identifiers:
+            for resource in resources:
+                try:
+                    payload = self._get(
+                        f"/{resource}/quotes/{quote(identifier, safe='')}"
+                    )
+                except InstrumentNotFoundError:
+                    continue
+                rows = []
+                if isinstance(payload, list):
+                    for item in payload:
+                        if (
+                            isinstance(item, list)
+                            and len(item) >= 2
+                            and item[0] is not None
+                            and item[1] is not None
+                        ):
+                            timestamp = int(item[0])
+                            if timestamp > 10_000_000_000:
+                                timestamp //= 1000
+                            rows.append(
+                                PricePoint(
+                                    timestamp, float(item[1]), instrument.currency
+                                )
                             )
-                        )
-            if rows:
-                return rows
-
-        raise InstrumentNotFoundError(identifier)
+                if rows:
+                    return rows
+        raise InstrumentNotFoundError(identifiers[0])
 
     def get_ohlcv(self, request):
-        identifier = request.instrument.isin or request.instrument.symbol
+        identifier = request.instrument.symbol or request.instrument.isin
         if not identifier:
-            raise InstrumentNotFoundError("Eulerpool requires ISIN or symbol")
-
+            raise InstrumentNotFoundError("Eulerpool requires symbol or ISIN")
         resolution = {"1d": "D", "1wk": "W", "1mo": "M"}.get(
-            request.interval,
-            request.interval,
+            request.interval, request.interval
         )
         params = {"resolution": resolution}
         if request.from_timestamp is not None:
             params["from"] = request.from_timestamp
         if request.to_timestamp is not None:
             params["to"] = request.to_timestamp
-
         payload = self._get(
-            f"/charting/ohlcv/{quote(identifier, safe='')}",
-            params=params,
+            f"/charting/ohlcv/{quote(identifier, safe='')}", params=params
         )
         arrays = {key: payload.get(key) or [] for key in "tohlcv"}
         length = min(map(len, arrays.values())) if arrays else 0
         return [
             PriceBar(
-                timestamp=int(arrays["t"][index]),
-                open=float(arrays["o"][index]),
-                high=float(arrays["h"][index]),
-                low=float(arrays["l"][index]),
-                close=float(arrays["c"][index]),
-                volume=(
-                    float(arrays["v"][index])
-                    if arrays["v"][index] is not None
-                    else None
-                ),
+                timestamp=int(arrays["t"][i]),
+                open=float(arrays["o"][i]),
+                high=float(arrays["h"][i]),
+                low=float(arrays["l"][i]),
+                close=float(arrays["c"][i]),
+                volume=float(arrays["v"][i]) if arrays["v"][i] is not None else None,
             )
-            for index in range(length)
+            for i in range(length)
         ]
+
+    def _supports_exact_listing(self, symbol):
+        normalized = str(symbol or "").strip().upper()
+        if not normalized:
+            return False
+        cached = self._exact_listing_cache.get(normalized)
+        if cached is not None:
+            return cached
+        payload = self._get(f"/screener/search/{quote(normalized, safe='')}")
+        supported = isinstance(payload, list) and any(
+            str(item.get("ticker") or "").strip().upper() == normalized
+            for item in payload
+            if isinstance(item, dict)
+        )
+        self._exact_listing_cache[normalized] = supported
+        return supported
 
     def _fetch_primary_exchange(self, identifier):
         try:
@@ -245,12 +318,11 @@ class EulerpoolProvider:
             )
         except InstrumentNotFoundError:
             return None
-
-        if isinstance(payload, dict):
-            primary = payload.get("primary")
-            if primary:
-                return str(primary)
-        return None
+        return (
+            str(payload.get("primary"))
+            if isinstance(payload, dict) and payload.get("primary")
+            else None
+        )
 
     def _resolve_exchange(self, name):
         if not name:
@@ -268,7 +340,6 @@ class EulerpoolProvider:
                 for item in payload
                 if item.get("code")
             ]
-
         needle = name.strip().lower()
         aliases = {
             "milan": "xmil",
@@ -277,9 +348,12 @@ class EulerpoolProvider:
             "frankfurt": "xfra",
             "stuttgart": "xstu",
             "xetra": "xetr",
+            "paris": "xpar",
+            "euronext paris": "xpar",
+            "london": "xlon",
+            "amsterdam": "xams",
         }
         code = aliases.get(needle)
-
         for exchange in self._exchange_cache:
             if (
                 exchange.code.lower() == needle
@@ -293,7 +367,6 @@ class EulerpoolProvider:
         owns_client = self._client is None
         client = self._client or httpx.Client(timeout=self.timeout)
         query = {"token": self.api_key, **(params or {})}
-
         try:
             try:
                 response = request_with_retry(
@@ -311,6 +384,46 @@ class EulerpoolProvider:
         finally:
             if owns_client:
                 client.close()
+
+
+def _listing_hints(symbol):
+    value = str(symbol or "").strip().upper()
+    suffix_map = {
+        ".PA": ("EUR", "XPAR"),
+        ".AS": ("EUR", "XAMS"),
+        ".MI": ("EUR", "XMIL"),
+        ".DE": ("EUR", "XETR"),
+        ".F": ("EUR", "XFRA"),
+        ".SW": ("CHF", "XSWX"),
+        ".L": ("GBP", "XLON"),
+    }
+    currency = "EUR" if "-EUR." in value else None
+    for suffix, (default_currency, exchange_code) in suffix_map.items():
+        if value.endswith(suffix):
+            return currency or default_currency, exchange_code
+    return currency, None
+
+
+def _exchange_name(code):
+    return {
+        "XPAR": "Euronext Paris",
+        "XAMS": "Euronext Amsterdam",
+        "XMIL": "Milan",
+        "XETR": "XETRA",
+        "XFRA": "Frankfurt",
+        "XSWX": "SIX Swiss Exchange",
+        "XLON": "London Stock Exchange",
+    }.get(code)
+
+
+def _looks_like_isin(value):
+    compact = str(value or "").strip().upper()
+    return (
+        len(compact) == 12
+        and compact[:2].isalpha()
+        and compact[-1].isdigit()
+        and compact[2:11].isalnum()
+    )
 
 
 def _type(value):

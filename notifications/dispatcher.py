@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 
 from notifications.config import NotificationConfig
 from notifications.models import NotificationDelivery
-from notifications.plugins.telegram import TelegramPlugin
+from notifications.providers.telegram import TelegramProvider
 from notifications.repository import NotificationRepository
 
 logger = logging.getLogger(__name__)
@@ -19,8 +19,8 @@ class NotificationDispatcher:
         self.db = db
         self.config = config
         self.repo = NotificationRepository(db)
-        self.plugins = {
-            "TELEGRAM": TelegramPlugin(timeout_seconds=config.http_timeout_seconds),
+        self.providers = {
+            "TELEGRAM": TelegramProvider(timeout_seconds=config.http_timeout_seconds),
         }
 
     def run_once(self) -> dict:
@@ -44,8 +44,8 @@ class NotificationDispatcher:
 
         for delivery in deliveries:
             try:
-                plugin = self._plugin_for(delivery)
-                result = plugin.send(delivery)
+                provider = self._provider_for(delivery)
+                result = provider.send(delivery)
                 self.repo.mark_sent(
                     notification_id=delivery.notification_id,
                     provider_message_id=result.provider_message_id,
@@ -90,9 +90,9 @@ class NotificationDispatcher:
             "errors": errors,
         }
 
-    def _plugin_for(self, delivery: NotificationDelivery):
+    def _provider_for(self, delivery: NotificationDelivery):
         try:
-            return self.plugins[delivery.channel.upper()]
+            return self.providers[delivery.channel.upper()]
         except KeyError as exc:
             raise ValueError(
                 f"Unsupported notification channel: {delivery.channel}"

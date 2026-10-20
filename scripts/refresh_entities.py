@@ -22,7 +22,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--debug",
         action="store_true",
-        help="Print progress and provider/reference metadata for every entity.",
+        help="Print progress and normalized provider metadata for every entity.",
     )
     parser.add_argument(
         "--verbose-errors",
@@ -38,6 +38,19 @@ def _format_value(value: Any) -> str:
     if isinstance(value, bool):
         return "yes" if value else "no"
     return str(value)
+
+
+def _format_identifiers(value: Any) -> str:
+    if not isinstance(value, dict) or not value:
+        return "-"
+    return (
+        ",".join(
+            f"{key}={identifier}"
+            for key, identifier in sorted(value.items())
+            if identifier is not None
+        )
+        or "-"
+    )
 
 
 def _progress_printer(event: dict[str, Any]) -> None:
@@ -61,13 +74,14 @@ def _progress_printer(event: dict[str, Any]) -> None:
         print(
             f"{prefix} PROFILE {event['symbol']} "
             f"name={_format_value(event.get('name'))} "
-            f"source={_format_value(event.get('data_source'))} "
+            f"profile_source={_format_value(event.get('data_source'))} "
+            f"price_source={_format_value(event.get('price_source'))} "
             f"price={_format_value(event.get('price_available'))} "
+            f"price_as_of={_format_value(event.get('price_timestamp'))} "
             f"exchange={_format_value(event.get('exchange'))} "
-            f"mic={_format_value(event.get('mic_code'))} "
-            f"openfigi_exch={_format_value(event.get('openfigi_exch_code'))} "
-            f"figi={_format_value(event.get('figi'))} "
-            f"metadata={_format_value(event.get('metadata_source'))}",
+            f"currency={_format_value(event.get('currency'))} "
+            f"type={_format_value(event.get('instrument_type'))} "
+            f"identifiers={_format_identifiers(event.get('identifiers'))}",
             flush=True,
         )
     elif event_name == "DATABASE_UPDATE_STARTED":

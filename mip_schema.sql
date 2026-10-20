@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict k25JbbhyfCeBh1YQmGiubo9wL2rfhpmx2qBgKk11vvUW4ss7Q3Xvrcy0dx6clqn
+\restrict f8DwkaexvSYvIJvFli348HLVrdm9Vako3NR01yTeD9wDYunKlv6nWOR2wqp3Gia
 
 -- Dumped from database version 18.6 (Debian 18.6-1.pgdg13+2)
 -- Dumped by pg_dump version 18.6 (Debian 18.6-1.pgdg13+2)
@@ -4171,12 +4171,13 @@ CREATE TABLE public.users (
     username character varying(100) NOT NULL,
     email character varying(255),
     display_name character varying(255),
-    reporting_currency character(3) DEFAULT 'USD'::bpchar,
+    reporting_currency character(3) DEFAULT 'EUR'::bpchar NOT NULL,
     timezone character varying(50) DEFAULT 'Europe/Rome'::character varying,
     is_active boolean DEFAULT true NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    password_hash text
+    password_hash text,
+    CONSTRAINT ck_users_reporting_currency CHECK ((((reporting_currency)::text = upper((reporting_currency)::text)) AND (reporting_currency ~ '^[A-Z]{3}$'::text)))
 );
 
 
@@ -5993,5 +5994,5 @@ ALTER TABLE ONLY public.watchlists
 -- PostgreSQL database dump complete
 --
 
-\unrestrict k25JbbhyfCeBh1YQmGiubo9wL2rfhpmx2qBgKk11vvUW4ss7Q3Xvrcy0dx6clqn
+\unrestrict f8DwkaexvSYvIJvFli348HLVrdm9Vako3NR01yTeD9wDYunKlv6nWOR2wqp3Gia
 

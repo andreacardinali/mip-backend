@@ -8,7 +8,9 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from market_data.capabilities import InstrumentType
 from market_data.factory import market_data
+from market_data.models import InstrumentReference
 
 logger = logging.getLogger(__name__)
 ProgressCallback = Callable[[dict[str, Any]], None]
@@ -25,12 +27,41 @@ def _emit(callback: ProgressCallback | None, event: str, **payload: Any) -> None
         callback({"event": event, **payload})
 
 
-def _apply_reference_metadata(
-    db: Session,
-    *,
-    instrument_id,
-    profile: dict[str, Any],
-) -> None:
+def _row_value(row, name, default=None):
+    mapping = getattr(row, "_mapping", {})
+    return mapping.get(name, default)
+
+
+def _instrument_type(value) -> InstrumentType:
+    normalized = str(value or "").strip().upper()
+    try:
+        return InstrumentType(normalized)
+    except ValueError:
+        return InstrumentType.UNKNOWN
+
+
+def _reference_from_row(row) -> InstrumentReference:
+    return InstrumentReference(
+        symbol=str(row.symbol),
+        instrument_type=_instrument_type(_row_value(row, "instrument_type")),
+        currency=_row_value(row, "currency_code"),
+        exchange_code=_row_value(row, "exchange"),
+    )
+
+
+def _profile_payload(reference: InstrumentReference, *, full_refresh: bool):
+    required_fields = {"name"}
+    if full_refresh:
+        required_fields.update({"currency", "exchange_code"})
+    profile = market_data.get_profile(
+        reference,
+        required_fields=required_fields,
+        include_quote=True,
+    )
+    return profile.to_import_payload() if profile else None
+
+
+def _apply_reference_metadata(db, *, instrument_id, profile):
     db.execute(
         text(
             """
@@ -58,7 +89,6 @@ def refresh_entities(
 ) -> dict[str, Any]:
     normalized_mode = _normalize_mode(mode)
     normalized_symbol = _normalize_symbol(symbol)
-
     if normalized_mode == RefreshMode.SYMBOL and not normalized_symbol:
         raise ValueError("symbol is required when mode is SYMBOL")
 
@@ -71,20 +101,10 @@ def refresh_entities(
         create_if_missing=create_if_missing,
         full_refresh=full_refresh,
     )
-
     rows = db.execute(
-        text(
-            """
-            SELECT *
-            FROM sp_get_entities_for_refresh(
-                :mode,
-                :symbol
-            )
-            """
-        ),
+        text("SELECT * FROM sp_get_entities_for_refresh(:mode, :symbol)"),
         {"mode": normalized_mode.value, "symbol": normalized_symbol},
     ).fetchall()
-
     total = len(rows)
     _emit(progress, "scan_loaded", total=total)
 
@@ -95,16 +115,12 @@ def refresh_entities(
         and create_if_missing
     ):
         return _create_missing_entity(
-            db,
-            symbol=normalized_symbol,
-            full_refresh=full_refresh,
-            progress=progress,
+            db, symbol=normalized_symbol, full_refresh=full_refresh, progress=progress
         )
 
     updated = 0
     skipped = 0
-    errors: list[dict[str, str]] = []
-
+    errors = []
     for index, row in enumerate(rows, start=1):
         iteration_started_at = time.monotonic()
         row_symbol = str(row.symbol)
@@ -117,7 +133,6 @@ def refresh_entities(
             entity_id=str(row.entity_id),
             instrument_id=str(row.instrument_id),
         )
-
         try:
             _emit(
                 progress,
@@ -126,11 +141,8 @@ def refresh_entities(
                 total=total,
                 symbol=row_symbol,
             )
-            profile = market_data.get_profile(
-                row_symbol,
-                full_refresh=full_refresh,
-            )
-
+            reference = _reference_from_row(row)
+            profile = _profile_payload(reference, full_refresh=full_refresh)
             if not profile:
                 skipped += 1
                 error = "Market-data provider returned no profile"
@@ -156,12 +168,12 @@ def refresh_entities(
                 data_source=profile.get("data_source"),
                 price_available=profile.get("last_price") is not None,
                 exchange=profile.get("exchange"),
-                mic_code=profile.get("mic_code"),
-                openfigi_exch_code=profile.get("openfigi_exch_code"),
-                figi=profile.get("figi"),
-                metadata_source=profile.get("metadata_source"),
+                currency=profile.get("currency"),
+                instrument_type=profile.get("instrument_type"),
+                identifiers=profile.get("identifiers") or {},
+                price_source=profile.get("price_source"),
+                price_timestamp=profile.get("price_timestamp"),
             )
-
             _emit(
                 progress,
                 "database_update_started",
@@ -172,13 +184,7 @@ def refresh_entities(
             with db.begin_nested():
                 db.execute(
                     text(
-                        """
-                        SELECT sp_refresh_entity_from_profile(
-                            :entity_id,
-                            :instrument_id,
-                            CAST(:payload AS jsonb)
-                        )
-                        """
+                        "SELECT sp_refresh_entity_from_profile(:entity_id, :instrument_id, CAST(:payload AS jsonb))"
                     ),
                     {
                         "entity_id": row.entity_id,
@@ -187,9 +193,7 @@ def refresh_entities(
                     },
                 )
                 _apply_reference_metadata(
-                    db,
-                    instrument_id=row.instrument_id,
-                    profile=profile,
+                    db, instrument_id=row.instrument_id, profile=profile
                 )
 
             updated += 1
@@ -206,13 +210,12 @@ def refresh_entities(
                 failed=len(errors),
             )
             logger.info(
-                "Entity refreshed symbol=%s entity_id=%s source=%s metadata_source=%s",
+                "Entity refreshed symbol=%s entity_id=%s source=%s price_source=%s",
                 row_symbol,
                 row.entity_id,
                 profile.get("data_source"),
-                profile.get("metadata_source"),
+                profile.get("price_source"),
             )
-
         except Exception as exc:
             error = str(exc)
             errors.append({"symbol": row_symbol, "error": error})
@@ -250,17 +253,11 @@ def refresh_entities(
     return result
 
 
-def _create_missing_entity(
-    db: Session,
-    *,
-    symbol: str,
-    full_refresh: bool,
-    progress: ProgressCallback | None = None,
-) -> dict[str, Any]:
+def _create_missing_entity(db, *, symbol, full_refresh, progress=None):
     started_at = time.monotonic()
     _emit(progress, "create_started", symbol=symbol)
-    profile = market_data.get_profile(symbol, full_refresh=full_refresh)
-
+    reference = InstrumentReference(symbol=symbol)
+    profile = _profile_payload(reference, full_refresh=full_refresh)
     if not profile:
         result = {
             "status": "FAILED",
@@ -286,32 +283,19 @@ def _create_missing_entity(
         data_source=profile.get("data_source"),
         price_available=profile.get("last_price") is not None,
         exchange=profile.get("exchange"),
-        mic_code=profile.get("mic_code"),
-        openfigi_exch_code=profile.get("openfigi_exch_code"),
-        figi=profile.get("figi"),
-        metadata_source=profile.get("metadata_source"),
+        currency=profile.get("currency"),
+        instrument_type=profile.get("instrument_type"),
+        identifiers=profile.get("identifiers") or {},
+        price_source=profile.get("price_source"),
+        price_timestamp=profile.get("price_timestamp"),
     )
-
     row = db.execute(
-        text(
-            """
-            SELECT *
-            FROM sp_import_asset_profile(
-                CAST(:payload AS jsonb)
-            )
-            """
-        ),
+        text("SELECT * FROM sp_import_asset_profile(CAST(:payload AS jsonb))"),
         {"payload": json.dumps(profile, default=str)},
     ).first()
     if row is None:
         raise RuntimeError("sp_import_asset_profile returned no row")
-
-    _apply_reference_metadata(
-        db,
-        instrument_id=row.instrument_id,
-        profile=profile,
-    )
-
+    _apply_reference_metadata(db, instrument_id=row.instrument_id, profile=profile)
     result = {
         "status": "SUCCESS",
         "mode": RefreshMode.SYMBOL.value,
@@ -329,22 +313,22 @@ def _create_missing_entity(
     return result
 
 
-def _normalize_mode(mode: RefreshMode | str) -> RefreshMode:
-    if isinstance(mode, RefreshMode):
-        return mode
-    return RefreshMode(str(mode).strip().upper())
+def _normalize_mode(mode):
+    return (
+        mode
+        if isinstance(mode, RefreshMode)
+        else RefreshMode(str(mode).strip().upper())
+    )
 
 
-def _normalize_symbol(symbol: str | None) -> str | None:
+def _normalize_symbol(symbol):
     if symbol is None:
         return None
     normalized = symbol.strip().upper()
     return normalized or None
 
 
-def _result_status(*, updated: int, errors: list[dict[str, str]]) -> str:
+def _result_status(*, updated, errors):
     if not errors:
         return "SUCCESS"
-    if updated > 0:
-        return "PARTIAL"
-    return "FAILED"
+    return "PARTIAL" if updated > 0 else "FAILED"
