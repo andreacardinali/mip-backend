@@ -17,6 +17,10 @@ DEFAULT_ORDERS = {
     MarketDataCapability.PRICE_HISTORY: ("eulerpool", "yahoo"),
     MarketDataCapability.OHLCV: ("eulerpool", "yahoo"),
     MarketDataCapability.EXCHANGE_RATES: ("ecb",),
+    MarketDataCapability.NEWS: ("eulerpool",),
+    MarketDataCapability.ETF_HOLDINGS: ("eulerpool",),
+    MarketDataCapability.EARNINGS_CALENDAR: ("eulerpool",),
+    MarketDataCapability.ECONOMIC_CALENDAR: ("eulerpool",),
 }
 
 

@@ -1,5 +1,5 @@
 from dataclasses import asdict, dataclass, field, replace
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -167,3 +167,65 @@ class ExchangeRateSnapshot:
     reference_date: date
     base_currency: str
     rates_to_usd: dict[str, Decimal]
+
+
+@dataclass(frozen=True, slots=True)
+class NewsArticle:
+    headline: str
+    published_at: datetime
+    url: str | None = None
+    summary: str | None = None
+    source_name: str | None = None
+    category: str | None = None
+    related_symbols: tuple[str, ...] = ()
+    external_id: str | None = None
+    image_url: str | None = None
+    source: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class EtfHolding:
+    etf_symbol: str
+    name: str
+    weight_percent: float
+    symbol: str | None = None
+    isin: str | None = None
+    cusip: str | None = None
+    asset_type: str | None = None
+    shares: float | None = None
+    market_value: float | None = None
+    updated_at: datetime | None = None
+    source: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class EtfExposure:
+    name: str
+    exposure: float
+    symbol: str | None = None
+    source: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class EarningsEvent:
+    symbol: str
+    event_date: date
+    fiscal_year: int | None = None
+    fiscal_quarter: int | None = None
+    timing: str | None = None
+    eps_actual: float | None = None
+    eps_estimate: float | None = None
+    revenue_actual: float | None = None
+    revenue_estimate: float | None = None
+    isin: str | None = None
+    company_name: str | None = None
+    source: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class EconomicEvent:
+    external_id: str
+    name: str
+    release_date: date
+    notes: str | None = None
+    source: str | None = None

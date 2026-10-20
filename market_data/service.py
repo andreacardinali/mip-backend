@@ -50,7 +50,6 @@ class MarketDataService:
         profiles = []
         failures = []
         capability = MarketDataCapability.PROFILE
-
         for provider in self._ordered(capability, reference.instrument_type):
             try:
                 profile = provider.get_profile(reference)
@@ -79,16 +78,13 @@ class MarketDataService:
                     capability.value,
                     provider.name,
                 )
-
         if not profiles:
             if failures:
                 logger.info("No profile found failures=%s", failures)
             return None
-
         profile = _merge_profiles(profiles)
         if include_quote:
             quote = self.get_quote(reference, required=False)
-
             if quote:
                 quote_source = quote.source or "unknown"
                 profile = profile.with_fields(
@@ -127,15 +123,57 @@ class MarketDataService:
         )
 
     def get_exchange_rates(
-        self,
-        *,
-        required: bool = True,
+        self, *, required: bool = True
     ) -> ExchangeRateSnapshot | None:
         return self._first(
             MarketDataCapability.EXCHANGE_RATES,
             InstrumentType.UNKNOWN,
             lambda provider: provider.get_exchange_rates(),
             required=required,
+        )
+
+    def get_news(self, reference: InstrumentReference, *, limit: int = 20):
+        return self._first(
+            MarketDataCapability.NEWS,
+            reference.instrument_type,
+            lambda provider: provider.get_news(reference, limit=limit),
+        )
+
+    def get_etf_holdings(self, reference: InstrumentReference, *, limit=None):
+        return self._first(
+            MarketDataCapability.ETF_HOLDINGS,
+            reference.instrument_type,
+            lambda provider: provider.get_etf_holdings(reference, limit=limit),
+        )
+
+    def get_etf_countries(self, reference: InstrumentReference):
+        return self._first(
+            MarketDataCapability.ETF_HOLDINGS,
+            reference.instrument_type,
+            lambda provider: provider.get_etf_countries(reference),
+            required=False,
+        )
+
+    def get_etf_sectors(self, reference: InstrumentReference):
+        return self._first(
+            MarketDataCapability.ETF_HOLDINGS,
+            reference.instrument_type,
+            lambda provider: provider.get_etf_sectors(reference),
+            required=False,
+        )
+
+    def get_earnings_calendar(self, event_date, *, symbol=None):
+        return self._first(
+            MarketDataCapability.EARNINGS_CALENDAR,
+            InstrumentType.UNKNOWN,
+            lambda provider: provider.get_earnings_calendar(event_date, symbol=symbol),
+        )
+
+    def get_economic_calendar(self, *, limit=None):
+        return self._first(
+            MarketDataCapability.ECONOMIC_CALENDAR,
+            InstrumentType.UNKNOWN,
+            lambda provider: provider.get_economic_calendar(limit=limit),
         )
 
     def _ordered(self, capability, instrument_type, interval=None):
@@ -145,28 +183,19 @@ class MarketDataService:
                 provider = self.registry.get(name)
             except ValueError:
                 logger.warning(
-                    "Configured market-data provider is not registered "
-                    "capability=%s provider=%s",
+                    "Configured market-data provider is not registered capability=%s provider=%s",
                     capability.value,
                     name,
                 )
                 continue
             if provider.capabilities.supports(
-                capability,
-                instrument_type=instrument_type,
-                interval=interval,
+                capability, instrument_type=instrument_type, interval=interval
             ):
                 result.append(provider)
         return result
 
     def _first(
-        self,
-        capability,
-        instrument_type,
-        operation,
-        *,
-        interval=None,
-        required=True,
+        self, capability, instrument_type, operation, *, interval=None, required=True
     ):
         failures = []
         for provider in self._ordered(capability, instrument_type, interval):
@@ -202,7 +231,6 @@ class MarketDataService:
                     capability.value,
                     provider.name,
                 )
-
         if required:
             raise AllProvidersFailedError(capability.value, failures)
         return None
@@ -216,7 +244,6 @@ def _merge_profiles(profiles: list[InstrumentProfile]) -> InstrumentProfile:
     first = profiles[0]
     values = {}
     provenance = {}
-
     for descriptor in fields(InstrumentProfile):
         if descriptor.name == "provenance":
             continue
@@ -228,7 +255,6 @@ def _merge_profiles(profiles: list[InstrumentProfile]) -> InstrumentProfile:
                 provenance[descriptor.name] = profile.source or "unknown"
                 break
         values[descriptor.name] = value
-
     values["symbol"] = values["symbol"] or first.symbol
     values["name"] = values["name"] or first.name
     values["instrument_type"] = values["instrument_type"] or InstrumentType.UNKNOWN

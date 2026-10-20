@@ -11,6 +11,10 @@ class MarketDataCapability(StrEnum):
     PRICE_HISTORY = "price_history"
     OHLCV = "ohlcv"
     EXCHANGE_RATES = "exchange_rates"
+    NEWS = "news"
+    ETF_HOLDINGS = "etf_holdings"
+    EARNINGS_CALENDAR = "earnings_calendar"
+    ECONOMIC_CALENDAR = "economic_calendar"
 
 
 class InstrumentType(StrEnum):

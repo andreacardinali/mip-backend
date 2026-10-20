@@ -29,7 +29,20 @@ class Client:
 
 def test_etf_price_history_is_close_only():
     provider = EulerpoolProvider(
-        "key", client=Client([[[1646179200000, 25.19], [1646265600000, 25.20]]])
+        "key",
+        client=Client(
+            [
+                [
+                    {
+                        "ticker": "WSPX.MI",
+                    }
+                ],
+                [
+                    [1646179200000, 25.19],
+                    [1646265600000, 25.20],
+                ],
+            ]
+        ),
     )
     request = type(
         "R",
