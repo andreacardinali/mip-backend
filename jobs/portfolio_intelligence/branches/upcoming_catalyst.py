@@ -1,10 +1,10 @@
 import json
 from datetime import date, timedelta
 
+from job_runtime.collections import batched, deduplicate_by
 from jobs.portfolio_intelligence.branches.base import IntelligenceBranch
 from jobs.portfolio_intelligence.messages import format_upcoming_catalyst_message
 from jobs.portfolio_intelligence.models import BranchResult
-from jobs.portfolio_intelligence.notifications import NotificationDiagnostics
 from jobs.portfolio_intelligence.parsing import (
     PayloadValidationError,
     parse_upcoming_event,
@@ -12,8 +12,8 @@ from jobs.portfolio_intelligence.parsing import (
 from jobs.portfolio_intelligence.repositories.catalysts import recent_catalysts
 from jobs.portfolio_intelligence.repositories.entities import load_candidates
 from jobs.portfolio_intelligence.scoring import upcoming_catalyst_severity
-from jobs.portfolio_intelligence.utils import batched, deduplicate_by
 from llm.base import LLMRequest
+from notifications.diagnostics import NotificationDiagnostics
 
 
 class UpcomingCatalystBranch(IntelligenceBranch):

@@ -1,18 +1,18 @@
 import json
 from datetime import UTC, datetime
 
+from job_runtime.collections import batched, deduplicate_by
 from jobs.portfolio_intelligence.branches.base import IntelligenceBranch
 from jobs.portfolio_intelligence.messages import format_breaking_catalyst_message
 from jobs.portfolio_intelligence.models import BranchResult
-from jobs.portfolio_intelligence.notifications import NotificationDiagnostics
 from jobs.portfolio_intelligence.parsing import (
     PayloadValidationError,
     parse_breaking_event,
 )
 from jobs.portfolio_intelligence.repositories.entities import load_candidates
 from jobs.portfolio_intelligence.scoring import breaking_catalyst_severity
-from jobs.portfolio_intelligence.utils import batched, deduplicate_by
 from llm.base import LLMRequest
+from notifications.diagnostics import NotificationDiagnostics
 
 
 class BreakingCatalystBranch(IntelligenceBranch):

@@ -1,6 +1,7 @@
 import unittest
 
-from notifications.models import EnqueueStatus
+from notifications.diagnostics import NotificationDiagnostics
+from notifications.models import EnqueueResult, EnqueueStatus
 from notifications.queue import NotificationQueue
 
 
@@ -18,7 +19,11 @@ class FakeRepository:
 
 class EnqueueTests(unittest.TestCase):
     def _queue(
-        self, *, enabled=True, source_id="source", notification_id="notification"
+        self,
+        *,
+        enabled=True,
+        source_id="source",
+        notification_id="notification",
     ):
         queue = object.__new__(NotificationQueue)
         queue.enabled = enabled
@@ -57,6 +62,29 @@ class EnqueueTests(unittest.TestCase):
     def test_duplicate(self):
         result = self._enqueue(self._queue(notification_id=None))
         self.assertEqual(result.status, EnqueueStatus.DUPLICATE)
+
+    def test_diagnostics_counts_enqueue_outcomes(self):
+        diagnostics = NotificationDiagnostics()
+        outcomes = (
+            EnqueueResult(EnqueueStatus.CREATED, "notification-1"),
+            EnqueueResult(EnqueueStatus.DUPLICATE),
+            EnqueueResult(EnqueueStatus.DISABLED),
+            EnqueueResult(EnqueueStatus.SOURCE_NOT_FOUND),
+        )
+
+        self.assertTrue(diagnostics.record(outcomes[0]))
+        for outcome in outcomes[1:]:
+            self.assertFalse(diagnostics.record(outcome))
+
+        self.assertEqual(
+            diagnostics.to_dict(),
+            {
+                "notificationsCreated": 1,
+                "notificationsDuplicate": 1,
+                "notificationsDisabled": 1,
+                "notificationsWithoutSource": 1,
+            },
+        )
 
 
 if __name__ == "__main__":

@@ -4,13 +4,13 @@ from datetime import UTC, datetime
 from jobs.portfolio_intelligence.branches.base import IntelligenceBranch
 from jobs.portfolio_intelligence.messages import format_daily_mover_message
 from jobs.portfolio_intelligence.models import BranchResult
-from jobs.portfolio_intelligence.notifications import NotificationDiagnostics
 from jobs.portfolio_intelligence.parsing import parse_daily_validation
 from jobs.portfolio_intelligence.repositories.entities import load_candidates
 from jobs.portfolio_intelligence.scoring import daily_mover_severity
 from llm.base import LLMRequest
 from llm.evidence import select_sources
 from market_analysis.technical import analyze_price_bars
+from notifications.diagnostics import NotificationDiagnostics
 
 
 class DailyMoverBranch(IntelligenceBranch):

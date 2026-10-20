@@ -1,18 +1,14 @@
 from collections.abc import Callable, Hashable, Iterator, Sequence
-from typing import TypeVar
-
-T = TypeVar("T")
-K = TypeVar("K", bound=Hashable)
 
 
-def batched(items: Sequence[T], size: int) -> Iterator[Sequence[T]]:
+def batched[T](items: Sequence[T], size: int) -> Iterator[Sequence[T]]:
     if size < 1:
         raise ValueError("Batch size must be >= 1")
     for index in range(0, len(items), size):
         yield items[index : index + size]
 
 
-def deduplicate_by(
+def deduplicate_by[T, K: Hashable](
     items: Sequence[T],
     key: Callable[[T], K],
 ) -> list[T]:

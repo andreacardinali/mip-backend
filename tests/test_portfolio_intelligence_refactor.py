@@ -1,5 +1,6 @@
 import unittest
 
+from job_runtime.collections import batched, deduplicate_by
 from job_runtime.models import JobStatus
 from jobs.portfolio_intelligence.messages import (
     format_breaking_catalyst_message,
@@ -10,7 +11,6 @@ from jobs.portfolio_intelligence.scoring import (
     breaking_catalyst_severity,
     upcoming_catalyst_severity,
 )
-from jobs.portfolio_intelligence.utils import batched, deduplicate_by
 
 
 class RefactorTests(unittest.TestCase):
@@ -20,9 +20,14 @@ class RefactorTests(unittest.TestCase):
         self.assertEqual(list(batched([1, 2, 3], 2)), [[1, 2], [3]])
 
     def test_deduplicate_keeps_last(self):
-        items = [{"id": 1, "v": "a"}, {"id": 2, "v": "b"}, {"id": 1, "v": "c"}]
+        items = [
+            {"id": 1, "v": "a"},
+            {"id": 2, "v": "b"},
+            {"id": 1, "v": "c"},
+        ]
         self.assertEqual(
-            deduplicate_by(items, key=lambda x: x["id"]), [items[1], items[2]]
+            deduplicate_by(items, key=lambda x: x["id"]),
+            [items[1], items[2]],
         )
 
     def test_branch_result_becomes_partial(self):
