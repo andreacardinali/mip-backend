@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict f9eAAw2U9cKyBVC4mnoDEd7qTHNfmVqqNMNRBphCjsmcDAEHYi82xTScRsrVMsR
+\restrict vLSdfaqk0WEMyJjAEFn2waFCijWWohJoWrge0lipG50JiKsPLa4xvf099OsuDjE
 
 -- Dumped from database version 18.6 (Debian 18.6-1.pgdg13+2)
 -- Dumped by pg_dump version 18.6 (Debian 18.6-1.pgdg13+2)
@@ -45,6 +45,20 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public;
 --
 
 COMMENT ON EXTENSION pgcrypto IS 'cryptographic functions';
+
+
+--
+-- Name: unaccent; Type: EXTENSION; Schema: -; Owner: -
+--
+
+CREATE EXTENSION IF NOT EXISTS unaccent WITH SCHEMA public;
+
+
+--
+-- Name: EXTENSION unaccent; Type: COMMENT; Schema: -; Owner: -
+--
+
+COMMENT ON EXTENSION unaccent IS 'text search dictionary that removes accents';
 
 
 --
@@ -362,6 +376,1060 @@ BEGIN
     WHERE job_run_id=p_job_run_id RETURNING job_id INTO v_job_id;
     IF v_job_id IS NULL THEN RAISE EXCEPTION 'Scheduler run not found: %', p_job_run_id; END IF;
     UPDATE scheduler_jobs SET last_run_at=p_completed_at WHERE job_id=v_job_id;
+END;
+$$;
+
+
+--
+-- Name: sp_consolidate_entity(uuid, uuid, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_consolidate_entity(p_source_entity_id uuid, p_target_entity_id uuid, p_force boolean DEFAULT false) RETURNS jsonb
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_source entities%ROWTYPE;
+    v_target entities%ROWTYPE;
+    v_remaining_instruments integer;
+BEGIN
+    IF p_source_entity_id IS NULL
+       OR p_target_entity_id IS NULL
+    THEN
+        RAISE EXCEPTION
+            'Source and target entity IDs are required';
+    END IF;
+
+    IF p_source_entity_id = p_target_entity_id THEN
+        RETURN jsonb_build_object(
+            'status', 'UNCHANGED',
+            'entity_id', p_target_entity_id
+        );
+    END IF;
+
+    PERFORM pg_advisory_xact_lock(
+        hashtextextended(
+            LEAST(
+                p_source_entity_id::text,
+                p_target_entity_id::text
+            ),
+            0
+        )
+    );
+
+    PERFORM pg_advisory_xact_lock(
+        hashtextextended(
+            GREATEST(
+                p_source_entity_id::text,
+                p_target_entity_id::text
+            ),
+            0
+        )
+    );
+
+    SELECT *
+    INTO STRICT v_source
+    FROM entities
+    WHERE entity_id = p_source_entity_id
+    FOR UPDATE;
+
+    SELECT *
+    INTO STRICT v_target
+    FROM entities
+    WHERE entity_id = p_target_entity_id
+    FOR UPDATE;
+
+    IF NOT p_force
+       AND v_source.entity_type IS DISTINCT FROM v_target.entity_type
+    THEN
+        RAISE EXCEPTION
+            'Entity type mismatch: source %, target %',
+            v_source.entity_type,
+            v_target.entity_type;
+    END IF;
+
+    IF NOT p_force
+       AND v_source.country_code IS NOT NULL
+       AND v_target.country_code IS NOT NULL
+       AND upper(trim(v_source.country_code))
+           IS DISTINCT FROM upper(trim(v_target.country_code))
+    THEN
+        RAISE EXCEPTION
+            'Entity country mismatch: source %, target %',
+            v_source.country_code,
+            v_target.country_code;
+    END IF;
+
+    IF NOT p_force
+       AND sp_normalize_entity_name(v_source.name)
+           IS DISTINCT FROM sp_normalize_entity_name(v_target.name)
+    THEN
+        RAISE EXCEPTION
+            'Normalized entity name mismatch: source "%", target "%"',
+            sp_normalize_entity_name(v_source.name),
+            sp_normalize_entity_name(v_target.name);
+    END IF;
+
+    /*
+     * Preserve the source name as an alias.
+     */
+    INSERT INTO entity_aliases (
+        entity_id,
+        alias_name
+    )
+    VALUES (
+        p_target_entity_id,
+        v_source.name
+    )
+    ON CONFLICT DO NOTHING;
+
+    INSERT INTO entity_aliases (
+        entity_id,
+        alias_name
+    )
+    SELECT
+        p_target_entity_id,
+        alias_name
+    FROM entity_aliases
+    WHERE entity_id = p_source_entity_id
+    ON CONFLICT DO NOTHING;
+
+    DELETE FROM entity_aliases
+    WHERE entity_id = p_source_entity_id;
+
+    /*
+     * Entity identities.
+     */
+    INSERT INTO entity_identities (
+        entity_id,
+        identity_id,
+        is_primary,
+        verified_at,
+        created_at
+    )
+    SELECT
+        p_target_entity_id,
+        identity_id,
+        is_primary,
+        verified_at,
+        created_at
+    FROM entity_identities
+    WHERE entity_id = p_source_entity_id
+    ON CONFLICT (entity_id, identity_id)
+    DO UPDATE SET
+        is_primary =
+            entity_identities.is_primary
+            OR EXCLUDED.is_primary,
+        verified_at = COALESCE(
+            entity_identities.verified_at,
+            EXCLUDED.verified_at
+        );
+
+    DELETE FROM entity_identities
+    WHERE entity_id = p_source_entity_id;
+
+    /*
+     * Distinct listings are reparented, not deleted.
+     */
+    UPDATE instruments
+    SET entity_id = p_target_entity_id
+    WHERE entity_id = p_source_entity_id;
+
+    /*
+     * Watchlists have UNIQUE(watchlist_id, entity_id).
+     */
+    UPDATE watchlist_items source
+    SET entity_id = p_target_entity_id
+    WHERE source.entity_id = p_source_entity_id
+      AND NOT EXISTS (
+          SELECT 1
+          FROM watchlist_items target
+          WHERE target.watchlist_id = source.watchlist_id
+            AND target.entity_id = p_target_entity_id
+      );
+
+    UPDATE watchlist_items target
+    SET
+        priority = COALESCE(target.priority, source.priority),
+        target_price = COALESCE(
+            target.target_price,
+            source.target_price
+        ),
+        notes = CASE
+            WHEN NULLIF(trim(target.notes), '') IS NULL
+                THEN source.notes
+            WHEN NULLIF(trim(source.notes), '') IS NULL
+                THEN target.notes
+            WHEN target.notes = source.notes
+                THEN target.notes
+            ELSE target.notes || E'\n' || source.notes
+        END
+    FROM watchlist_items source
+    WHERE source.entity_id = p_source_entity_id
+      AND target.watchlist_id = source.watchlist_id
+      AND target.entity_id = p_target_entity_id;
+
+    DELETE FROM watchlist_items
+    WHERE entity_id = p_source_entity_id;
+
+    /*
+     * Tables where duplicate rows can be dropped safely after transferring
+     * their information.
+     */
+    INSERT INTO entity_sectors (
+        entity_id,
+        sector_id,
+        weight
+    )
+    SELECT
+        p_target_entity_id,
+        sector_id,
+        weight
+    FROM entity_sectors
+    WHERE entity_id = p_source_entity_id
+    ON CONFLICT (entity_id, sector_id)
+    DO UPDATE SET
+        weight = GREATEST(
+            COALESCE(entity_sectors.weight, 0),
+            COALESCE(EXCLUDED.weight, 0)
+        );
+
+    DELETE FROM entity_sectors
+    WHERE entity_id = p_source_entity_id;
+
+    INSERT INTO entity_tags (
+        entity_id,
+        tag_id
+    )
+    SELECT
+        p_target_entity_id,
+        tag_id
+    FROM entity_tags
+    WHERE entity_id = p_source_entity_id
+    ON CONFLICT (entity_id, tag_id) DO NOTHING;
+
+    DELETE FROM entity_tags
+    WHERE entity_id = p_source_entity_id;
+
+    INSERT INTO entity_metrics (
+        entity_id,
+        metric_name,
+        metric_value,
+        metric_date
+    )
+    SELECT
+        p_target_entity_id,
+        metric_name,
+        metric_value,
+        metric_date
+    FROM entity_metrics
+    WHERE entity_id = p_source_entity_id
+    ON CONFLICT (
+        entity_id,
+        metric_name,
+        metric_date
+    )
+    DO UPDATE SET
+        metric_value = COALESCE(
+            EXCLUDED.metric_value,
+            entity_metrics.metric_value
+        );
+
+    DELETE FROM entity_metrics
+    WHERE entity_id = p_source_entity_id;
+
+    /*
+     * Simple entity references.
+     */
+    UPDATE catalysts
+    SET entity_id = p_target_entity_id
+    WHERE entity_id = p_source_entity_id
+      AND NOT EXISTS (
+          SELECT 1
+          FROM catalysts target
+          WHERE target.entity_id = p_target_entity_id
+            AND target.catalyst_type = catalysts.catalyst_type
+            AND target.catalyst_date
+                IS NOT DISTINCT FROM catalysts.catalyst_date
+      );
+
+    DELETE FROM catalysts source
+    WHERE source.entity_id = p_source_entity_id
+      AND EXISTS (
+          SELECT 1
+          FROM catalysts target
+          WHERE target.entity_id = p_target_entity_id
+            AND target.catalyst_type = source.catalyst_type
+            AND target.catalyst_date
+                IS NOT DISTINCT FROM source.catalyst_date
+      );
+
+    UPDATE filings
+    SET entity_id = p_target_entity_id
+    WHERE entity_id = p_source_entity_id;
+
+    UPDATE etf_constituents
+    SET entity_id = p_target_entity_id
+    WHERE entity_id = p_source_entity_id;
+
+    UPDATE instrument_entity_exposure
+    SET entity_id = p_target_entity_id
+    WHERE entity_id = p_source_entity_id;
+
+    UPDATE news_entities source
+    SET entity_id = p_target_entity_id
+    WHERE source.entity_id = p_source_entity_id
+      AND NOT EXISTS (
+          SELECT 1
+          FROM news_entities target
+          WHERE target.news_id = source.news_id
+            AND target.entity_id = p_target_entity_id
+      );
+
+    DELETE FROM news_entities
+    WHERE entity_id = p_source_entity_id;
+
+    UPDATE news_impacts source
+    SET entity_id = p_target_entity_id
+    WHERE source.entity_id = p_source_entity_id
+      AND NOT EXISTS (
+          SELECT 1
+          FROM news_impacts target
+          WHERE target.news_id = source.news_id
+            AND target.entity_id = p_target_entity_id
+      );
+
+    DELETE FROM news_impacts
+    WHERE entity_id = p_source_entity_id;
+
+    UPDATE notifications
+    SET entity_id = p_target_entity_id
+    WHERE entity_id = p_source_entity_id;
+
+    UPDATE notification_hashes
+    SET entity_id = p_target_entity_id
+    WHERE entity_id = p_source_entity_id;
+
+    UPDATE insider_transactions
+    SET entity_id = p_target_entity_id
+    WHERE entity_id = p_source_entity_id;
+
+    UPDATE signal_factors
+    SET entity_id = p_target_entity_id
+    WHERE entity_id = p_source_entity_id;
+
+    INSERT INTO signal_history (
+        entity_id,
+        overall_score,
+        signal,
+        trend,
+        confidence,
+        reason,
+        created_at
+    )
+    SELECT
+        p_target_entity_id,
+        overall_score,
+        signal,
+        trend,
+        confidence,
+        reason,
+        created_at
+    FROM signal_history
+    WHERE entity_id = p_source_entity_id;
+
+    DELETE FROM signal_history
+    WHERE entity_id = p_source_entity_id;
+
+    INSERT INTO signals (
+        entity_id,
+        overall_score,
+        signal,
+        trend,
+        confidence,
+        last_reason
+    )
+    SELECT
+        p_target_entity_id,
+        overall_score,
+        signal,
+        trend,
+        confidence,
+        last_reason
+    FROM signals
+    WHERE entity_id = p_source_entity_id
+    ON CONFLICT (entity_id)
+    DO NOTHING;
+
+    DELETE FROM signals
+    WHERE entity_id = p_source_entity_id;
+
+    UPDATE portfolio_impacts
+    SET entity_id = p_target_entity_id
+    WHERE entity_id = p_source_entity_id;
+
+    UPDATE entity_impact_history
+    SET entity_id = p_target_entity_id
+    WHERE entity_id = p_source_entity_id;
+
+    /*
+     * Cache rows are derived. Preserve the target and discard conflicting
+     * source rows, so they can be recalculated.
+     */
+    UPDATE cache_portfolio_exposure source
+    SET entity_id = p_target_entity_id
+    WHERE source.entity_id = p_source_entity_id
+      AND NOT EXISTS (
+          SELECT 1
+          FROM cache_portfolio_exposure target
+          WHERE target.portfolio_id = source.portfolio_id
+            AND target.entity_id = p_target_entity_id
+      );
+
+    DELETE FROM cache_portfolio_exposure
+    WHERE entity_id = p_source_entity_id;
+
+    /*
+     * Entity relationships.
+     */
+    UPDATE entity_relationships
+    SET source_entity_id = p_target_entity_id
+    WHERE source_entity_id = p_source_entity_id;
+
+    UPDATE entity_relationships
+    SET target_entity_id = p_target_entity_id
+    WHERE target_entity_id = p_source_entity_id;
+
+    DELETE FROM entity_relationships
+    WHERE source_entity_id = target_entity_id;
+
+    /*
+     * Prefer target metadata, fill only missing fields.
+     */
+    UPDATE entities
+    SET
+        country_code = COALESCE(
+            entities.country_code,
+            v_source.country_code
+        ),
+        description = COALESCE(
+            entities.description,
+            v_source.description
+        ),
+        active = entities.active OR v_source.active
+    WHERE entity_id = p_target_entity_id;
+
+    SELECT count(*)
+    INTO v_remaining_instruments
+    FROM instruments
+    WHERE entity_id = p_source_entity_id;
+
+    IF v_remaining_instruments <> 0 THEN
+        RAISE EXCEPTION
+            'Source entity still owns % instruments',
+            v_remaining_instruments;
+    END IF;
+
+    DELETE FROM entities
+    WHERE entity_id = p_source_entity_id;
+
+    RETURN jsonb_build_object(
+        'status', 'SUCCESS',
+        'source_entity_id', p_source_entity_id,
+        'target_entity_id', p_target_entity_id,
+        'source_name', v_source.name,
+        'target_name', v_target.name
+    );
+EXCEPTION
+    WHEN no_data_found THEN
+        RAISE EXCEPTION
+            'Source or target entity was not found';
+END;
+$$;
+
+
+--
+-- Name: sp_consolidate_instrument(uuid, uuid, boolean, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_consolidate_instrument(p_source_instrument_id uuid, p_target_instrument_id uuid, p_consolidate_entity boolean DEFAULT true, p_force boolean DEFAULT false) RETURNS jsonb
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_source instruments%ROWTYPE;
+    v_target instruments%ROWTYPE;
+
+    v_source_entity entities%ROWTYPE;
+    v_target_entity entities%ROWTYPE;
+
+    v_position record;
+    v_target_position positions%ROWTYPE;
+
+    v_source_quantity numeric;
+    v_target_quantity numeric;
+    v_combined_quantity numeric;
+    v_combined_avg_price numeric;
+
+    v_source_queue market_price_refresh_queue%ROWTYPE;
+    v_target_queue market_price_refresh_queue%ROWTYPE;
+
+    v_moved_positions integer := 0;
+    v_merged_positions integer := 0;
+    v_moved_prices integer := 0;
+    v_moved_snapshots integer := 0;
+    v_moved_identities integer := 0;
+    v_source_entity_deleted boolean := false;
+BEGIN
+    IF p_source_instrument_id IS NULL
+       OR p_target_instrument_id IS NULL
+    THEN
+        RAISE EXCEPTION
+            'Source and target instrument IDs are required';
+    END IF;
+
+    IF p_source_instrument_id = p_target_instrument_id THEN
+        RAISE EXCEPTION
+            'Source and target instruments must be different';
+    END IF;
+
+    /*
+     * Serialize consolidations concerning either instrument.
+     * The lower/higher ordering avoids lock inversion.
+     */
+    PERFORM pg_advisory_xact_lock(
+        hashtextextended(
+            LEAST(
+                p_source_instrument_id::text,
+                p_target_instrument_id::text
+            ),
+            0
+        )
+    );
+
+    PERFORM pg_advisory_xact_lock(
+        hashtextextended(
+            GREATEST(
+                p_source_instrument_id::text,
+                p_target_instrument_id::text
+            ),
+            0
+        )
+    );
+
+    SELECT *
+    INTO STRICT v_source
+    FROM instruments
+    WHERE instrument_id = p_source_instrument_id
+    FOR UPDATE;
+
+    SELECT *
+    INTO STRICT v_target
+    FROM instruments
+    WHERE instrument_id = p_target_instrument_id
+    FOR UPDATE;
+
+    SELECT *
+    INTO STRICT v_source_entity
+    FROM entities
+    WHERE entity_id = v_source.entity_id
+    FOR UPDATE;
+
+    SELECT *
+    INTO STRICT v_target_entity
+    FROM entities
+    WHERE entity_id = v_target.entity_id
+    FOR UPDATE;
+
+    /*
+     * Safe defaults. "US" and NULL exchange are considered compatible
+     * only when the symbol is the same and p_force is not required.
+     */
+    IF NOT p_force
+       AND upper(trim(v_source.symbol))
+           IS DISTINCT FROM upper(trim(v_target.symbol))
+    THEN
+        RAISE EXCEPTION
+            'Symbol mismatch: source %, target %',
+            v_source.symbol,
+            v_target.symbol;
+    END IF;
+
+    IF NOT p_force
+       AND v_source.instrument_type IS NOT NULL
+       AND v_target.instrument_type IS NOT NULL
+       AND upper(trim(v_source.instrument_type))
+           IS DISTINCT FROM upper(trim(v_target.instrument_type))
+    THEN
+        RAISE EXCEPTION
+            'Instrument type mismatch: source %, target %',
+            v_source.instrument_type,
+            v_target.instrument_type;
+    END IF;
+
+    IF NOT p_force
+       AND v_source.currency_code IS NOT NULL
+       AND v_target.currency_code IS NOT NULL
+       AND upper(trim(v_source.currency_code))
+           IS DISTINCT FROM upper(trim(v_target.currency_code))
+    THEN
+        RAISE EXCEPTION
+            'Currency mismatch: source %, target %',
+            v_source.currency_code,
+            v_target.currency_code;
+    END IF;
+
+    /*
+     * An identity may be shared by multiple listings of the same entity,
+     * therefore only the relation is copied.
+     */
+    INSERT INTO instrument_identities (
+        instrument_id,
+        identity_id,
+        is_primary,
+        verified_at,
+        created_at
+    )
+    SELECT
+        p_target_instrument_id,
+        ii.identity_id,
+        ii.is_primary,
+        ii.verified_at,
+        ii.created_at
+    FROM instrument_identities ii
+    WHERE ii.instrument_id = p_source_instrument_id
+    ON CONFLICT (instrument_id, identity_id)
+    DO UPDATE SET
+        is_primary =
+            instrument_identities.is_primary
+            OR EXCLUDED.is_primary,
+        verified_at = COALESCE(
+            instrument_identities.verified_at,
+            EXCLUDED.verified_at
+        );
+
+    GET DIAGNOSTICS v_moved_identities = ROW_COUNT;
+
+    DELETE FROM instrument_identities
+    WHERE instrument_id = p_source_instrument_id;
+
+    /*
+     * Positions have UNIQUE(portfolio_id, instrument_id).
+     * If both instruments occur in the same portfolio, merge quantity
+     * and calculate a weighted average purchase price.
+     */
+    FOR v_position IN
+        SELECT *
+        FROM positions
+        WHERE instrument_id = p_source_instrument_id
+        FOR UPDATE
+    LOOP
+        SELECT *
+        INTO v_target_position
+        FROM positions
+        WHERE portfolio_id = v_position.portfolio_id
+          AND instrument_id = p_target_instrument_id
+        FOR UPDATE;
+
+        IF FOUND THEN
+            v_source_quantity := COALESCE(v_position.quantity, 0);
+            v_target_quantity := COALESCE(v_target_position.quantity, 0);
+            v_combined_quantity :=
+                v_source_quantity + v_target_quantity;
+
+            v_combined_avg_price :=
+                CASE
+                    WHEN v_combined_quantity = 0 THEN
+                        COALESCE(
+                            v_target_position.avg_price,
+                            v_position.avg_price
+                        )
+                    WHEN v_target_position.avg_price IS NULL THEN
+                        v_position.avg_price
+                    WHEN v_position.avg_price IS NULL THEN
+                        v_target_position.avg_price
+                    ELSE
+                        (
+                            v_target_quantity
+                            * v_target_position.avg_price
+                            + v_source_quantity
+                            * v_position.avg_price
+                        )
+                        / v_combined_quantity
+                END;
+
+            UPDATE positions
+            SET
+                quantity = v_combined_quantity,
+                avg_price = v_combined_avg_price,
+                opened_at = CASE
+                    WHEN opened_at IS NULL THEN v_position.opened_at
+                    WHEN v_position.opened_at IS NULL THEN opened_at
+                    ELSE LEAST(opened_at, v_position.opened_at)
+                END,
+                notes = CASE
+                    WHEN NULLIF(trim(notes), '') IS NULL
+                        THEN v_position.notes
+                    WHEN NULLIF(trim(v_position.notes), '') IS NULL
+                        THEN notes
+                    WHEN notes = v_position.notes
+                        THEN notes
+                    ELSE notes || E'\n' || v_position.notes
+                END
+            WHERE position_id = v_target_position.position_id;
+
+            DELETE FROM positions
+            WHERE position_id = v_position.position_id;
+
+            v_merged_positions := v_merged_positions + 1;
+        ELSE
+            UPDATE positions
+            SET instrument_id = p_target_instrument_id
+            WHERE position_id = v_position.position_id;
+
+            v_moved_positions := v_moved_positions + 1;
+        END IF;
+    END LOOP;
+
+    /*
+     * Historical prices. On a timestamp collision the target wins,
+     * following the same authoritative-target principle used by Ghostfolio.
+     */
+    INSERT INTO price_history (
+        instrument_id,
+        ts,
+        open,
+        high,
+        low,
+        close,
+        volume
+    )
+    SELECT
+        p_target_instrument_id,
+        source.ts,
+        source.open,
+        source.high,
+        source.low,
+        source.close,
+        source.volume
+    FROM price_history source
+    WHERE source.instrument_id = p_source_instrument_id
+      AND NOT EXISTS (
+          SELECT 1
+          FROM price_history target
+          WHERE target.instrument_id = p_target_instrument_id
+            AND target.ts IS NOT DISTINCT FROM source.ts
+      );
+
+    GET DIAGNOSTICS v_moved_prices = ROW_COUNT;
+
+    DELETE FROM price_history
+    WHERE instrument_id = p_source_instrument_id;
+
+    /*
+     * Portfolio holding snapshots:
+     * preserve one row per portfolio/instrument/date.
+     */
+    INSERT INTO portfolio_holdings_snapshots (
+        portfolio_id,
+        instrument_id,
+        snapshot_date,
+        quantity,
+        market_value,
+        weight,
+        created_at
+    )
+    SELECT
+        source.portfolio_id,
+        p_target_instrument_id,
+        source.snapshot_date,
+        source.quantity,
+        source.market_value,
+        source.weight,
+        source.created_at
+    FROM portfolio_holdings_snapshots source
+    WHERE source.instrument_id = p_source_instrument_id
+    ON CONFLICT (
+        portfolio_id,
+        instrument_id,
+        snapshot_date
+    )
+    DO UPDATE SET
+        quantity = COALESCE(
+            portfolio_holdings_snapshots.quantity,
+            0
+        ) + COALESCE(EXCLUDED.quantity, 0),
+        market_value = COALESCE(
+            portfolio_holdings_snapshots.market_value,
+            0
+        ) + COALESCE(EXCLUDED.market_value, 0),
+        weight = COALESCE(
+            portfolio_holdings_snapshots.weight,
+            EXCLUDED.weight
+        );
+
+    GET DIAGNOSTICS v_moved_snapshots = ROW_COUNT;
+
+    DELETE FROM portfolio_holdings_snapshots
+    WHERE instrument_id = p_source_instrument_id;
+
+    /*
+     * ETF constituents where this instrument is the ETF.
+     */
+    UPDATE etf_constituents
+    SET etf_instrument_id = p_target_instrument_id
+    WHERE etf_instrument_id = p_source_instrument_id;
+
+    /*
+     * Exposure mappings.
+     */
+    UPDATE instrument_entity_exposure source
+    SET instrument_id = p_target_instrument_id
+    WHERE source.instrument_id = p_source_instrument_id
+      AND NOT EXISTS (
+          SELECT 1
+          FROM instrument_entity_exposure target
+          WHERE target.instrument_id = p_target_instrument_id
+            AND target.entity_id = source.entity_id
+            AND target.effective_date
+                IS NOT DISTINCT FROM source.effective_date
+      );
+
+    DELETE FROM instrument_entity_exposure
+    WHERE instrument_id = p_source_instrument_id;
+
+    /*
+     * Parent/child relations. Delete self-relations and duplicate edges.
+     */
+    UPDATE instrument_relations
+    SET parent_instrument_id = p_target_instrument_id
+    WHERE parent_instrument_id = p_source_instrument_id;
+
+    UPDATE instrument_relations
+    SET child_instrument_id = p_target_instrument_id
+    WHERE child_instrument_id = p_source_instrument_id;
+
+    DELETE FROM instrument_relations
+    WHERE parent_instrument_id = child_instrument_id;
+
+    DELETE FROM instrument_relations duplicate
+    USING instrument_relations canonical
+    WHERE duplicate.relation_id <> canonical.relation_id
+      AND duplicate.parent_instrument_id =
+          canonical.parent_instrument_id
+      AND duplicate.child_instrument_id =
+          canonical.child_instrument_id
+      AND duplicate.relation_type
+          IS NOT DISTINCT FROM canonical.relation_type
+      AND duplicate.relation_id > canonical.relation_id;
+
+    /*
+     * Price refresh queue has UNIQUE(instrument_id).
+     */
+    SELECT *
+    INTO v_source_queue
+    FROM market_price_refresh_queue
+    WHERE instrument_id = p_source_instrument_id
+    FOR UPDATE;
+
+    IF FOUND THEN
+        SELECT *
+        INTO v_target_queue
+        FROM market_price_refresh_queue
+        WHERE instrument_id = p_target_instrument_id
+        FOR UPDATE;
+
+        IF FOUND THEN
+            UPDATE market_price_refresh_queue
+            SET
+                status = CASE
+                    WHEN v_target_queue.status = 'PROCESSING'
+                        THEN 'PROCESSING'
+                    WHEN v_source_queue.status IN ('PENDING', 'RETRY')
+                        THEN 'PENDING'
+                    ELSE v_target_queue.status
+                END,
+                next_attempt_at = LEAST(
+                    v_target_queue.next_attempt_at,
+                    v_source_queue.next_attempt_at
+                ),
+                last_error = COALESCE(
+                    v_target_queue.last_error,
+                    v_source_queue.last_error
+                ),
+                updated_at = now()
+            WHERE instrument_id = p_target_instrument_id;
+
+            DELETE FROM market_price_refresh_queue
+            WHERE instrument_id = p_source_instrument_id;
+        ELSE
+            UPDATE market_price_refresh_queue
+            SET instrument_id = p_target_instrument_id
+            WHERE instrument_id = p_source_instrument_id;
+        END IF;
+    END IF;
+
+    /*
+     * Preserve aliases. The source symbol is useful when providers use
+     * alternative representations.
+     */
+    INSERT INTO instrument_aliases (
+        instrument_id,
+        alias_symbol
+    )
+    SELECT
+        p_target_instrument_id,
+        alias_symbol
+    FROM instrument_aliases
+    WHERE instrument_id = p_source_instrument_id
+    ON CONFLICT (alias_symbol) DO NOTHING;
+
+    IF v_source.symbol IS DISTINCT FROM v_target.symbol THEN
+        INSERT INTO instrument_aliases (
+            instrument_id,
+            alias_symbol
+        )
+        VALUES (
+            p_target_instrument_id,
+            v_source.symbol
+        )
+        ON CONFLICT (alias_symbol) DO NOTHING;
+    END IF;
+
+    DELETE FROM instrument_aliases
+    WHERE instrument_id = p_source_instrument_id;
+
+    /*
+     * Fill only missing target metadata. Existing target metadata remains
+     * authoritative.
+     */
+    UPDATE instruments
+    SET
+        exchange = COALESCE(
+            instruments.exchange,
+            v_source.exchange
+        ),
+        instrument_type = COALESCE(
+            instruments.instrument_type,
+            v_source.instrument_type
+        ),
+        currency_code = COALESCE(
+            instruments.currency_code,
+            v_source.currency_code
+        ),
+        data_source = COALESCE(
+            instruments.data_source,
+            v_source.data_source
+        ),
+        last_price = CASE
+            WHEN instruments.price_as_of IS NULL
+                THEN COALESCE(
+                    instruments.last_price,
+                    v_source.last_price
+                )
+            WHEN v_source.price_as_of IS NOT NULL
+             AND v_source.price_as_of > instruments.price_as_of
+                THEN v_source.last_price
+            ELSE instruments.last_price
+        END,
+        price_source_id = CASE
+            WHEN instruments.price_as_of IS NULL
+                THEN COALESCE(
+                    instruments.price_source_id,
+                    v_source.price_source_id
+                )
+            WHEN v_source.price_as_of IS NOT NULL
+             AND v_source.price_as_of > instruments.price_as_of
+                THEN v_source.price_source_id
+            ELSE instruments.price_source_id
+        END,
+        price_as_of = CASE
+            WHEN v_source.price_as_of IS NULL
+                THEN instruments.price_as_of
+            WHEN instruments.price_as_of IS NULL
+                THEN v_source.price_as_of
+            ELSE GREATEST(
+                instruments.price_as_of,
+                v_source.price_as_of
+            )
+        END
+    WHERE instrument_id = p_target_instrument_id;
+
+    /*
+     * Record the operation before removing the source.
+     */
+    INSERT INTO instrument_consolidation_audit (
+        duplicate_instrument_id,
+        canonical_instrument_id,
+        duplicate_entity_id,
+        canonical_entity_id,
+        symbol,
+        exchange,
+        details
+    )
+    VALUES (
+        p_source_instrument_id,
+        p_target_instrument_id,
+        v_source.entity_id,
+        v_target.entity_id,
+        v_source.symbol,
+        v_source.exchange,
+        jsonb_build_object(
+            'source_name', v_source_entity.name,
+            'target_name', v_target_entity.name,
+            'source_data_source', v_source.data_source,
+            'target_data_source', v_target.data_source,
+            'source_currency', v_source.currency_code,
+            'target_currency', v_target.currency_code,
+            'moved_positions', v_moved_positions,
+            'merged_positions', v_merged_positions,
+            'moved_prices', v_moved_prices,
+            'moved_snapshots', v_moved_snapshots,
+            'moved_identities', v_moved_identities,
+            'forced', p_force
+        )
+    )
+    ON CONFLICT (duplicate_instrument_id)
+    DO NOTHING;
+
+    DELETE FROM instruments
+    WHERE instrument_id = p_source_instrument_id;
+
+    /*
+     * If requested, merge the now orphaned source entity into the entity
+     * owning the target instrument.
+     */
+    IF p_consolidate_entity
+       AND v_source.entity_id <> v_target.entity_id
+    THEN
+        PERFORM sp_consolidate_entity(
+            v_source.entity_id,
+            v_target.entity_id,
+            p_force
+        );
+
+        v_source_entity_deleted := NOT EXISTS (
+            SELECT 1
+            FROM entities
+            WHERE entity_id = v_source.entity_id
+        );
+    END IF;
+
+    RETURN jsonb_build_object(
+        'status', 'SUCCESS',
+        'source_instrument_id', p_source_instrument_id,
+        'target_instrument_id', p_target_instrument_id,
+        'source_entity_id', v_source.entity_id,
+        'target_entity_id', v_target.entity_id,
+        'moved_positions', v_moved_positions,
+        'merged_positions', v_merged_positions,
+        'moved_prices', v_moved_prices,
+        'moved_snapshots', v_moved_snapshots,
+        'moved_identities', v_moved_identities,
+        'source_entity_deleted', v_source_entity_deleted
+    );
+EXCEPTION
+    WHEN no_data_found THEN
+        RAISE EXCEPTION
+            'Source or target instrument/entity was not found';
 END;
 $$;
 
@@ -743,31 +1811,38 @@ $$;
 -- Name: sp_get_entities_for_refresh(character varying, character varying); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.sp_get_entities_for_refresh(p_mode character varying DEFAULT 'MISSING'::character varying, p_symbol character varying DEFAULT NULL::character varying) RETURNS TABLE(entity_id uuid, instrument_id uuid, symbol character varying)
+CREATE FUNCTION public.sp_get_entities_for_refresh(p_mode character varying DEFAULT 'MISSING'::character varying, p_symbol character varying DEFAULT NULL::character varying) RETURNS TABLE(entity_id uuid, instrument_id uuid, symbol character varying, exchange character varying, currency_code character, instrument_type character varying)
     LANGUAGE plpgsql
     AS $$
 BEGIN
-    IF UPPER(p_mode) NOT IN ('MISSING', 'ALL', 'SYMBOL') THEN
+    IF upper(p_mode) NOT IN ('MISSING', 'ALL', 'SYMBOL') THEN
         RAISE EXCEPTION 'Invalid refresh mode: %', p_mode;
     END IF;
-    IF UPPER(p_mode) = 'SYMBOL' AND NULLIF(TRIM(p_symbol), '') IS NULL THEN
+    IF upper(p_mode) = 'SYMBOL' AND nullif(btrim(p_symbol), '') IS NULL THEN
         RAISE EXCEPTION 'p_symbol is required when p_mode is SYMBOL';
     END IF;
 
     RETURN QUERY
-    SELECT e.entity_id, i.instrument_id, i.symbol
-    FROM entities e
-    JOIN instruments i ON i.entity_id = e.entity_id
+    SELECT
+        e.entity_id,
+        i.instrument_id,
+        i.symbol,
+        i.exchange,
+        i.currency_code,
+        i.instrument_type
+    FROM public.entities e
+    JOIN public.instruments i ON i.entity_id = e.entity_id
     WHERE e.active = true
       AND (
-          (UPPER(p_mode) = 'MISSING' AND (
-              UPPER(e.name) = UPPER(i.symbol)
+          (upper(p_mode) = 'MISSING' AND (
+              upper(e.name) = upper(i.symbol)
               OR e.country_code IS NULL
               OR i.currency_code IS NULL
               OR i.exchange IS NULL
           ))
-          OR UPPER(p_mode) = 'ALL'
-          OR (UPPER(p_mode) = 'SYMBOL' AND UPPER(i.symbol) = UPPER(TRIM(p_symbol)))
+          OR upper(p_mode) = 'ALL'
+          OR (upper(p_mode) = 'SYMBOL'
+              AND upper(i.symbol) = upper(btrim(p_symbol)))
       )
     ORDER BY i.symbol, i.instrument_id;
 END;
@@ -1456,357 +2531,10 @@ $$;
 --
 
 CREATE FUNCTION public.sp_import_asset_profile(p_payload jsonb) RETURNS TABLE(entity_id uuid, instrument_id uuid, imported boolean)
-    LANGUAGE plpgsql
+    LANGUAGE sql
     AS $$
-DECLARE
-    v_symbol varchar(50);
-    v_name varchar(255);
-
-    v_exchange varchar(50);
-    v_exchange_full_name varchar(255);
-
-    v_currency char(3);
-    v_entity_type entity_type;
-    v_instrument_type varchar(50);
-
-    v_country_code varchar(2);
-    v_data_source varchar(50);
-    v_last_price numeric(20,8);
-
-    v_entity_id uuid;
-    v_instrument_id uuid;
-BEGIN
-
-    --------------------------------------------------------
-    -- Lettura e validazione symbol
-    --------------------------------------------------------
-
-    v_symbol :=
-        NULLIF(
-            UPPER(
-                TRIM(
-                    p_payload->>'symbol'
-                )
-            ),
-            ''
-        );
-
-    IF v_symbol IS NULL THEN
-        RAISE EXCEPTION
-            'Payload symbol is required';
-    END IF;
-
-    --------------------------------------------------------
-    -- Lettura nome
-    --------------------------------------------------------
-
-    v_name :=
-        NULLIF(
-            TRIM(
-                COALESCE(
-                    p_payload->>'name',
-                    p_payload->>'companyName'
-                )
-            ),
-            ''
-        );
-
-    v_name :=
-        COALESCE(
-            v_name,
-            v_symbol
-        );
-
-    --------------------------------------------------------
-    -- Lettura exchange
-    --------------------------------------------------------
-
-    v_exchange :=
-        NULLIF(
-            TRIM(
-                p_payload->>'exchange'
-            ),
-            ''
-        );
-
-    v_exchange_full_name :=
-        NULLIF(
-            TRIM(
-                p_payload->>'exchangeFullName'
-            ),
-            ''
-        );
-
-    --------------------------------------------------------
-    -- Lettura valuta dello strumento
-    --------------------------------------------------------
-
-    v_currency :=
-        NULLIF(
-            UPPER(
-                TRIM(
-                    p_payload->>'currency'
-                )
-            ),
-            ''
-        );
-
-    --------------------------------------------------------
-    -- Tipo dello strumento
-    --------------------------------------------------------
-
-    v_instrument_type :=
-        COALESCE(
-            NULLIF(
-                UPPER(
-                    TRIM(
-                        COALESCE(
-                            p_payload->>'instrument_type',
-                            p_payload->>'asset_sub_class',
-                            p_payload->>'type'
-                        )
-                    )
-                ),
-                ''
-            ),
-            'STOCK'
-        );
-
-    --------------------------------------------------------
-    -- Tipo dell'entity
-    --------------------------------------------------------
-
-    v_entity_type :=
-        CASE
-
-            WHEN UPPER(
-                COALESCE(
-                    p_payload->>'asset_class',
-                    ''
-                )
-            ) IN (
-                'CRYPTO',
-                'CRYPTOCURRENCY'
-            )
-                THEN 'CRYPTO'::entity_type
-
-            WHEN v_instrument_type = 'ETF'
-                THEN 'ETF'::entity_type
-
-            WHEN v_instrument_type IN (
-                'FUND',
-                'MUTUALFUND',
-                'MUTUAL_FUND'
-            )
-                THEN 'FUND'::entity_type
-
-            WHEN v_instrument_type = 'INDEX'
-                THEN 'INDEX'::entity_type
-
-            WHEN v_instrument_type = 'COMMODITY'
-                THEN 'COMMODITY'::entity_type
-
-            ELSE 'COMPANY'::entity_type
-
-        END;
-
-    --------------------------------------------------------
-    -- Paese dell'entity
-    --------------------------------------------------------
-
-    v_country_code :=
-        NULLIF(
-            UPPER(
-                TRIM(
-                    COALESCE(
-                        p_payload->>'country_code',
-                        p_payload->>'country'
-                    )
-                )
-            ),
-            ''
-        );
-
-    --------------------------------------------------------
-    -- Provider market data
-    --------------------------------------------------------
-
-    v_data_source :=
-        NULLIF(
-            UPPER(
-                TRIM(
-                    p_payload->>'data_source'
-                )
-            ),
-            ''
-        );
-
-    --------------------------------------------------------
-    -- Ultimo prezzo
-    --------------------------------------------------------
-
-    v_last_price :=
-        NULLIF(
-            TRIM(
-                p_payload->>'last_price'
-            ),
-            ''
-        )::numeric;
-
-    --------------------------------------------------------
-    -- Upsert exchange
-    --------------------------------------------------------
-
-    IF v_exchange IS NOT NULL THEN
-
-        PERFORM sp_upsert_exchange(
-            v_exchange,
-            v_exchange_full_name
-        );
-
-    END IF;
-
-    --------------------------------------------------------
-    -- Verifica se lo strumento esiste già
-    --
-    -- IS NOT DISTINCT FROM tratta correttamente anche
-    -- il caso in cui entrambi gli exchange siano NULL.
-    --------------------------------------------------------
-
-    SELECT
-        i.entity_id,
-        i.instrument_id
-    INTO
-        v_entity_id,
-        v_instrument_id
-    FROM instruments i
-    WHERE UPPER(i.symbol) = v_symbol
-      AND i.exchange IS NOT DISTINCT FROM v_exchange
-    LIMIT 1;
-
-    --------------------------------------------------------
-    -- Aggiornamento strumento già esistente
-    --------------------------------------------------------
-
-    IF v_instrument_id IS NOT NULL THEN
-
-        UPDATE entities
-        SET
-            name = COALESCE(
-                v_name,
-                name
-            ),
-
-            entity_type = COALESCE(
-                v_entity_type,
-                entity_type
-            ),
-
-            country_code = COALESCE(
-                v_country_code,
-                country_code
-            )
-
-        WHERE entities.entity_id =
-              v_entity_id;
-
-        UPDATE instruments
-        SET
-            exchange = COALESCE(
-                v_exchange,
-                exchange
-            ),
-
-            instrument_type = COALESCE(
-                v_instrument_type,
-                instrument_type
-            ),
-
-            currency_code = COALESCE(
-                v_currency,
-                currency_code
-            ),
-
-            data_source = COALESCE(
-                v_data_source,
-                data_source
-            ),
-
-            last_price = COALESCE(
-                v_last_price,
-                last_price
-            )
-
-        WHERE instruments.instrument_id =
-              v_instrument_id;
-
-        RETURN QUERY
-        SELECT
-            v_entity_id,
-            v_instrument_id,
-            FALSE;
-
-        RETURN;
-
-    END IF;
-
-    --------------------------------------------------------
-    -- Creazione nuova entity
-    --------------------------------------------------------
-
-    INSERT INTO entities
-    (
-        name,
-        entity_type,
-        country_code
-    )
-    VALUES
-    (
-        v_name,
-        v_entity_type,
-        v_country_code
-    )
-    RETURNING entities.entity_id
-    INTO v_entity_id;
-
-    --------------------------------------------------------
-    -- Creazione nuovo instrument
-    --------------------------------------------------------
-
-    INSERT INTO instruments
-    (
-        entity_id,
-        symbol,
-        exchange,
-        instrument_type,
-        currency_code,
-        data_source,
-        last_price
-    )
-    VALUES
-    (
-        v_entity_id,
-        v_symbol,
-        v_exchange,
-        v_instrument_type,
-        v_currency,
-        v_data_source,
-        v_last_price
-    )
-    RETURNING instruments.instrument_id
-    INTO v_instrument_id;
-
-    --------------------------------------------------------
-    -- Risultato
-    --------------------------------------------------------
-
-    RETURN QUERY
-    SELECT
-        v_entity_id,
-        v_instrument_id,
-        TRUE;
-
-END;
+    SELECT r.entity_id, r.instrument_id, r.imported
+    FROM public.sp_upsert_asset_profile(p_payload, NULL, NULL, true) r;
 $$;
 
 
@@ -1889,6 +2617,122 @@ $$;
 
 
 --
+-- Name: sp_normalize_entity_name(text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_normalize_entity_name(p_name text) RETURNS text
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE
+    AS $$
+    SELECT NULLIF(
+        trim(
+            regexp_replace(
+                regexp_replace(
+                    regexp_replace(
+                        lower(public.unaccent(coalesce(p_name, ''))),
+                        '[^a-z0-9]+',
+                        ' ',
+                        'g'
+                    ),
+                    '\m(incorporated|inc|corporation|corp|company|co|limited|ltd|plc|spa|sa|ag|nv|se)\M',
+                    ' ',
+                    'g'
+                ),
+                '\s+',
+                ' ',
+                'g'
+            )
+        ),
+        ''
+    );
+$$;
+
+
+--
+-- Name: sp_normalize_listing_exchange(character varying, character varying, character varying); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_normalize_listing_exchange(p_symbol character varying, p_exchange character varying, p_system_code character varying DEFAULT NULL::character varying) RETURNS character varying
+    LANGUAGE plpgsql STABLE
+    AS $$
+DECLARE
+    v_symbol varchar;
+    v_exchange varchar;
+    v_system_code varchar;
+    v_mapped_exchange varchar;
+BEGIN
+    v_symbol := upper(nullif(btrim(p_symbol), ''));
+    v_exchange := upper(nullif(btrim(p_exchange), ''));
+    v_system_code := upper(nullif(btrim(p_system_code), ''));
+
+    -- A canonical MIC already known by MIP wins.
+    IF v_exchange IS NOT NULL
+       AND EXISTS (
+           SELECT 1
+           FROM public.exchanges e
+           WHERE upper(e.exchange) = v_exchange
+       )
+    THEN
+        RETURN v_exchange;
+    END IF;
+
+    -- Translate provider-specific exchange codes through the existing mapping table.
+    IF v_exchange IS NOT NULL AND v_system_code IS NOT NULL THEN
+        SELECT esm.exchange
+        INTO v_mapped_exchange
+        FROM public.exchange_source_mappings esm
+        JOIN public.external_systems es
+          ON es.system_id = esm.system_id
+        WHERE upper(es.code) = v_system_code
+          AND (
+              upper(esm.source_exchange_code) = v_exchange
+              OR upper(coalesce(esm.source_exchange_name, '')) = v_exchange
+          )
+        ORDER BY esm.observed_at DESC
+        LIMIT 1;
+
+        IF v_mapped_exchange IS NOT NULL THEN
+            RETURN upper(v_mapped_exchange);
+        END IF;
+    END IF;
+
+    -- Conservative suffix-to-MIC fallback, used only when the provider did not
+    -- supply a canonical exchange. Symbols are preserved unchanged.
+    IF v_symbol IS NOT NULL THEN
+        v_mapped_exchange := CASE
+            WHEN v_symbol LIKE '%.MI' THEN 'XMIL'
+            WHEN v_symbol LIKE '%.DE' THEN 'XETR'
+            WHEN v_symbol LIKE '%.SW' THEN 'XSWX'
+            WHEN v_symbol LIKE '%.L'  THEN 'XLON'
+            WHEN v_symbol LIKE '%.PA' THEN 'XPAR'
+            WHEN v_symbol LIKE '%.AS' THEN 'XAMS'
+            WHEN v_symbol LIKE '%.BR' THEN 'XBRU'
+            WHEN v_symbol LIKE '%.MC' THEN 'XMAD'
+            WHEN v_symbol LIKE '%.LS' THEN 'XLIS'
+            WHEN v_symbol LIKE '%.VI' THEN 'XWBO'
+            WHEN v_symbol LIKE '%.ST' THEN 'XSTO'
+            WHEN v_symbol LIKE '%.CO' THEN 'XCSE'
+            WHEN v_symbol LIKE '%.OL' THEN 'XOSL'
+            WHEN v_symbol LIKE '%.HE' THEN 'XHEL'
+            WHEN v_symbol LIKE '%.TO' THEN 'XTSE'
+            WHEN v_symbol LIKE '%.V'  THEN 'XTSX'
+            WHEN v_symbol LIKE '%.AX' THEN 'XASX'
+            WHEN v_symbol LIKE '%.HK' THEN 'XHKG'
+            WHEN v_symbol LIKE '%.T'  THEN 'XTKS'
+            ELSE NULL
+        END;
+
+        IF v_mapped_exchange IS NOT NULL THEN
+            RETURN v_mapped_exchange;
+        END IF;
+    END IF;
+
+    -- Keep an explicit provider value when no safe mapping is available.
+    RETURN v_exchange;
+END;
+$$;
+
+
+--
 -- Name: sp_notification_exists(uuid, character varying); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -1897,6 +2741,109 @@ CREATE FUNCTION public.sp_notification_exists(p_user_id uuid, p_notification_key
     AS $$
 SELECT EXISTS(SELECT 1 FROM notifications n
               WHERE n.user_id=p_user_id AND n.notification_key=p_notification_key AND n.status='SENT');
+$$;
+
+
+--
+-- Name: sp_observe_entity_name(uuid, character varying, character varying, character varying, numeric, jsonb, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_observe_entity_name(p_entity_id uuid, p_system_code character varying, p_observed_name character varying, p_source_reference character varying DEFAULT NULL::character varying, p_confidence numeric DEFAULT NULL::numeric, p_raw_payload jsonb DEFAULT NULL::jsonb, p_make_canonical boolean DEFAULT false) RETURNS uuid
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_system_id uuid;
+    v_observation_id uuid;
+    v_name varchar(255);
+    v_entity_name varchar(255);
+    v_name_locked boolean;
+BEGIN
+    v_name := NULLIF(btrim(p_observed_name), '');
+
+    IF v_name IS NULL THEN
+        RETURN NULL;
+    END IF;
+
+    SELECT e.name, e.name_locked
+    INTO v_entity_name, v_name_locked
+    FROM public.entities e
+    WHERE e.entity_id = p_entity_id
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Entity not found: %', p_entity_id;
+    END IF;
+
+    SELECT es.system_id
+    INTO v_system_id
+    FROM public.external_systems es
+    WHERE es.code = upper(btrim(p_system_code))
+      AND es.active = true;
+
+    IF v_system_id IS NULL THEN
+        RAISE EXCEPTION 'Active external system not found: %', p_system_code;
+    END IF;
+
+    INSERT INTO public.entity_name_observations (
+        entity_id,
+        system_id,
+        observed_name,
+        source_reference,
+        confidence,
+        raw_payload,
+        is_preferred
+    )
+    VALUES (
+        p_entity_id,
+        v_system_id,
+        v_name,
+        NULLIF(btrim(p_source_reference), ''),
+        p_confidence,
+        p_raw_payload,
+        p_make_canonical AND NOT v_name_locked
+    )
+    ON CONFLICT (
+        entity_id,
+        system_id,
+        observed_name,
+        normalized_source_reference
+    )
+    DO UPDATE SET
+        last_observed_at = now(),
+        observation_count = entity_name_observations.observation_count + 1,
+        confidence = COALESCE(
+            EXCLUDED.confidence,
+            entity_name_observations.confidence
+        ),
+        raw_payload = COALESCE(
+            EXCLUDED.raw_payload,
+            entity_name_observations.raw_payload
+        ),
+        is_preferred = entity_name_observations.is_preferred
+            OR EXCLUDED.is_preferred
+    RETURNING entity_name_observation_id
+    INTO v_observation_id;
+
+    IF p_make_canonical AND NOT v_name_locked THEN
+        UPDATE public.entity_name_observations
+        SET is_preferred = (entity_name_observation_id = v_observation_id)
+        WHERE entity_id = p_entity_id;
+
+        UPDATE public.entities
+        SET
+            name = v_name,
+            canonical_name_observation_id = v_observation_id
+        WHERE entity_id = p_entity_id;
+    ELSIF v_entity_name IS NULL OR btrim(v_entity_name) = '' THEN
+        UPDATE public.entities
+        SET
+            name = v_name,
+            canonical_name_observation_id = v_observation_id
+        WHERE entity_id = p_entity_id;
+    END IF;
+
+    RETURN v_observation_id;
+END;
 $$;
 
 
@@ -1927,166 +2874,14 @@ $$;
 CREATE FUNCTION public.sp_refresh_entity_from_profile(p_entity_id uuid, p_instrument_id uuid, p_payload jsonb) RETURNS void
     LANGUAGE plpgsql
     AS $$
-DECLARE
-    v_name varchar(255);
-    v_country_code varchar(2);
-
-    v_exchange varchar(50);
-    v_exchange_full_name varchar(255);
-    v_currency varchar(3);
-    v_data_source varchar(50);
-    v_last_price numeric(20,8);
 BEGIN
-
-    --------------------------------------------------------
-    -- Validazione relazione entity/instrument
-    --------------------------------------------------------
-
-    IF NOT EXISTS
-    (
-        SELECT 1
-        FROM instruments i
-        WHERE i.instrument_id = p_instrument_id
-          AND i.entity_id = p_entity_id
-    ) THEN
-        RAISE EXCEPTION
-            'Instrument % does not belong to entity %',
-            p_instrument_id,
-            p_entity_id;
-    END IF;
-
-    --------------------------------------------------------
-    -- Lettura attributi entity
-    --------------------------------------------------------
-
-    v_name :=
-        NULLIF(
-            TRIM(
-                COALESCE(
-                    p_payload->>'name',
-                    p_payload->>'companyName'
-                )
-            ),
-            ''
-        );
-
-    v_country_code :=
-        NULLIF(
-            UPPER(
-                TRIM(
-                    p_payload->>'country_code'
-                )
-            ),
-            ''
-        );
-
-    --------------------------------------------------------
-    -- Lettura attributi instrument
-    --------------------------------------------------------
-
-    v_exchange :=
-        NULLIF(
-            TRIM(
-                p_payload->>'exchange'
-            ),
-            ''
-        );
-
-    v_exchange_full_name :=
-        NULLIF(
-            TRIM(
-                p_payload->>'exchangeFullName'
-            ),
-            ''
-        );
-
-    v_currency :=
-        NULLIF(
-            UPPER(
-                TRIM(
-                    p_payload->>'currency'
-                )
-            ),
-            ''
-        );
-
-    v_data_source :=
-        NULLIF(
-            UPPER(
-                TRIM(
-                    p_payload->>'data_source'
-                )
-            ),
-            ''
-        );
-
-    v_last_price :=
-        NULLIF(
-            TRIM(
-                p_payload->>'last_price'
-            ),
-            ''
-        )::numeric;
-
-    --------------------------------------------------------
-    -- Exchange
-    --------------------------------------------------------
-
-    IF v_exchange IS NOT NULL THEN
-
-        PERFORM sp_upsert_exchange(
-            v_exchange,
-            v_exchange_full_name
-        );
-
-    END IF;
-
-    --------------------------------------------------------
-    -- Entity
-    --------------------------------------------------------
-
-    UPDATE entities
-    SET
-        name = COALESCE(
-            v_name,
-            name
-        ),
-
-        country_code = COALESCE(
-            v_country_code,
-            country_code
-        )
-
-    WHERE entity_id = p_entity_id;
-
-    --------------------------------------------------------
-    -- Singolo instrument
-    --------------------------------------------------------
-
-    UPDATE instruments
-    SET
-        exchange = COALESCE(
-            v_exchange,
-            exchange
-        ),
-
-        currency_code = COALESCE(
-            v_currency,
-            currency_code
-        ),
-
-        data_source = COALESCE(
-            v_data_source,
-            data_source
-        ),
-
-        last_price = COALESCE(
-            v_last_price,
-            last_price
-        )
-
-    WHERE instrument_id = p_instrument_id;
-
+    PERFORM 1
+    FROM public.sp_upsert_asset_profile(
+        p_payload,
+        p_entity_id,
+        p_instrument_id,
+        false
+    );
 END;
 $$;
 
@@ -2304,6 +3099,115 @@ $$;
 
 
 --
+-- Name: sp_resolve_entity_from_instrument_identities(jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_resolve_entity_from_instrument_identities(p_payload jsonb) RETURNS uuid
+    LANGUAGE plpgsql STABLE
+    AS $$
+DECLARE
+    v_identifiers jsonb;
+    v_entity_ids uuid[];
+BEGIN
+    v_identifiers := COALESCE(p_payload->'identifiers', '{}'::jsonb)
+        || jsonb_strip_nulls(jsonb_build_object(
+            'ISIN', p_payload->>'isin',
+            'FIGI_SHARE_CLASS', p_payload->>'figi_share_class'
+        ));
+
+    SELECT array_agg(DISTINCT i.entity_id ORDER BY i.entity_id)
+    INTO v_entity_ids
+    FROM jsonb_each_text(v_identifiers) item
+    JOIN public.identity_types it
+      ON it.target_kind = 'INSTRUMENT'
+     AND it.code = upper(item.key)
+     AND it.code IN ('ISIN', 'FIGI_SHARE_CLASS')
+    JOIN public.identities id
+      ON id.identity_type_id = it.identity_type_id
+     AND id.normalized_value = CASE
+            WHEN it.case_sensitive THEN btrim(item.value)
+            ELSE upper(btrim(item.value))
+         END
+    JOIN public.instrument_identities ii
+      ON ii.identity_id = id.identity_id
+    JOIN public.instruments i
+      ON i.instrument_id = ii.instrument_id
+    WHERE NULLIF(btrim(item.value), '') IS NOT NULL;
+
+    IF COALESCE(array_length(v_entity_ids, 1), 0) = 0 THEN
+        RETURN NULL;
+    END IF;
+
+    IF array_length(v_entity_ids, 1) > 1 THEN
+        RAISE EXCEPTION
+            'Strong identities resolve to multiple entities: %',
+            v_entity_ids;
+    END IF;
+
+    RETURN v_entity_ids[1];
+END;
+$$;
+
+
+--
+-- Name: sp_resolve_entity_from_profile_identities(jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_resolve_entity_from_profile_identities(p_payload jsonb) RETURNS uuid
+    LANGUAGE plpgsql STABLE
+    AS $$
+DECLARE
+    v_candidate_count integer;
+    v_entity_id uuid;
+    v_isin varchar;
+    v_figi_share_class varchar;
+BEGIN
+    v_isin := upper(nullif(btrim(coalesce(
+        p_payload->>'isin',
+        p_payload->'identifiers'->>'ISIN',
+        p_payload->'identifiers'->>'isin'
+    )), ''));
+
+    v_figi_share_class := upper(nullif(btrim(coalesce(
+        p_payload->>'figi_share_class',
+        p_payload->'identifiers'->>'FIGI_SHARE_CLASS',
+        p_payload->'identifiers'->>'figi_share_class'
+    )), ''));
+
+    WITH candidates AS (
+        SELECT DISTINCT i.entity_id
+        FROM public.identities id
+        JOIN public.identity_types it
+          ON it.identity_type_id = id.identity_type_id
+        JOIN public.instrument_identities ii
+          ON ii.identity_id = id.identity_id
+        JOIN public.instruments i
+          ON i.instrument_id = ii.instrument_id
+        WHERE it.target_kind = 'INSTRUMENT'
+          AND (
+              (it.code = 'ISIN' AND v_isin IS NOT NULL
+               AND id.normalized_value = v_isin)
+              OR
+              (it.code = 'FIGI_SHARE_CLASS' AND v_figi_share_class IS NOT NULL
+               AND id.normalized_value = v_figi_share_class)
+          )
+    )
+    SELECT count(*), (array_agg(entity_id ORDER BY entity_id))[1]
+    INTO v_candidate_count, v_entity_id
+    FROM candidates;
+
+    IF v_candidate_count > 1 THEN
+        RAISE EXCEPTION
+            'Profile strong identities resolve to % entities; consolidate them before importing',
+            v_candidate_count;
+    END IF;
+
+    RETURN v_entity_id;
+END;
+$$;
+
+
+--
 -- Name: sp_search_assets(character varying, integer, integer); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -2410,36 +3314,80 @@ FROM (
         'currency', i.currency_code,
         'type', i.instrument_type,
         'identifiers', COALESCE(ids.identifiers, '{}'::jsonb),
-        'data_source', ps.code
+        'data_source', COALESCE(ps.code, i.data_source)
     ) AS row_data
-    FROM instruments i
-    JOIN entities e ON e.entity_id = i.entity_id
-    LEFT JOIN external_systems ps ON ps.system_id = i.price_source_id
+    FROM public.instruments i
+    JOIN public.entities e ON e.entity_id = i.entity_id
+    LEFT JOIN public.external_systems ps ON ps.system_id = i.price_source_id
     LEFT JOIN LATERAL (
         SELECT jsonb_object_agg(it.code, id.identity_value) AS identifiers
-        FROM instrument_identities ii
-        JOIN identities id ON id.identity_id = ii.identity_id
-        JOIN identity_types it ON it.identity_type_id = id.identity_type_id
+        FROM public.instrument_identities ii
+        JOIN public.identities id ON id.identity_id = ii.identity_id
+        JOIN public.identity_types it ON it.identity_type_id = id.identity_type_id
         WHERE ii.instrument_id = i.instrument_id
     ) ids ON true
-    WHERE LOWER(i.symbol) LIKE LOWER(p_query || '%')
-       OR LOWER(e.name) LIKE LOWER(p_query || '%')
+    WHERE lower(i.symbol) LIKE lower(p_query || '%')
+       OR lower(e.name) LIKE lower(p_query || '%')
        OR EXISTS (
             SELECT 1
-            FROM instrument_identities ii2
-            JOIN identities id2 ON id2.identity_id = ii2.identity_id
+            FROM public.entity_name_observations eno
+            WHERE eno.entity_id = e.entity_id
+              AND eno.normalized_name LIKE public.sp_normalize_entity_name(p_query) || '%'
+       )
+       OR EXISTS (
+            SELECT 1
+            FROM public.entity_aliases ea
+            WHERE ea.entity_id = e.entity_id
+              AND public.sp_normalize_entity_name(ea.alias_name)
+                  LIKE public.sp_normalize_entity_name(p_query) || '%'
+       )
+       OR EXISTS (
+            SELECT 1
+            FROM public.instrument_identities ii2
+            JOIN public.identities id2 ON id2.identity_id = ii2.identity_id
             WHERE ii2.instrument_id = i.instrument_id
-              AND id2.normalized_value LIKE UPPER(p_query || '%')
+              AND id2.normalized_value LIKE upper(p_query || '%')
        )
     ORDER BY
         CASE
-            WHEN LOWER(i.symbol) = LOWER(p_query) THEN 1
-            WHEN LOWER(i.symbol) LIKE LOWER(p_query || '%') THEN 2
-            ELSE 3
+            WHEN lower(i.symbol) = lower(p_query) THEN 1
+            WHEN lower(i.symbol) LIKE lower(p_query || '%') THEN 2
+            WHEN lower(e.name) = lower(p_query) THEN 3
+            ELSE 4
         END,
-        i.symbol
+        i.symbol,
+        i.exchange NULLS LAST
     LIMIT p_limit
 ) q;
+$$;
+
+
+--
+-- Name: sp_set_canonical_entity_name(uuid, character varying, boolean, character varying); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_set_canonical_entity_name(p_entity_id uuid, p_name character varying, p_lock boolean DEFAULT true, p_system_code character varying DEFAULT 'MIP_LEGACY'::character varying) RETURNS uuid
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_observation_id uuid;
+BEGIN
+    v_observation_id := public.sp_observe_entity_name(
+        p_entity_id,
+        p_system_code,
+        p_name,
+        'manual-canonical-name',
+        1,
+        jsonb_build_object('manual', true),
+        true
+    );
+
+    UPDATE public.entities
+    SET name_locked = p_lock
+    WHERE entity_id = p_entity_id;
+
+    RETURN v_observation_id;
+END;
 $$;
 
 
@@ -2465,29 +3413,340 @@ CREATE FUNCTION public.sp_update_entity_profile(p_entity_id uuid, p_name charact
     LANGUAGE plpgsql
     AS $$
 BEGIN
+    IF NULLIF(btrim(p_name), '') IS NOT NULL THEN
+        PERFORM public.sp_set_canonical_entity_name(
+            p_entity_id,
+            p_name,
+            true,
+            'MIP_LEGACY'
+        );
+    END IF;
 
-    UPDATE entities
+    UPDATE public.entities e
+    SET country_code = COALESCE(
+        NULLIF(upper(btrim(p_country_code)), ''),
+        e.country_code
+    )
+    WHERE e.entity_id = p_entity_id;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Entity not found: %', p_entity_id;
+    END IF;
+END;
+$$;
+
+
+--
+-- Name: sp_upsert_asset_profile(jsonb, uuid, uuid, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_upsert_asset_profile(p_payload jsonb, p_entity_id uuid DEFAULT NULL::uuid, p_instrument_id uuid DEFAULT NULL::uuid, p_create_if_missing boolean DEFAULT true) RETURNS TABLE(entity_id uuid, instrument_id uuid, imported boolean, action character varying)
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_symbol varchar(50);
+    v_name varchar(255);
+    v_exchange varchar(50);
+    v_exchange_full_name varchar(255);
+    v_currency char(3);
+    v_entity_type public.entity_type;
+    v_instrument_type varchar(50);
+    v_country_code varchar(2);
+    v_data_source varchar(50);
+    v_observation_source varchar(50);
+    v_last_price numeric(20,8);
+    v_entity_id uuid;
+    v_instrument_id uuid;
+    v_existing_symbol varchar(50);
+    v_existing_exchange varchar(50);
+    v_existing_currency char(3);
+    v_existing_name varchar(255);
+    v_name_locked boolean;
+    v_canonical_observation_id uuid;
+    v_name_observation_id uuid;
+    v_stub_count integer;
+    v_name_candidate_count integer;
+    v_is_new_entity boolean := false;
+    v_is_new_instrument boolean := false;
+BEGIN
+    IF p_payload IS NULL OR jsonb_typeof(p_payload) <> 'object' THEN
+        RAISE EXCEPTION 'Profile payload must be a JSON object';
+    END IF;
+
+    v_symbol := upper(nullif(btrim(p_payload->>'symbol'), ''));
+    IF v_symbol IS NULL AND p_instrument_id IS NULL THEN
+        RAISE EXCEPTION 'Payload symbol is required';
+    END IF;
+
+    v_name := nullif(btrim(coalesce(
+        p_payload->>'name',
+        p_payload->>'companyName'
+    )), '');
+
+    v_data_source := upper(nullif(btrim(coalesce(
+        p_payload->>'source',
+        p_payload->>'data_source',
+        p_payload->>'metadata_source'
+    )), ''));
+
+    v_exchange := public.sp_normalize_listing_exchange(
+        v_symbol,
+        coalesce(p_payload->>'exchange_code', p_payload->>'exchange'),
+        v_data_source
+    );
+    v_exchange_full_name := nullif(btrim(coalesce(
+        p_payload->>'exchangeFullName',
+        p_payload->>'exchange_full_name'
+    )), '');
+    v_currency := upper(nullif(btrim(p_payload->>'currency'), ''));
+    v_instrument_type := coalesce(
+        upper(nullif(btrim(coalesce(
+            p_payload->>'instrument_type',
+            p_payload->>'asset_sub_class',
+            p_payload->>'type'
+        )), '')),
+        'STOCK'
+    );
+    v_entity_type := CASE
+        WHEN upper(coalesce(p_payload->>'asset_class', '')) IN ('CRYPTO', 'CRYPTOCURRENCY')
+            THEN 'CRYPTO'::public.entity_type
+        WHEN v_instrument_type = 'ETF' THEN 'ETF'::public.entity_type
+        WHEN v_instrument_type IN ('FUND', 'MUTUALFUND', 'MUTUAL_FUND')
+            THEN 'FUND'::public.entity_type
+        WHEN v_instrument_type = 'INDEX' THEN 'INDEX'::public.entity_type
+        WHEN v_instrument_type = 'COMMODITY' THEN 'COMMODITY'::public.entity_type
+        ELSE 'COMPANY'::public.entity_type
+    END;
+    v_country_code := upper(nullif(btrim(coalesce(
+        p_payload->>'country_code',
+        p_payload->>'country'
+    )), ''));
+    v_last_price := nullif(btrim(p_payload->>'last_price'), '')::numeric;
+
+    IF v_exchange IS NOT NULL THEN
+        PERFORM public.sp_upsert_exchange(v_exchange, v_exchange_full_name);
+    END IF;
+
+    -- Explicit IDs are the refresh/update mode. The stored listing identity is
+    -- authoritative; provider results may fill missing exchange/currency but
+    -- may not silently switch to a different listing.
+    IF p_instrument_id IS NOT NULL THEN
+        SELECT
+            i.entity_id,
+            i.symbol,
+            i.exchange,
+            i.currency_code,
+            e.name,
+            coalesce(e.name_locked, false),
+            e.canonical_name_observation_id
+        INTO
+            v_entity_id,
+            v_existing_symbol,
+            v_existing_exchange,
+            v_existing_currency,
+            v_existing_name,
+            v_name_locked,
+            v_canonical_observation_id
+        FROM public.instruments i
+        JOIN public.entities e ON e.entity_id = i.entity_id
+        WHERE i.instrument_id = p_instrument_id
+        FOR UPDATE OF i, e;
+
+        IF v_entity_id IS NULL THEN
+            RAISE EXCEPTION 'Instrument not found: %', p_instrument_id;
+        END IF;
+        IF p_entity_id IS NOT NULL AND p_entity_id <> v_entity_id THEN
+            RAISE EXCEPTION 'Instrument % does not belong to entity %',
+                p_instrument_id, p_entity_id;
+        END IF;
+
+        v_instrument_id := p_instrument_id;
+        v_symbol := v_existing_symbol;
+        v_exchange := coalesce(v_existing_exchange, v_exchange);
+        v_currency := coalesce(v_existing_currency, v_currency);
+    ELSE
+        -- Serialize all writers for the normalized listing key.
+        PERFORM pg_advisory_xact_lock(hashtextextended(
+            coalesce(v_symbol, '') || '|' ||
+            coalesce(v_exchange, '') || '|' ||
+            coalesce(v_currency::text, ''),
+            0
+        ));
+
+        SELECT i.entity_id, i.instrument_id
+        INTO v_entity_id, v_instrument_id
+        FROM public.instruments i
+        WHERE upper(btrim(i.symbol)) = v_symbol
+          AND coalesce(upper(btrim(i.exchange)), '') = coalesce(v_exchange, '')
+          AND coalesce(upper(btrim(i.currency_code)), '') = coalesce(v_currency::text, '')
+        ORDER BY i.created_at, i.instrument_id
+        LIMIT 1
+        FOR UPDATE;
+
+        -- Upgrade one unambiguous stub instead of creating a second listing.
+        IF v_instrument_id IS NULL AND v_exchange IS NOT NULL THEN
+            SELECT
+                count(*),
+                (array_agg(i.instrument_id ORDER BY i.instrument_id))[1],
+                (array_agg(i.entity_id ORDER BY i.instrument_id))[1]
+            INTO v_stub_count, v_instrument_id, v_entity_id
+            FROM public.instruments i
+            WHERE upper(btrim(i.symbol)) = v_symbol
+              AND i.exchange IS NULL
+              AND (
+                  i.currency_code IS NULL
+                  OR v_currency IS NULL
+                  OR upper(btrim(i.currency_code)) = v_currency
+              );
+
+            IF v_stub_count <> 1 THEN
+                v_instrument_id := NULL;
+                v_entity_id := NULL;
+            END IF;
+        END IF;
+
+        IF v_instrument_id IS NULL THEN
+            v_entity_id := public.sp_resolve_entity_from_profile_identities(p_payload);
+
+            IF v_entity_id IS NULL AND v_name IS NOT NULL THEN
+                SELECT
+                    count(*),
+                    (array_agg(e.entity_id ORDER BY e.entity_id))[1]
+                INTO v_name_candidate_count, v_entity_id
+                FROM public.entities e
+                WHERE public.sp_normalize_entity_name(e.name) =
+                      public.sp_normalize_entity_name(v_name)
+                  AND e.entity_type = v_entity_type
+                  AND (
+                      e.country_code IS NULL
+                      OR v_country_code IS NULL
+                      OR upper(btrim(e.country_code)) = v_country_code
+                  );
+
+                IF v_name_candidate_count <> 1 THEN
+                    v_entity_id := NULL;
+                END IF;
+            END IF;
+
+            IF v_entity_id IS NULL THEN
+                IF NOT p_create_if_missing THEN
+                    RAISE EXCEPTION 'No matching entity/listing found for %', v_symbol;
+                END IF;
+
+                INSERT INTO public.entities(name, entity_type, country_code)
+                VALUES (coalesce(v_name, v_symbol), v_entity_type, v_country_code)
+                RETURNING entities.entity_id INTO v_entity_id;
+                v_is_new_entity := true;
+            END IF;
+
+            INSERT INTO public.instruments(
+                entity_id,
+                symbol,
+                exchange,
+                instrument_type,
+                currency_code,
+                data_source,
+                last_price
+            )
+            VALUES (
+                v_entity_id,
+                v_symbol,
+                v_exchange,
+                v_instrument_type,
+                v_currency,
+                v_data_source,
+                v_last_price
+            )
+            RETURNING instruments.instrument_id INTO v_instrument_id;
+            v_is_new_instrument := true;
+        END IF;
+    END IF;
+
+    SELECT
+        e.name,
+        coalesce(e.name_locked, false),
+        e.canonical_name_observation_id
+    INTO v_existing_name, v_name_locked, v_canonical_observation_id
+    FROM public.entities e
+    WHERE e.entity_id = v_entity_id
+    FOR UPDATE;
+
+    SELECT es.code
+    INTO v_observation_source
+    FROM public.external_systems es
+    WHERE es.active = true
+      AND upper(es.code) = v_data_source
+    LIMIT 1;
+
+    IF v_observation_source IS NULL THEN
+        SELECT es.code
+        INTO v_observation_source
+        FROM public.external_systems es
+        WHERE es.active = true
+          AND upper(es.code) = 'MIP_LEGACY'
+        LIMIT 1;
+    END IF;
+
+    IF v_name IS NOT NULL AND v_observation_source IS NOT NULL THEN
+        v_name_observation_id := public.sp_observe_entity_name(
+            v_entity_id,
+            v_observation_source,
+            v_name,
+            coalesce(p_payload->>'source_reference', p_payload->>'provider_id'),
+            NULL,
+            p_payload
+        );
+    END IF;
+
+    UPDATE public.entities e
     SET
-        name = COALESCE(
-            NULLIF(
-                TRIM(p_name),
-                ''
-            ),
-            name
-        ),
+        name = CASE
+            WHEN v_name IS NOT NULL
+             AND NOT v_name_locked
+             AND (
+                 v_canonical_observation_id IS NULL
+                 OR upper(btrim(v_existing_name)) = upper(btrim(v_symbol))
+             )
+                THEN v_name
+            ELSE e.name
+        END,
+        canonical_name_observation_id = CASE
+            WHEN v_name_observation_id IS NOT NULL
+             AND NOT v_name_locked
+             AND (
+                 v_canonical_observation_id IS NULL
+                 OR upper(btrim(v_existing_name)) = upper(btrim(v_symbol))
+             )
+                THEN v_name_observation_id
+            ELSE e.canonical_name_observation_id
+        END,
+        entity_type = coalesce(e.entity_type, v_entity_type),
+        country_code = coalesce(e.country_code, v_country_code)
+    WHERE e.entity_id = v_entity_id;
 
-        country_code = COALESCE(
-            NULLIF(
-                UPPER(
-                    TRIM(p_country_code)
-                ),
-                ''
-            ),
-            country_code
-        )
+    UPDATE public.instruments i
+    SET
+        exchange = coalesce(i.exchange, v_exchange),
+        instrument_type = coalesce(nullif(v_instrument_type, 'UNKNOWN'), i.instrument_type),
+        currency_code = coalesce(i.currency_code, v_currency),
+        data_source = coalesce(v_data_source, i.data_source),
+        last_price = coalesce(v_last_price, i.last_price)
+    WHERE i.instrument_id = v_instrument_id;
 
-    WHERE entity_id = p_entity_id;
+    -- Identities, observations, price source and price timestamp are persisted
+    -- in the same database transaction as entity/listing resolution.
+    PERFORM public.sp_apply_instrument_reference_metadata(v_instrument_id, p_payload);
 
+    RETURN QUERY
+    SELECT
+        v_entity_id,
+        v_instrument_id,
+        v_is_new_instrument,
+        CASE
+            WHEN v_is_new_entity THEN 'CREATED_ENTITY_AND_INSTRUMENT'
+            WHEN v_is_new_instrument THEN 'CREATED_INSTRUMENT'
+            ELSE 'UPDATED'
+        END::varchar;
 END;
 $$;
 
@@ -2869,78 +4128,139 @@ CREATE FUNCTION public.sp_upsert_identity(p_target_kind character varying, p_tar
     LANGUAGE plpgsql
     AS $$
 DECLARE
-    v_target_kind varchar;
+    v_requested_target_kind varchar;
     v_identity_code varchar;
     v_value varchar;
     v_normalized varchar;
     v_identity_type_id uuid;
+    v_registered_target_kind varchar;
+    v_case_sensitive boolean;
+    v_value_pattern text;
     v_identity_id uuid;
     v_system_id uuid;
 BEGIN
-    v_target_kind := UPPER(TRIM(p_target_kind));
-    v_identity_code := UPPER(TRIM(p_identity_code));
-    v_value := NULLIF(TRIM(p_identity_value), '');
+    v_requested_target_kind := upper(btrim(p_target_kind));
+    v_identity_code := upper(btrim(p_identity_code));
+    v_value := NULLIF(btrim(p_identity_value), '');
+
+    IF v_requested_target_kind NOT IN ('ENTITY', 'INSTRUMENT') THEN
+        RAISE EXCEPTION 'Invalid identity target kind: %', p_target_kind;
+    END IF;
 
     IF v_value IS NULL THEN
         RETURN NULL;
     END IF;
 
-    SELECT identity_type_id, target_kind
-    INTO v_identity_type_id, v_target_kind
-    FROM identity_types
-    WHERE code = v_identity_code
-      AND target_kind = UPPER(TRIM(p_target_kind));
+    SELECT
+        it.identity_type_id,
+        it.target_kind,
+        it.case_sensitive,
+        it.value_pattern
+    INTO
+        v_identity_type_id,
+        v_registered_target_kind,
+        v_case_sensitive,
+        v_value_pattern
+    FROM public.identity_types it
+    WHERE it.target_kind = v_requested_target_kind
+      AND it.code = v_identity_code;
 
     IF v_identity_type_id IS NULL THEN
         RAISE EXCEPTION 'Identity type % is not valid for %',
             p_identity_code, p_target_kind;
     END IF;
 
-    v_normalized := UPPER(v_value);
+    IF v_value_pattern IS NOT NULL AND v_value !~ v_value_pattern THEN
+        RAISE EXCEPTION 'Invalid value for identity type %: %',
+            v_identity_code, v_value;
+    END IF;
 
-    INSERT INTO identities (
+    v_normalized := CASE
+        WHEN v_case_sensitive THEN v_value
+        ELSE upper(v_value)
+    END;
+
+    INSERT INTO public.identities (
         identity_type_id,
         identity_value,
         normalized_value
-    ) VALUES (
+    )
+    VALUES (
         v_identity_type_id,
         v_value,
         v_normalized
     )
-    ON CONFLICT (identity_type_id, normalized_value) DO UPDATE
-    SET identity_value = EXCLUDED.identity_value,
+    ON CONFLICT (identity_type_id, normalized_value)
+    DO UPDATE SET
+        identity_value = CASE
+            WHEN identities.identity_value IS NULL THEN EXCLUDED.identity_value
+            ELSE identities.identity_value
+        END,
         updated_at = now()
     RETURNING identity_id INTO v_identity_id;
 
-    IF v_target_kind = 'ENTITY' THEN
-        INSERT INTO entity_identities (entity_id, identity_id)
+    IF v_registered_target_kind = 'ENTITY' THEN
+        IF NOT EXISTS (
+            SELECT 1 FROM public.entities WHERE entity_id = p_target_id
+        ) THEN
+            RAISE EXCEPTION 'Entity not found: %', p_target_id;
+        END IF;
+
+        INSERT INTO public.entity_identities (entity_id, identity_id)
         VALUES (p_target_id, v_identity_id)
         ON CONFLICT DO NOTHING;
     ELSE
-        INSERT INTO instrument_identities (instrument_id, identity_id)
+        IF NOT EXISTS (
+            SELECT 1 FROM public.instruments WHERE instrument_id = p_target_id
+        ) THEN
+            RAISE EXCEPTION 'Instrument not found: %', p_target_id;
+        END IF;
+
+        INSERT INTO public.instrument_identities (instrument_id, identity_id)
         VALUES (p_target_id, v_identity_id)
         ON CONFLICT DO NOTHING;
     END IF;
 
-    IF NULLIF(TRIM(p_system_code), '') IS NOT NULL THEN
-        SELECT system_id INTO v_system_id
-        FROM external_systems
-        WHERE code = UPPER(TRIM(p_system_code));
+    IF NULLIF(btrim(p_system_code), '') IS NOT NULL THEN
+        SELECT es.system_id
+        INTO v_system_id
+        FROM public.external_systems es
+        WHERE es.code = upper(btrim(p_system_code))
+          AND es.active = true;
 
-        INSERT INTO identity_observations (
+        IF v_system_id IS NULL THEN
+            RAISE EXCEPTION 'Active external system not found: %', p_system_code;
+        END IF;
+
+        INSERT INTO public.identity_observations (
             identity_id,
             system_id,
             source_reference,
             confidence,
             raw_payload
-        ) VALUES (
+        )
+        VALUES (
             v_identity_id,
             v_system_id,
-            NULLIF(TRIM(p_source_reference), ''),
+            NULLIF(btrim(p_source_reference), ''),
             p_confidence,
             p_raw_payload
         )
-        ON CONFLICT DO NOTHING;
+        ON CONFLICT (
+            identity_id,
+            system_id,
+            (COALESCE(source_reference, ''::character varying))
+        )
+        DO UPDATE SET
+            confidence = COALESCE(
+                EXCLUDED.confidence,
+                identity_observations.confidence
+            ),
+            observed_at = now(),
+            raw_payload = COALESCE(
+                EXCLUDED.raw_payload,
+                identity_observations.raw_payload
+            );
     END IF;
 
     RETURN v_identity_id;
@@ -3273,6 +4593,33 @@ END;
 $$;
 
 
+--
+-- Name: trg_validate_entity_canonical_name(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.trg_validate_entity_canonical_name() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF NEW.canonical_name_observation_id IS NOT NULL
+       AND NOT EXISTS (
+           SELECT 1
+           FROM public.entity_name_observations eno
+           WHERE eno.entity_name_observation_id = NEW.canonical_name_observation_id
+             AND eno.entity_id = NEW.entity_id
+       )
+    THEN
+        RAISE EXCEPTION
+            'Canonical name observation % does not belong to entity %',
+            NEW.canonical_name_observation_id,
+            NEW.entity_id;
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
 SET default_tablespace = '';
 
 SET default_table_access_method = heap;
@@ -3368,7 +4715,9 @@ CREATE TABLE public.entities (
     description text,
     active boolean DEFAULT true,
     created_at timestamp with time zone DEFAULT now(),
-    updated_at timestamp with time zone DEFAULT now()
+    updated_at timestamp with time zone DEFAULT now(),
+    canonical_name_observation_id uuid,
+    name_locked boolean DEFAULT false NOT NULL
 );
 
 
@@ -3419,6 +4768,32 @@ CREATE TABLE public.entity_metrics (
     metric_name character varying(100),
     metric_value numeric,
     metric_date date
+);
+
+
+--
+-- Name: entity_name_observations; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.entity_name_observations (
+    entity_name_observation_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    entity_id uuid NOT NULL,
+    system_id uuid NOT NULL,
+    observed_name character varying(255) NOT NULL,
+    normalized_name text GENERATED ALWAYS AS (public.sp_normalize_entity_name((observed_name)::text)) STORED,
+    source_reference character varying(255),
+    normalized_source_reference text GENERATED ALWAYS AS (COALESCE(btrim((source_reference)::text), ''::text)) STORED,
+    confidence numeric(5,4),
+    first_observed_at timestamp with time zone DEFAULT now() NOT NULL,
+    last_observed_at timestamp with time zone DEFAULT now() NOT NULL,
+    observation_count integer DEFAULT 1 NOT NULL,
+    raw_payload jsonb,
+    is_preferred boolean DEFAULT false NOT NULL,
+    CONSTRAINT ck_entity_name_observations_confidence CHECK (((confidence IS NULL) OR ((confidence >= (0)::numeric) AND (confidence <= (1)::numeric)))),
+    CONSTRAINT ck_entity_name_observations_count CHECK ((observation_count > 0)),
+    CONSTRAINT ck_entity_name_observations_dates CHECK ((last_observed_at >= first_observed_at)),
+    CONSTRAINT ck_entity_name_observations_name CHECK ((btrim((observed_name)::text) <> ''::text)),
+    CONSTRAINT ck_entity_name_observations_normalized_name CHECK (((normalized_name IS NOT NULL) AND (btrim(normalized_name) <> ''::text)))
 );
 
 
@@ -4240,6 +5615,44 @@ CREATE VIEW public.vw_entities AS
 
 
 --
+-- Name: vw_entity_identity_conflicts; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.vw_entity_identity_conflicts AS
+ SELECT it.code AS identity_type,
+    id.normalized_value AS identity_value,
+    count(DISTINCT i.entity_id) AS entity_count,
+    array_agg(DISTINCT i.entity_id) AS entity_ids,
+    array_agg(DISTINCT e.name ORDER BY e.name) AS entity_names,
+    array_agg(DISTINCT i.symbol ORDER BY i.symbol) AS symbols
+   FROM ((((public.identities id
+     JOIN public.identity_types it ON ((it.identity_type_id = id.identity_type_id)))
+     JOIN public.instrument_identities ii ON ((ii.identity_id = id.identity_id)))
+     JOIN public.instruments i ON ((i.instrument_id = ii.instrument_id)))
+     JOIN public.entities e ON ((e.entity_id = i.entity_id)))
+  WHERE (((it.target_kind)::text = 'INSTRUMENT'::text) AND ((it.code)::text = ANY ((ARRAY['ISIN'::character varying, 'FIGI_SHARE_CLASS'::character varying])::text[])))
+  GROUP BY it.code, id.normalized_value
+ HAVING (count(DISTINCT i.entity_id) > 1);
+
+
+--
+-- Name: vw_entity_name_candidates; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.vw_entity_name_candidates AS
+ SELECT eno.normalized_name,
+    e.entity_type,
+    count(DISTINCT e.entity_id) AS entity_count,
+    array_agg(DISTINCT e.entity_id) AS entity_ids,
+    array_agg(DISTINCT e.name ORDER BY e.name) AS canonical_names,
+    array_agg(DISTINCT eno.observed_name ORDER BY eno.observed_name) AS observed_names
+   FROM (public.entity_name_observations eno
+     JOIN public.entities e ON ((e.entity_id = eno.entity_id)))
+  GROUP BY eno.normalized_name, e.entity_type
+ HAVING (count(DISTINCT e.entity_id) > 1);
+
+
+--
 -- Name: vw_instruments; Type: VIEW; Schema: public; Owner: -
 --
 
@@ -4380,6 +5793,14 @@ ALTER TABLE ONLY public.entity_metrics
 
 
 --
+-- Name: entity_name_observations entity_name_observations_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.entity_name_observations
+    ADD CONSTRAINT entity_name_observations_pkey PRIMARY KEY (entity_name_observation_id);
+
+
+--
 -- Name: entity_relationships entity_relationships_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -4481,14 +5902,6 @@ ALTER TABLE ONLY public.identities
 
 ALTER TABLE ONLY public.identity_observations
     ADD CONSTRAINT identity_observations_pkey PRIMARY KEY (identity_observation_id);
-
-
---
--- Name: identity_types identity_types_code_key; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.identity_types
-    ADD CONSTRAINT identity_types_code_key UNIQUE (code);
 
 
 --
@@ -4985,6 +6398,69 @@ CREATE INDEX idx_market_search_cache_created ON public.market_search_cache USING
 
 
 --
+-- Name: ix_entities_normalized_name_type; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_entities_normalized_name_type ON public.entities USING btree (public.sp_normalize_entity_name((name)::text), entity_type, country_code) WHERE (public.sp_normalize_entity_name((name)::text) IS NOT NULL);
+
+
+--
+-- Name: ix_entity_alias_normalized; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_entity_alias_normalized ON public.entity_aliases USING btree (public.sp_normalize_entity_name((alias_name)::text), entity_id) WHERE ((alias_name IS NOT NULL) AND (btrim((alias_name)::text) <> ''::text));
+
+
+--
+-- Name: ix_entity_alias_normalized_lookup; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_entity_alias_normalized_lookup ON public.entity_aliases USING btree (public.sp_normalize_entity_name((alias_name)::text)) WHERE (public.sp_normalize_entity_name((alias_name)::text) IS NOT NULL);
+
+
+--
+-- Name: ix_entity_identities_identity; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_entity_identities_identity ON public.entity_identities USING btree (identity_id, entity_id);
+
+
+--
+-- Name: ix_entity_name_observation_entity; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_entity_name_observation_entity ON public.entity_name_observations USING btree (entity_id, last_observed_at DESC);
+
+
+--
+-- Name: ix_entity_name_observation_normalized; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_entity_name_observation_normalized ON public.entity_name_observations USING btree (normalized_name, entity_id);
+
+
+--
+-- Name: ix_entity_name_observation_system; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_entity_name_observation_system ON public.entity_name_observations USING btree (system_id, last_observed_at DESC);
+
+
+--
+-- Name: ix_entity_name_observations_normalized_lookup; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_entity_name_observations_normalized_lookup ON public.entity_name_observations USING btree (normalized_name, entity_id) WHERE (normalized_name IS NOT NULL);
+
+
+--
+-- Name: ix_entity_name_observations_source_entity; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_entity_name_observations_source_entity ON public.entity_name_observations USING btree (system_id, entity_id, last_observed_at DESC);
+
+
+--
 -- Name: ix_exchange_source_mappings_exchange; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -5020,10 +6496,59 @@ CREATE INDEX ix_identities_normalized_value ON public.identities USING btree (no
 
 
 --
+-- Name: ix_identity_observations_system_identity; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_identity_observations_system_identity ON public.identity_observations USING btree (system_id, identity_id, observed_at DESC) WHERE (system_id IS NOT NULL);
+
+
+--
+-- Name: ix_identity_types_kind_code; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_identity_types_kind_code ON public.identity_types USING btree (target_kind, code);
+
+
+--
+-- Name: ix_instrument_alias_normalized_lookup; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_instrument_alias_normalized_lookup ON public.instrument_aliases USING btree (upper(btrim((alias_symbol)::text))) WHERE (NULLIF(btrim((alias_symbol)::text), ''::text) IS NOT NULL);
+
+
+--
 -- Name: ix_instrument_identities_identity; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE INDEX ix_instrument_identities_identity ON public.instrument_identities USING btree (identity_id);
+
+
+--
+-- Name: ix_instrument_identities_identity_instrument; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_instrument_identities_identity_instrument ON public.instrument_identities USING btree (identity_id, instrument_id);
+
+
+--
+-- Name: ix_instruments_entity_normalized_listing; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_instruments_entity_normalized_listing ON public.instruments USING btree (entity_id, upper(btrim((symbol)::text)), COALESCE(upper(btrim((exchange)::text)), ''::text), COALESCE(upper(btrim((currency_code)::text)), ''::text)) WHERE ((symbol IS NOT NULL) AND (btrim((symbol)::text) <> ''::text));
+
+
+--
+-- Name: ix_instruments_missing_reference_metadata; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_instruments_missing_reference_metadata ON public.instruments USING btree (instrument_id, symbol) WHERE ((exchange IS NULL) OR (currency_code IS NULL) OR (instrument_type IS NULL));
+
+
+--
+-- Name: ix_instruments_normalized_symbol; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_instruments_normalized_symbol ON public.instruments USING btree (upper(btrim((symbol)::text))) WHERE ((symbol IS NOT NULL) AND (btrim((symbol)::text) <> ''::text));
 
 
 --
@@ -5118,6 +6643,20 @@ CREATE INDEX ix_positions_portfolio ON public.positions USING btree (portfolio_i
 
 
 --
+-- Name: ix_sync_mapping_external_lookup; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_sync_mapping_external_lookup ON public.sync_mapping USING btree (system_id, internal_type, external_id) WHERE ((system_id IS NOT NULL) AND (external_id IS NOT NULL));
+
+
+--
+-- Name: ix_sync_mapping_internal_lookup; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_sync_mapping_internal_lookup ON public.sync_mapping USING btree (internal_type, internal_id) WHERE (internal_id IS NOT NULL);
+
+
+--
 -- Name: ix_user_sources_user; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -5181,10 +6720,17 @@ CREATE UNIQUE INDEX uq_catalyst ON public.catalysts USING btree (entity_id, cata
 
 
 --
--- Name: uq_entity_alias; Type: INDEX; Schema: public; Owner: -
+-- Name: uq_entity_alias_entity_normalized; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE UNIQUE INDEX uq_entity_alias ON public.entity_aliases USING btree (alias_name);
+CREATE UNIQUE INDEX uq_entity_alias_entity_normalized ON public.entity_aliases USING btree (entity_id, public.sp_normalize_entity_name((alias_name)::text)) WHERE ((alias_name IS NOT NULL) AND (btrim((alias_name)::text) <> ''::text));
+
+
+--
+-- Name: uq_entity_alias_normalized; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_entity_alias_normalized ON public.entity_aliases USING btree (entity_id, public.sp_normalize_entity_name((alias_name)::text)) WHERE ((entity_id IS NOT NULL) AND (public.sp_normalize_entity_name((alias_name)::text) IS NOT NULL));
 
 
 --
@@ -5192,6 +6738,13 @@ CREATE UNIQUE INDEX uq_entity_alias ON public.entity_aliases USING btree (alias_
 --
 
 CREATE UNIQUE INDEX uq_entity_metric ON public.entity_metrics USING btree (entity_id, metric_name, metric_date);
+
+
+--
+-- Name: uq_entity_name_observation; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_entity_name_observation ON public.entity_name_observations USING btree (entity_id, system_id, observed_name, normalized_source_reference);
 
 
 --
@@ -5230,10 +6783,31 @@ CREATE UNIQUE INDEX uq_identity_observation_source ON public.identity_observatio
 
 
 --
--- Name: uq_instrument_alias; Type: INDEX; Schema: public; Owner: -
+-- Name: uq_identity_types_kind_code; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE UNIQUE INDEX uq_instrument_alias ON public.instrument_aliases USING btree (alias_symbol);
+CREATE UNIQUE INDEX uq_identity_types_kind_code ON public.identity_types USING btree (target_kind, code);
+
+
+--
+-- Name: uq_instrument_alias_normalized; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_instrument_alias_normalized ON public.instrument_aliases USING btree (instrument_id, upper(btrim((alias_symbol)::text))) WHERE ((instrument_id IS NOT NULL) AND (NULLIF(btrim((alias_symbol)::text), ''::text) IS NOT NULL));
+
+
+--
+-- Name: uq_instruments_normalized_listing; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_instruments_normalized_listing ON public.instruments USING btree (upper(btrim((symbol)::text)), COALESCE(upper(btrim((exchange)::text)), ''::text), COALESCE(upper(btrim((currency_code)::text)), ''::text)) WHERE ((symbol IS NOT NULL) AND (btrim((symbol)::text) <> ''::text));
+
+
+--
+-- Name: INDEX uq_instruments_normalized_listing; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON INDEX public.uq_instruments_normalized_listing IS 'Prevents duplicate normalized listing rows by symbol, exchange and trading currency; NULL components compare as empty strings.';
 
 
 --
@@ -5318,6 +6892,13 @@ CREATE TRIGGER trg_entities_created_at BEFORE INSERT ON public.entities FOR EACH
 --
 
 CREATE TRIGGER trg_entities_updated_at BEFORE INSERT OR UPDATE ON public.entities FOR EACH ROW EXECUTE FUNCTION public.trg_set_updated_at();
+
+
+--
+-- Name: entities trg_entities_validate_canonical_name; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER trg_entities_validate_canonical_name AFTER INSERT OR UPDATE OF canonical_name_observation_id ON public.entities DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.trg_validate_entity_canonical_name();
 
 
 --
@@ -5505,6 +7086,14 @@ ALTER TABLE ONLY public.catalysts
 
 
 --
+-- Name: entities entities_canonical_name_observation_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.entities
+    ADD CONSTRAINT entities_canonical_name_observation_id_fkey FOREIGN KEY (canonical_name_observation_id) REFERENCES public.entity_name_observations(entity_name_observation_id) ON DELETE SET NULL;
+
+
+--
 -- Name: entity_aliases entity_aliases_entity_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -5534,6 +7123,22 @@ ALTER TABLE ONLY public.entity_identities
 
 ALTER TABLE ONLY public.entity_metrics
     ADD CONSTRAINT entity_metrics_entity_id_fkey FOREIGN KEY (entity_id) REFERENCES public.entities(entity_id);
+
+
+--
+-- Name: entity_name_observations entity_name_observations_entity_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.entity_name_observations
+    ADD CONSTRAINT entity_name_observations_entity_id_fkey FOREIGN KEY (entity_id) REFERENCES public.entities(entity_id) ON DELETE CASCADE;
+
+
+--
+-- Name: entity_name_observations entity_name_observations_system_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.entity_name_observations
+    ADD CONSTRAINT entity_name_observations_system_id_fkey FOREIGN KEY (system_id) REFERENCES public.external_systems(system_id) ON DELETE RESTRICT;
 
 
 --
@@ -6036,5 +7641,5 @@ ALTER TABLE ONLY public.watchlists
 -- PostgreSQL database dump complete
 --
 
-\unrestrict f9eAAw2U9cKyBVC4mnoDEd7qTHNfmVqqNMNRBphCjsmcDAEHYi82xTScRsrVMsR
+\unrestrict vLSdfaqk0WEMyJjAEFn2waFCijWWohJoWrge0lipG50JiKsPLa4xvf099OsuDjE
 

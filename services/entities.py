@@ -1,4 +1,3 @@
-import json
 import logging
 import time
 from collections.abc import Callable
@@ -11,6 +10,7 @@ from sqlalchemy.orm import Session
 from market_data.capabilities import InstrumentType
 from market_data.factory import market_data
 from market_data.models import InstrumentReference
+from services.profile_persistence import pin_profile_to_listing, upsert_asset_profile
 
 logger = logging.getLogger(__name__)
 ProgressCallback = Callable[[dict[str, Any]], None]
@@ -61,20 +61,14 @@ def _profile_payload(reference: InstrumentReference, *, full_refresh: bool):
     return profile.to_import_payload() if profile else None
 
 
-def _apply_reference_metadata(db, *, instrument_id, profile):
-    db.execute(
-        text(
-            """
-            SELECT sp_apply_instrument_reference_metadata(
-                CAST(:instrument_id AS uuid),
-                CAST(:payload AS jsonb)
-            )
-            """
-        ),
-        {
-            "instrument_id": instrument_id,
-            "payload": json.dumps(profile, default=str),
-        },
+def _prepare_refresh_profile(row, profile: dict[str, Any]) -> dict[str, Any]:
+    # The DB-selected listing remains authoritative. Missing exchange/currency
+    # may still be filled by the provider and normalized by the stored procedure.
+    return pin_profile_to_listing(
+        profile,
+        symbol=str(row.symbol),
+        exchange=_row_value(row, "exchange"),
+        currency=_row_value(row, "currency_code"),
     )
 
 
@@ -115,7 +109,10 @@ def refresh_entities(
         and create_if_missing
     ):
         return _create_missing_entity(
-            db, symbol=normalized_symbol, full_refresh=full_refresh, progress=progress
+            db,
+            symbol=normalized_symbol,
+            full_refresh=full_refresh,
+            progress=progress,
         )
 
     updated = 0
@@ -158,6 +155,7 @@ def refresh_entities(
                 )
                 continue
 
+            profile = _prepare_refresh_profile(row, profile)
             _emit(
                 progress,
                 "profile_received",
@@ -181,20 +179,17 @@ def refresh_entities(
                 total=total,
                 symbol=row_symbol,
             )
+
             with db.begin_nested():
-                db.execute(
-                    text(
-                        "SELECT sp_refresh_entity_from_profile(:entity_id, :instrument_id, CAST(:payload AS jsonb))"
-                    ),
-                    {
-                        "entity_id": row.entity_id,
-                        "instrument_id": row.instrument_id,
-                        "payload": json.dumps(profile, default=str),
-                    },
+                result = upsert_asset_profile(
+                    db,
+                    profile,
+                    entity_id=row.entity_id,
+                    instrument_id=row.instrument_id,
+                    create_if_missing=False,
                 )
-                _apply_reference_metadata(
-                    db, instrument_id=row.instrument_id, profile=profile
-                )
+                if result is None:
+                    raise RuntimeError("sp_upsert_asset_profile returned no row")
 
             updated += 1
             duration_ms = round((time.monotonic() - iteration_started_at) * 1000)
@@ -210,11 +205,12 @@ def refresh_entities(
                 failed=len(errors),
             )
             logger.info(
-                "Entity refreshed symbol=%s entity_id=%s source=%s price_source=%s",
+                "Entity refreshed symbol=%s entity_id=%s source=%s price_source=%s action=%s",
                 row_symbol,
                 row.entity_id,
                 profile.get("data_source"),
                 profile.get("price_source"),
+                result.action,
             )
         except Exception as exc:
             error = str(exc)
@@ -273,6 +269,7 @@ def _create_missing_entity(db, *, symbol, full_refresh, progress=None):
         _emit(progress, "create_failed", **result)
         return result
 
+    profile = pin_profile_to_listing(profile, symbol=symbol)
     _emit(
         progress,
         "profile_received",
@@ -289,24 +286,21 @@ def _create_missing_entity(db, *, symbol, full_refresh, progress=None):
         price_source=profile.get("price_source"),
         price_timestamp=profile.get("price_timestamp"),
     )
-    row = db.execute(
-        text("SELECT * FROM sp_import_asset_profile(CAST(:payload AS jsonb))"),
-        {"payload": json.dumps(profile, default=str)},
-    ).first()
+    row = upsert_asset_profile(db, profile)
     if row is None:
-        raise RuntimeError("sp_import_asset_profile returned no row")
-    _apply_reference_metadata(db, instrument_id=row.instrument_id, profile=profile)
+        raise RuntimeError("sp_upsert_asset_profile returned no row")
     result = {
         "status": "SUCCESS",
         "mode": RefreshMode.SYMBOL.value,
         "requested": 1,
         "updated": 0,
-        "created": 1,
+        "created": int(bool(row.imported)),
         "skipped": 0,
         "failed": 0,
         "errors": [],
         "entity_id": str(row.entity_id),
         "instrument_id": str(row.instrument_id),
+        "action": row.action,
         "duration_ms": round((time.monotonic() - started_at) * 1000),
     }
     _emit(progress, "create_completed", **result)

@@ -1,5 +1,3 @@
-import json
-
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import text
 
@@ -9,6 +7,7 @@ from market_data.capabilities import InstrumentType
 from market_data.factory import market_data
 from market_data.models import InstrumentReference
 from services.market_price_refresh import enqueue_price_refresh
+from services.profile_persistence import pin_profile_to_listing, upsert_asset_profile
 
 router = APIRouter()
 
@@ -41,23 +40,6 @@ def _enqueue_missing_price(db, local_payload, symbol, data_source):
         instrument_id=local_payload["instrument_id"],
         symbol=symbol,
         data_source=data_source,
-    )
-
-
-def _persist_reference_metadata(db, instrument_id, profile):
-    db.execute(
-        text(
-            """
-            SELECT sp_apply_instrument_reference_metadata(
-                CAST(:instrument_id AS uuid),
-                CAST(:payload AS jsonb)
-            )
-            """
-        ),
-        {
-            "instrument_id": instrument_id,
-            "payload": json.dumps(profile, default=str),
-        },
     )
 
 
@@ -157,28 +139,23 @@ def import_entity(
                 }
             raise HTTPException(status_code=404, detail="symbol not found")
 
-        # The selected symbol is the listing identity. Do not let a profile
-        # resolved through a shared ISIN silently replace it with another
-        # currency/listing.
-        profile_payload["symbol"] = symbol
+        # The user-selected symbol is the listing identity. Shared ISINs may
+        # legitimately have several symbols, exchanges and currencies.
+        profile_payload = pin_profile_to_listing(
+            profile_payload,
+            symbol=symbol,
+            exchange=requested_exchange,
+            currency=requested_currency,
+        )
         if requested_isin:
             profile_payload["isin"] = requested_isin
             profile_payload.setdefault("identifiers", {})["ISIN"] = requested_isin
-        if requested_currency:
-            profile_payload["currency"] = requested_currency.upper()
-        if requested_exchange:
-            profile_payload["exchange"] = requested_exchange.upper()
         if requested_type != InstrumentType.UNKNOWN:
             profile_payload["instrument_type"] = requested_type.value
 
-        result = db.execute(
-            text("SELECT * FROM sp_import_asset_profile(CAST(:payload AS jsonb))"),
-            {"payload": json.dumps(profile_payload, default=str)},
-        ).first()
+        result = upsert_asset_profile(db, profile_payload)
         if not result:
-            raise RuntimeError("sp_import_asset_profile returned no row")
-
-        _persist_reference_metadata(db, result.instrument_id, profile_payload)
+            raise RuntimeError("sp_upsert_asset_profile returned no row")
 
         price_available = profile_payload.get("last_price") is not None
         refresh_status = "NOT_REQUIRED"
@@ -197,6 +174,7 @@ def import_entity(
             "entity_id": str(result.entity_id),
             "instrument_id": str(result.instrument_id),
             "imported": result.imported,
+            "action": result.action,
             "source": symbol_info.get("source") if symbol_info else "PROVIDER",
             "price_available": price_available,
             "price_refresh_status": refresh_status,
