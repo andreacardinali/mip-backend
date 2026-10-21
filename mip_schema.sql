@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict vLSdfaqk0WEMyJjAEFn2waFCijWWohJoWrge0lipG50JiKsPLa4xvf099OsuDjE
+\restrict 5rCgWV8JJQBVfW3bG11ORjw2adrxKfMlgnmlqOcp2UHZolklbxeb2BI2jDFMdsU
 
 -- Dumped from database version 18.6 (Debian 18.6-1.pgdg13+2)
 -- Dumped by pg_dump version 18.6 (Debian 18.6-1.pgdg13+2)
@@ -242,6 +242,279 @@ $$;
 
 
 --
+-- Name: sp_claim_llm_request(uuid, character varying, integer, integer, integer, numeric, character varying); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_claim_llm_request(p_request_id uuid, p_worker_id character varying, p_tokens_per_minute integer, p_requests_per_minute integer, p_requests_per_day integer, p_safety_factor numeric, p_daily_reset_timezone character varying) RETURNS boolean
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_queue_key varchar(400);
+    v_estimated_tokens integer;
+    v_token_budget integer;
+    v_request_budget integer;
+    v_daily_budget integer;
+    v_quota_day date;
+    v_next_quota_reset timestamptz;
+    v_window public.llm_rate_limit_windows%ROWTYPE;
+BEGIN
+    IF p_safety_factor <= 0 OR p_safety_factor > 1 THEN
+        RAISE EXCEPTION 'p_safety_factor must be in (0, 1]';
+    END IF;
+
+    IF NULLIF(btrim(p_daily_reset_timezone), '') IS NULL THEN
+        RAISE EXCEPTION 'p_daily_reset_timezone cannot be empty';
+    END IF;
+
+    v_quota_day :=
+        (now() AT TIME ZONE p_daily_reset_timezone)::date;
+    v_next_quota_reset :=
+        ((v_quota_day + 1)::timestamp AT TIME ZONE p_daily_reset_timezone);
+
+    SELECT queue_key, estimated_tokens
+    INTO v_queue_key, v_estimated_tokens
+    FROM public.llm_request_queue
+    WHERE request_id = p_request_id
+      AND status IN ('PENDING', 'RETRY')
+      AND available_at <= now()
+    FOR UPDATE SKIP LOCKED;
+
+    IF NOT FOUND THEN
+        RETURN false;
+    END IF;
+
+    INSERT INTO public.llm_rate_limit_windows(
+        queue_key,
+        quota_day
+    )
+    VALUES (
+        v_queue_key,
+        v_quota_day
+    )
+    ON CONFLICT (queue_key) DO NOTHING;
+
+    SELECT *
+    INTO v_window
+    FROM public.llm_rate_limit_windows
+    WHERE queue_key = v_queue_key
+    FOR UPDATE;
+
+    IF now() - v_window.window_started_at >= interval '60 seconds' THEN
+        v_window.window_started_at := now();
+        v_window.tokens_used := 0;
+        v_window.requests_used := 0;
+    END IF;
+
+    IF v_window.quota_day IS DISTINCT FROM v_quota_day THEN
+        v_window.quota_day := v_quota_day;
+        v_window.requests_used_today := 0;
+    END IF;
+
+    IF v_window.blocked_until IS NOT NULL
+       AND v_window.blocked_until > now()
+    THEN
+        RETURN false;
+    END IF;
+
+    v_token_budget := floor(
+        GREATEST(p_tokens_per_minute, 0) * p_safety_factor
+    );
+    v_request_budget := floor(
+        GREATEST(p_requests_per_minute, 0) * p_safety_factor
+    );
+    v_daily_budget := floor(
+        GREATEST(p_requests_per_day, 0) * p_safety_factor
+    );
+
+    IF v_daily_budget > 0
+       AND v_window.requests_used_today + 1 > v_daily_budget
+    THEN
+        UPDATE public.llm_request_queue
+        SET available_at = v_next_quota_reset
+        WHERE request_id = p_request_id;
+        RETURN false;
+    END IF;
+
+    IF (v_token_budget > 0
+        AND v_window.tokens_used + v_estimated_tokens > v_token_budget)
+       OR (v_request_budget > 0
+           AND v_window.requests_used + 1 > v_request_budget)
+    THEN
+        UPDATE public.llm_request_queue
+        SET available_at = v_window.window_started_at + interval '60 seconds'
+        WHERE request_id = p_request_id;
+        RETURN false;
+    END IF;
+
+    UPDATE public.llm_rate_limit_windows
+    SET window_started_at = v_window.window_started_at,
+        tokens_used = v_window.tokens_used + v_estimated_tokens,
+        requests_used = v_window.requests_used + 1,
+        quota_day = v_window.quota_day,
+        requests_used_today = v_window.requests_used_today + 1
+    WHERE queue_key = v_queue_key;
+
+    UPDATE public.llm_request_queue
+    SET status = 'PROCESSING',
+        locked_at = now(),
+        locked_by = p_worker_id,
+        attempt_count = attempt_count + 1,
+        last_error = NULL
+    WHERE request_id = p_request_id;
+
+    RETURN true;
+END;
+$$;
+
+
+--
+-- Name: sp_claim_llm_request(uuid, character varying, integer, integer, integer, numeric, character varying, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_claim_llm_request(p_request_id uuid, p_worker_id character varying, p_tokens_per_minute integer, p_requests_per_minute integer, p_requests_per_day integer, p_safety_factor numeric, p_daily_reset_timezone character varying, p_lease_seconds integer) RETURNS boolean
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_queue_key varchar(400);
+    v_estimated_tokens integer;
+    v_token_budget integer;
+    v_request_budget integer;
+    v_daily_budget integer;
+    v_quota_day date;
+    v_next_quota_reset timestamptz;
+    v_window public.llm_rate_limit_windows%ROWTYPE;
+BEGIN
+    IF p_safety_factor <= 0 OR p_safety_factor > 1 THEN
+        RAISE EXCEPTION 'p_safety_factor must be in (0, 1]';
+    END IF;
+
+    IF NULLIF(btrim(p_daily_reset_timezone), '') IS NULL THEN
+        RAISE EXCEPTION 'p_daily_reset_timezone cannot be empty';
+    END IF;
+
+    v_quota_day :=
+        (now() AT TIME ZONE p_daily_reset_timezone)::date;
+    v_next_quota_reset :=
+        ((v_quota_day + 1)::timestamp AT TIME ZONE p_daily_reset_timezone);
+
+    SELECT queue_key, estimated_tokens
+    INTO v_queue_key, v_estimated_tokens
+    FROM public.llm_request_queue
+    WHERE request_id = p_request_id
+      AND status IN ('PENDING', 'RETRY')
+      AND available_at <= now()
+    FOR UPDATE SKIP LOCKED;
+
+    IF NOT FOUND THEN
+        RETURN false;
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM public.llm_request_queue q
+        WHERE q.queue_key = v_queue_key
+          AND q.status IN ('PENDING', 'RETRY')
+          AND q.available_at <= now()
+          AND (q.priority, q.created_at, q.request_id)
+              < (
+                  SELECT priority, created_at, request_id
+                  FROM public.llm_request_queue
+                  WHERE request_id = p_request_id
+              )
+    ) THEN
+        RETURN false;
+    END IF;
+
+    INSERT INTO public.llm_rate_limit_windows(
+        queue_key,
+        quota_day
+    )
+    VALUES (
+        v_queue_key,
+        v_quota_day
+    )
+    ON CONFLICT (queue_key) DO NOTHING;
+
+    SELECT *
+    INTO v_window
+    FROM public.llm_rate_limit_windows
+    WHERE queue_key = v_queue_key
+    FOR UPDATE;
+
+    IF now() - v_window.window_started_at >= interval '60 seconds' THEN
+        v_window.window_started_at := now();
+        v_window.tokens_used := 0;
+        v_window.requests_used := 0;
+    END IF;
+
+    IF v_window.quota_day IS DISTINCT FROM v_quota_day THEN
+        v_window.quota_day := v_quota_day;
+        v_window.requests_used_today := 0;
+    END IF;
+
+    IF v_window.blocked_until IS NOT NULL
+       AND v_window.blocked_until > now()
+    THEN
+        RETURN false;
+    END IF;
+
+    v_token_budget := floor(
+        GREATEST(p_tokens_per_minute, 0) * p_safety_factor
+    );
+    v_request_budget := floor(
+        GREATEST(p_requests_per_minute, 0) * p_safety_factor
+    );
+    v_daily_budget := floor(
+        GREATEST(p_requests_per_day, 0) * p_safety_factor
+    );
+
+    IF v_daily_budget > 0
+       AND v_window.requests_used_today + 1 > v_daily_budget
+    THEN
+        UPDATE public.llm_request_queue
+        SET available_at = v_next_quota_reset
+        WHERE request_id = p_request_id;
+        RETURN false;
+    END IF;
+
+    IF (v_token_budget > 0
+        AND v_window.tokens_used + v_estimated_tokens > v_token_budget)
+       OR (v_request_budget > 0
+           AND v_window.requests_used + 1 > v_request_budget)
+    THEN
+        UPDATE public.llm_request_queue
+        SET available_at = v_window.window_started_at + interval '60 seconds'
+        WHERE request_id = p_request_id;
+        RETURN false;
+    END IF;
+
+    UPDATE public.llm_rate_limit_windows
+    SET window_started_at = v_window.window_started_at,
+        tokens_used = v_window.tokens_used + v_estimated_tokens,
+        requests_used = v_window.requests_used + 1,
+        quota_day = v_window.quota_day,
+        requests_used_today = v_window.requests_used_today + 1
+    WHERE queue_key = v_queue_key;
+
+	UPDATE public.llm_request_queue
+	SET
+	    status = 'PROCESSING',
+	    locked_at = now(),
+	    locked_by = p_worker_id,
+	    lease_expires_at =
+	        now() + make_interval(
+	            secs => GREATEST(p_lease_seconds, 1)
+	        ),
+	    attempt_count = attempt_count + 1,
+	    last_error = NULL
+	WHERE request_id = p_request_id;
+
+    RETURN true;
+END;
+$$;
+
+
+--
 -- Name: sp_claim_notifications(integer); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -324,6 +597,391 @@ BEGIN
 
     JOIN user_sources us
       ON us.source_id = c.source_id;
+END;
+$$;
+
+
+--
+-- Name: sp_cleanup_llm_request_queue(integer, integer, integer, boolean, interval, text, boolean, bigint, bigint, bigint, bigint, bigint); Type: PROCEDURE; Schema: public; Owner: -
+--
+
+CREATE PROCEDURE public.sp_cleanup_llm_request_queue(IN p_completed_retention_days integer DEFAULT 7, IN p_failed_retention_days integer DEFAULT 30, IN p_abandoned_retention_days integer DEFAULT 30, IN p_include_orphans boolean DEFAULT false, IN p_orphan_age interval DEFAULT '01:00:00'::interval, IN p_queue_key text DEFAULT NULL::text, IN p_dry_run boolean DEFAULT true, INOUT p_completed_count bigint DEFAULT 0, INOUT p_failed_count bigint DEFAULT 0, INOUT p_abandoned_count bigint DEFAULT 0, INOUT p_orphaned_pending_count bigint DEFAULT 0, INOUT p_expired_processing_count bigint DEFAULT 0)
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_lock_acquired boolean;
+BEGIN
+    IF p_completed_retention_days < 1 THEN
+        RAISE EXCEPTION
+            'p_completed_retention_days must be >= 1';
+    END IF;
+
+    IF p_failed_retention_days < 1 THEN
+        RAISE EXCEPTION
+            'p_failed_retention_days must be >= 1';
+    END IF;
+
+    IF p_abandoned_retention_days < 1 THEN
+        RAISE EXCEPTION
+            'p_abandoned_retention_days must be >= 1';
+    END IF;
+
+    IF p_orphan_age <= interval '0 seconds' THEN
+        RAISE EXCEPTION
+            'p_orphan_age must be greater than zero';
+    END IF;
+
+    /*
+     * Evita due cleanup concorrenti.
+     * Il lock viene rilasciato automaticamente al termine
+     * della transazione.
+     */
+    v_lock_acquired := pg_try_advisory_xact_lock(
+        hashtext('public.sp_cleanup_llm_request_queue')
+    );
+
+    IF NOT v_lock_acquired THEN
+        RAISE EXCEPTION
+            'Another LLM queue cleanup is already running';
+    END IF;
+
+    SELECT count(*)
+    INTO p_completed_count
+    FROM public.llm_request_queue q
+    WHERE q.status = 'COMPLETED'
+      AND coalesce(q.completed_at, q.created_at)
+          < now() - make_interval(
+              days => p_completed_retention_days
+          )
+      AND (
+          p_queue_key IS NULL
+          OR q.queue_key = p_queue_key
+      );
+
+    SELECT count(*)
+    INTO p_failed_count
+    FROM public.llm_request_queue q
+    WHERE q.status = 'FAILED'
+      AND coalesce(q.completed_at, q.created_at)
+          < now() - make_interval(
+              days => p_failed_retention_days
+          )
+      AND (
+          p_queue_key IS NULL
+          OR q.queue_key = p_queue_key
+      );
+
+    SELECT count(*)
+    INTO p_abandoned_count
+    FROM public.llm_request_queue q
+    WHERE q.status = 'ABANDONED'
+      AND coalesce(q.completed_at, q.created_at)
+          < now() - make_interval(
+              days => p_abandoned_retention_days
+          )
+      AND (
+          p_queue_key IS NULL
+          OR q.queue_key = p_queue_key
+      );
+
+    IF p_include_orphans THEN
+        SELECT count(*)
+        INTO p_orphaned_pending_count
+        FROM public.llm_request_queue q
+        WHERE q.status IN ('PENDING', 'RETRY')
+          AND q.created_at < now() - p_orphan_age
+          AND (
+              p_queue_key IS NULL
+              OR q.queue_key = p_queue_key
+          );
+
+        SELECT count(*)
+        INTO p_expired_processing_count
+        FROM public.llm_request_queue q
+        WHERE q.status = 'PROCESSING'
+          AND q.lease_expires_at IS NOT NULL
+          AND q.lease_expires_at < now()
+          AND (
+              p_queue_key IS NULL
+              OR q.queue_key = p_queue_key
+          );
+    END IF;
+
+    RAISE NOTICE
+        'LLM queue cleanup: completed=%, failed=%, abandoned=%, orphaned_pending=%, expired_processing=%, dry_run=%',
+        p_completed_count,
+        p_failed_count,
+        p_abandoned_count,
+        p_orphaned_pending_count,
+        p_expired_processing_count,
+        p_dry_run;
+
+    IF p_dry_run THEN
+        RETURN;
+    END IF;
+
+    DELETE FROM public.llm_request_queue q
+    WHERE q.status = 'COMPLETED'
+      AND coalesce(q.completed_at, q.created_at)
+          < now() - make_interval(
+              days => p_completed_retention_days
+          )
+      AND (
+          p_queue_key IS NULL
+          OR q.queue_key = p_queue_key
+      );
+
+    DELETE FROM public.llm_request_queue q
+    WHERE q.status = 'FAILED'
+      AND coalesce(q.completed_at, q.created_at)
+          < now() - make_interval(
+              days => p_failed_retention_days
+          )
+      AND (
+          p_queue_key IS NULL
+          OR q.queue_key = p_queue_key
+      );
+
+    DELETE FROM public.llm_request_queue q
+    WHERE q.status = 'ABANDONED'
+      AND coalesce(q.completed_at, q.created_at)
+          < now() - make_interval(
+              days => p_abandoned_retention_days
+          )
+      AND (
+          p_queue_key IS NULL
+          OR q.queue_key = p_queue_key
+      );
+
+    IF p_include_orphans THEN
+        /*
+         * PENDING e RETRY molto vecchie possono appartenere
+         * a processi terminati prima dell'esecuzione.
+         */
+        DELETE FROM public.llm_request_queue q
+        WHERE q.status IN ('PENDING', 'RETRY')
+          AND q.created_at < now() - p_orphan_age
+          AND (
+              p_queue_key IS NULL
+              OR q.queue_key = p_queue_key
+          );
+
+        /*
+         * Una PROCESSING viene rimossa solo se la lease
+         * è valorizzata ed è già scaduta.
+         */
+        DELETE FROM public.llm_request_queue q
+        WHERE q.status = 'PROCESSING'
+          AND q.lease_expires_at IS NOT NULL
+          AND q.lease_expires_at < now()
+          AND (
+              p_queue_key IS NULL
+              OR q.queue_key = p_queue_key
+          );
+    END IF;
+END;
+$$;
+
+
+--
+-- Name: sp_cleanup_llm_request_queue(integer, integer, integer, boolean, interval, text, boolean, boolean, bigint, bigint, bigint, bigint, bigint, bigint); Type: PROCEDURE; Schema: public; Owner: -
+--
+
+CREATE PROCEDURE public.sp_cleanup_llm_request_queue(IN p_completed_retention_days integer DEFAULT 7, IN p_failed_retention_days integer DEFAULT 30, IN p_abandoned_retention_days integer DEFAULT 30, IN p_include_orphans boolean DEFAULT false, IN p_orphan_age interval DEFAULT '01:00:00'::interval, IN p_queue_key text DEFAULT NULL::text, IN p_dry_run boolean DEFAULT true, IN p_purge_all boolean DEFAULT false, INOUT p_completed_count bigint DEFAULT 0, INOUT p_failed_count bigint DEFAULT 0, INOUT p_abandoned_count bigint DEFAULT 0, INOUT p_orphaned_pending_count bigint DEFAULT 0, INOUT p_expired_processing_count bigint DEFAULT 0, INOUT p_purged_count bigint DEFAULT 0)
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_lock_acquired boolean;
+BEGIN
+    IF p_completed_retention_days < 1 THEN
+        RAISE EXCEPTION
+            'p_completed_retention_days must be >= 1';
+    END IF;
+
+    IF p_failed_retention_days < 1 THEN
+        RAISE EXCEPTION
+            'p_failed_retention_days must be >= 1';
+    END IF;
+
+    IF p_abandoned_retention_days < 1 THEN
+        RAISE EXCEPTION
+            'p_abandoned_retention_days must be >= 1';
+    END IF;
+
+    IF p_orphan_age <= interval '0 seconds' THEN
+        RAISE EXCEPTION
+            'p_orphan_age must be greater than zero';
+    END IF;
+
+    v_lock_acquired := pg_try_advisory_xact_lock(
+        hashtext('public.sp_cleanup_llm_request_queue')
+    );
+
+    IF NOT v_lock_acquired THEN
+        RAISE EXCEPTION
+            'Another LLM queue cleanup is already running';
+    END IF;
+
+    /*
+     * DANGER ZONE
+     *
+     * La modalità purge elimina ogni richiesta della coda
+     * selezionata, inclusi PENDING, RETRY e PROCESSING.
+     *
+     * Non considera retention, available_at o lease.
+     */
+    IF p_purge_all THEN
+        SELECT count(*)
+        INTO p_purged_count
+        FROM public.llm_request_queue q
+        WHERE (
+            p_queue_key IS NULL
+            OR q.queue_key = p_queue_key
+        );
+
+        RAISE NOTICE
+            'LLM queue full purge: rows=%, queue_key=%, dry_run=%',
+            p_purged_count,
+            coalesce(p_queue_key, '<all>'),
+            p_dry_run;
+
+        IF NOT p_dry_run THEN
+            DELETE FROM public.llm_request_queue q
+            WHERE (
+                p_queue_key IS NULL
+                OR q.queue_key = p_queue_key
+            );
+        END IF;
+
+        RETURN;
+    END IF;
+
+    SELECT count(*)
+    INTO p_completed_count
+    FROM public.llm_request_queue q
+    WHERE q.status = 'COMPLETED'
+      AND coalesce(q.completed_at, q.created_at)
+          < now() - make_interval(
+              days => p_completed_retention_days
+          )
+      AND (
+          p_queue_key IS NULL
+          OR q.queue_key = p_queue_key
+      );
+
+    SELECT count(*)
+    INTO p_failed_count
+    FROM public.llm_request_queue q
+    WHERE q.status = 'FAILED'
+      AND coalesce(q.completed_at, q.created_at)
+          < now() - make_interval(
+              days => p_failed_retention_days
+          )
+      AND (
+          p_queue_key IS NULL
+          OR q.queue_key = p_queue_key
+      );
+
+    SELECT count(*)
+    INTO p_abandoned_count
+    FROM public.llm_request_queue q
+    WHERE q.status = 'ABANDONED'
+      AND coalesce(q.completed_at, q.created_at)
+          < now() - make_interval(
+              days => p_abandoned_retention_days
+          )
+      AND (
+          p_queue_key IS NULL
+          OR q.queue_key = p_queue_key
+      );
+
+    IF p_include_orphans THEN
+        SELECT count(*)
+        INTO p_orphaned_pending_count
+        FROM public.llm_request_queue q
+        WHERE q.status IN ('PENDING', 'RETRY')
+          AND q.created_at < now() - p_orphan_age
+          AND (
+              p_queue_key IS NULL
+              OR q.queue_key = p_queue_key
+          );
+
+        SELECT count(*)
+        INTO p_expired_processing_count
+        FROM public.llm_request_queue q
+        WHERE q.status = 'PROCESSING'
+          AND q.lease_expires_at IS NOT NULL
+          AND q.lease_expires_at < now()
+          AND (
+              p_queue_key IS NULL
+              OR q.queue_key = p_queue_key
+          );
+    END IF;
+
+    RAISE NOTICE
+        'LLM queue cleanup: completed=%, failed=%, abandoned=%, orphaned_pending=%, expired_processing=%, dry_run=%',
+        p_completed_count,
+        p_failed_count,
+        p_abandoned_count,
+        p_orphaned_pending_count,
+        p_expired_processing_count,
+        p_dry_run;
+
+    IF p_dry_run THEN
+        RETURN;
+    END IF;
+
+    DELETE FROM public.llm_request_queue q
+    WHERE q.status = 'COMPLETED'
+      AND coalesce(q.completed_at, q.created_at)
+          < now() - make_interval(
+              days => p_completed_retention_days
+          )
+      AND (
+          p_queue_key IS NULL
+          OR q.queue_key = p_queue_key
+      );
+
+    DELETE FROM public.llm_request_queue q
+    WHERE q.status = 'FAILED'
+      AND coalesce(q.completed_at, q.created_at)
+          < now() - make_interval(
+              days => p_failed_retention_days
+          )
+      AND (
+          p_queue_key IS NULL
+          OR q.queue_key = p_queue_key
+      );
+
+    DELETE FROM public.llm_request_queue q
+    WHERE q.status = 'ABANDONED'
+      AND coalesce(q.completed_at, q.created_at)
+          < now() - make_interval(
+              days => p_abandoned_retention_days
+          )
+      AND (
+          p_queue_key IS NULL
+          OR q.queue_key = p_queue_key
+      );
+
+    IF p_include_orphans THEN
+        DELETE FROM public.llm_request_queue q
+        WHERE q.status IN ('PENDING', 'RETRY')
+          AND q.created_at < now() - p_orphan_age
+          AND (
+              p_queue_key IS NULL
+              OR q.queue_key = p_queue_key
+          );
+
+        DELETE FROM public.llm_request_queue q
+        WHERE q.status = 'PROCESSING'
+          AND q.lease_expires_at IS NOT NULL
+          AND q.lease_expires_at < now()
+          AND (
+              p_queue_key IS NULL
+              OR q.queue_key = p_queue_key
+          );
+    END IF;
 END;
 $$;
 
@@ -2539,6 +3197,108 @@ $$;
 
 
 --
+-- Name: sp_maintain_llm_queue(integer, integer, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_maintain_llm_queue(p_completed_retention_days integer, p_failed_retention_days integer, p_abandoned_retention_days integer) RETURNS jsonb
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_recovered integer := 0;
+    v_deleted_completed integer := 0;
+    v_deleted_failed integer := 0;
+    v_deleted_abandoned integer := 0;
+BEGIN
+    IF p_completed_retention_days < 1 THEN
+        RAISE EXCEPTION
+            'p_completed_retention_days must be >= 1';
+    END IF;
+
+    IF p_failed_retention_days < 1 THEN
+        RAISE EXCEPTION
+            'p_failed_retention_days must be >= 1';
+    END IF;
+
+    IF p_abandoned_retention_days < 1 THEN
+        RAISE EXCEPTION
+            'p_abandoned_retention_days must be >= 1';
+    END IF;
+
+    UPDATE public.llm_request_queue
+    SET
+        status = CASE
+            WHEN attempt_count < max_attempts
+                THEN 'RETRY'
+            ELSE 'FAILED'
+        END,
+        available_at = CASE
+            WHEN attempt_count < max_attempts
+                THEN now()
+            ELSE available_at
+        END,
+        locked_at = NULL,
+        locked_by = NULL,
+        lease_expires_at = NULL,
+        completed_at = CASE
+            WHEN attempt_count >= max_attempts
+                THEN now()
+            ELSE NULL
+        END,
+        last_error = LEFT(
+            COALESCE(
+                last_error || E'\n',
+                ''
+            )
+            || 'Recovered after expired processing lease',
+            4000
+        )
+    WHERE status = 'PROCESSING'
+      AND lease_expires_at IS NOT NULL
+      AND lease_expires_at <= now();
+
+    GET DIAGNOSTICS v_recovered = ROW_COUNT;
+
+    DELETE FROM public.llm_request_queue
+    WHERE status = 'COMPLETED'
+      AND completed_at <
+          now() - make_interval(
+              days => p_completed_retention_days
+          );
+
+    GET DIAGNOSTICS
+        v_deleted_completed = ROW_COUNT;
+
+    DELETE FROM public.llm_request_queue
+    WHERE status = 'FAILED'
+      AND completed_at <
+          now() - make_interval(
+              days => p_failed_retention_days
+          );
+
+    GET DIAGNOSTICS
+        v_deleted_failed = ROW_COUNT;
+
+    DELETE FROM public.llm_request_queue
+    WHERE status IN ('PENDING', 'RETRY')
+      AND created_at <
+          now() - make_interval(
+              days => p_abandoned_retention_days
+          );
+
+    GET DIAGNOSTICS
+        v_deleted_abandoned = ROW_COUNT;
+
+    RETURN jsonb_build_object(
+        'recovered', v_recovered,
+        'deleted_completed', v_deleted_completed,
+        'deleted_failed', v_deleted_failed,
+        'deleted_abandoned', v_deleted_abandoned
+    );
+END;
+$$;
+
+
+--
 -- Name: sp_mark_notification_failed(uuid, text, integer, integer); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -3070,6 +3830,27 @@ $$;
 
 
 --
+-- Name: sp_release_stale_llm_requests(integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_release_stale_llm_requests(p_timeout_seconds integer) RETURNS integer
+    LANGUAGE plpgsql
+    AS $$
+DECLARE v_count integer;
+BEGIN
+    UPDATE public.llm_request_queue
+    SET status = 'RETRY', locked_at = NULL, locked_by = NULL,
+        available_at = now(),
+        last_error = COALESCE(last_error, 'Recovered stale PROCESSING request')
+    WHERE status = 'PROCESSING'
+      AND locked_at < now() - make_interval(secs => p_timeout_seconds);
+    GET DIAGNOSTICS v_count = ROW_COUNT;
+    RETURN v_count;
+END;
+$$;
+
+
+--
 -- Name: sp_release_stale_notifications(integer); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -3094,6 +3875,29 @@ BEGIN
 
     GET DIAGNOSTICS v_count = ROW_COUNT;
     RETURN v_count;
+END;
+$$;
+
+
+--
+-- Name: sp_renew_llm_request_lease(uuid, character varying, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_renew_llm_request_lease(p_request_id uuid, p_worker_id character varying, p_lease_seconds integer) RETURNS boolean
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    UPDATE public.llm_request_queue
+    SET
+        lease_expires_at =
+            now() + make_interval(
+                secs => GREATEST(p_lease_seconds, 1)
+            )
+    WHERE request_id = p_request_id
+      AND status = 'PROCESSING'
+      AND locked_by = p_worker_id;
+
+    RETURN FOUND;
 END;
 $$;
 
@@ -5089,6 +5893,53 @@ CREATE TABLE public.instruments (
 
 
 --
+-- Name: llm_rate_limit_windows; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.llm_rate_limit_windows (
+    queue_key character varying(400) NOT NULL,
+    window_started_at timestamp with time zone DEFAULT now() NOT NULL,
+    tokens_used integer DEFAULT 0 NOT NULL,
+    requests_used integer DEFAULT 0 NOT NULL,
+    blocked_until timestamp with time zone,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    quota_day date,
+    requests_used_today integer DEFAULT 0 NOT NULL,
+    CONSTRAINT ck_llm_rate_daily_usage CHECK ((requests_used_today >= 0)),
+    CONSTRAINT ck_llm_rate_usage CHECK (((tokens_used >= 0) AND (requests_used >= 0)))
+);
+
+
+--
+-- Name: llm_request_queue; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.llm_request_queue (
+    request_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    queue_key character varying(400) NOT NULL,
+    provider character varying(64) NOT NULL,
+    model character varying(255) NOT NULL,
+    request_payload jsonb NOT NULL,
+    estimated_tokens integer NOT NULL,
+    priority integer DEFAULT 100 NOT NULL,
+    status character varying(20) DEFAULT 'PENDING'::character varying NOT NULL,
+    attempt_count integer DEFAULT 0 NOT NULL,
+    max_attempts integer DEFAULT 4 NOT NULL,
+    available_at timestamp with time zone DEFAULT now() NOT NULL,
+    locked_at timestamp with time zone,
+    locked_by character varying(150),
+    completed_at timestamp with time zone,
+    response_payload jsonb,
+    last_error text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    lease_expires_at timestamp with time zone,
+    CONSTRAINT ck_llm_queue_attempts CHECK (((estimated_tokens > 0) AND (attempt_count >= 0) AND (max_attempts > 0))),
+    CONSTRAINT ck_llm_queue_status CHECK (((status)::text = ANY ((ARRAY['PENDING'::character varying, 'PROCESSING'::character varying, 'RETRY'::character varying, 'COMPLETED'::character varying, 'FAILED'::character varying])::text[])))
+);
+
+
+--
 -- Name: market_price_refresh_queue; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -5985,6 +6836,22 @@ ALTER TABLE ONLY public.instruments
 
 
 --
+-- Name: llm_rate_limit_windows llm_rate_limit_windows_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.llm_rate_limit_windows
+    ADD CONSTRAINT llm_rate_limit_windows_pkey PRIMARY KEY (queue_key);
+
+
+--
+-- Name: llm_request_queue llm_request_queue_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.llm_request_queue
+    ADD CONSTRAINT llm_request_queue_pkey PRIMARY KEY (request_id);
+
+
+--
 -- Name: market_price_refresh_queue market_price_refresh_queue_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -6559,6 +7426,34 @@ CREATE INDEX ix_instruments_symbol_exchange ON public.instruments USING btree (s
 
 
 --
+-- Name: ix_llm_queue_due; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_llm_queue_due ON public.llm_request_queue USING btree (queue_key, status, available_at, priority, created_at) WHERE ((status)::text = ANY ((ARRAY['PENDING'::character varying, 'RETRY'::character varying])::text[]));
+
+
+--
+-- Name: ix_llm_queue_expired_processing; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_llm_queue_expired_processing ON public.llm_request_queue USING btree (lease_expires_at) WHERE ((status)::text = 'PROCESSING'::text);
+
+
+--
+-- Name: ix_llm_queue_processing; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_llm_queue_processing ON public.llm_request_queue USING btree (status, locked_at) WHERE ((status)::text = 'PROCESSING'::text);
+
+
+--
+-- Name: ix_llm_request_queue_cleanup; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_llm_request_queue_cleanup ON public.llm_request_queue USING btree (status, completed_at, created_at);
+
+
+--
 -- Name: ix_market_price_refresh_due; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -6948,6 +7843,27 @@ CREATE TRIGGER trg_instruments_created_at BEFORE INSERT ON public.instruments FO
 --
 
 CREATE TRIGGER trg_instruments_updated_at BEFORE INSERT OR UPDATE ON public.instruments FOR EACH ROW EXECUTE FUNCTION public.trg_set_updated_at();
+
+
+--
+-- Name: llm_rate_limit_windows trg_llm_rate_limit_windows_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_llm_rate_limit_windows_updated_at BEFORE INSERT OR UPDATE ON public.llm_rate_limit_windows FOR EACH ROW EXECUTE FUNCTION public.trg_set_updated_at();
+
+
+--
+-- Name: llm_request_queue trg_llm_request_queue_created_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_llm_request_queue_created_at BEFORE INSERT ON public.llm_request_queue FOR EACH ROW EXECUTE FUNCTION public.trg_set_created_at();
+
+
+--
+-- Name: llm_request_queue trg_llm_request_queue_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_llm_request_queue_updated_at BEFORE INSERT OR UPDATE ON public.llm_request_queue FOR EACH ROW EXECUTE FUNCTION public.trg_set_updated_at();
 
 
 --
@@ -7641,5 +8557,5 @@ ALTER TABLE ONLY public.watchlists
 -- PostgreSQL database dump complete
 --
 
-\unrestrict vLSdfaqk0WEMyJjAEFn2waFCijWWohJoWrge0lipG50JiKsPLa4xvf099OsuDjE
+\unrestrict 5rCgWV8JJQBVfW3bG11ORjw2adrxKfMlgnmlqOcp2UHZolklbxeb2BI2jDFMdsU
 

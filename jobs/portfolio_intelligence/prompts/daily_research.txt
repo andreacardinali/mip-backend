@@ -1,4 +1,5 @@
-Analyze the observed daily movement using Google Search. Return JSON with symbol, catalyst and supports.
+Analyze the observed daily movement. The observed payload may include provider-agnostic marketEvidence with normalized news and common economic events. Use that evidence as the only admissible evidence. Do not call tools, functions, browsers, search engines or external services. If the evidence does not support a catalyst, return a neutral unsupported result.
+Return JSON with symbol, catalyst and supports. Never identify or assume a specific market-data provider.
 Do not claim causality unless a source explicitly establishes it. Do not infer price direction from the event type.
 Observed:
 {observed}

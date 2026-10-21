@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 
 from job_runtime.collections import batched, deduplicate_by
 from jobs.portfolio_intelligence.batching import matched_batch_rows
+from jobs.portfolio_intelligence.evidence import MarketEvidenceCollector
 from jobs.portfolio_intelligence.messages import format_breaking_catalyst_message
 from jobs.portfolio_intelligence.models import BranchResult
 from jobs.portfolio_intelligence.parsing import (
@@ -24,26 +25,32 @@ class BreakingCatalystBranch:
         result.candidate_count = len(candidates)
         template = context.prompts.get("breaking")
         accepted = []
+        collector = MarketEvidenceCollector(context.market_data, context.config)
+        economic_events = collector.common_economic_events()
 
         for batch in batched(candidates, context.config.batch_size):
+            payload = [
+                {
+                    **item.to_dict(),
+                    "marketEvidence": collector.for_breaking(
+                        item, economic_events=economic_events
+                    ).to_dict(),
+                }
+                for item in batch
+            ]
             response = context.research_llm.generate_json(
                 LLMRequest(
                     prompt=template.render(
                         lookback_hours=context.config.breaking_lookback_hours,
                         execution_date=datetime.now(UTC).isoformat(),
-                        candidates=json.dumps(
-                            [item.to_dict() for item in batch],
-                            default=str,
-                        ),
+                        candidates=json.dumps(payload, default=str),
                     ),
                     grounded_search=True,
                     max_tokens=8192,
                 )
             )
             for source, row in matched_batch_rows(
-                batch,
-                response.data,
-                label="Breaking",
+                batch, response.data, label="Breaking"
             ):
                 for raw_event in row.get("events") or []:
                     try:
@@ -66,16 +73,14 @@ class BreakingCatalystBranch:
                             "name": source.name,
                             "eventKey": event_key,
                             "severity": breaking_catalyst_severity(
-                                event.confidence,
-                                source.allocation_pct,
+                                event.confidence, source.allocation_pct
                             ),
                             "sources": response.sources,
                         }
                     )
 
         accepted = deduplicate_by(
-            accepted,
-            key=lambda item: (item["user_id"], item["eventKey"]),
+            accepted, key=lambda item: (item["user_id"], item["eventKey"])
         )
         result.accepted_count = len(accepted)
         diagnostics = NotificationDiagnostics()
@@ -97,6 +102,7 @@ class BreakingCatalystBranch:
                 result.notification_count += 1
         result.diagnostics = {
             "lookbackHours": context.config.breaking_lookback_hours,
+            "marketEvidence": collector.diagnostics.to_dict(),
             **diagnostics.to_dict(),
         }
         return result

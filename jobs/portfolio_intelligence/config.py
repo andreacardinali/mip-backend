@@ -28,6 +28,10 @@ class IntelligenceConfig:
     min_history_rows: int
     history_range: str
     history_interval: str
+    market_evidence_enabled: bool
+    news_limit: int
+    etf_holding_limit: int
+    economic_event_limit: int
 
     @classmethod
     def load(cls) -> "IntelligenceConfig":
@@ -44,28 +48,19 @@ class IntelligenceConfig:
                 default_provider="ollama",
                 default_timeout=120.0,
             ),
-            create_notifications=_b(
-                "INTELLIGENCE_CREATE_NOTIFICATIONS",
-                False,
-            ),
+            create_notifications=_b("INTELLIGENCE_CREATE_NOTIFICATIONS", False),
             batch_size=_i("INTELLIGENCE_BATCH_SIZE", 4),
-            upcoming_window_days=_i(
-                "UPCOMING_CATALYST_WINDOW_DAYS",
-                7,
-            ),
-            breaking_lookback_hours=_i(
-                "BREAKING_CATALYST_LOOKBACK_HOURS",
-                24,
-            ),
+            upcoming_window_days=_i("UPCOMING_CATALYST_WINDOW_DAYS", 7),
+            breaking_lookback_hours=_i("BREAKING_CATALYST_LOOKBACK_HOURS", 24),
             daily_move_min_pct=_f("DAILY_MOVE_MIN_PCT", 3.0),
             min_history_rows=_i("MIN_HISTORY_ROWS", 50),
             history_range=settings.get("YAHOO_HISTORY_RANGE", "2y"),
-            history_interval=settings.get(
-                "YAHOO_HISTORY_INTERVAL",
-                "1d",
-            ),
+            history_interval=settings.get("YAHOO_HISTORY_INTERVAL", "1d"),
+            market_evidence_enabled=_b("INTELLIGENCE_MARKET_EVIDENCE_ENABLED", True),
+            news_limit=_i("INTELLIGENCE_NEWS_LIMIT", 20),
+            etf_holding_limit=_i("INTELLIGENCE_ETF_HOLDING_LIMIT", 25),
+            economic_event_limit=_i("INTELLIGENCE_ECONOMIC_EVENT_LIMIT", 50),
         )
-
         if config.batch_size < 1:
             raise ValueError("INTELLIGENCE_BATCH_SIZE must be >= 1")
         if not 1 <= config.upcoming_window_days <= 30:
@@ -74,5 +69,11 @@ class IntelligenceConfig:
             raise ValueError("YAHOO_HISTORY_RANGE cannot be empty")
         if not str(config.history_interval or "").strip():
             raise ValueError("YAHOO_HISTORY_INTERVAL cannot be empty")
-
+        if (
+            min(
+                config.news_limit, config.etf_holding_limit, config.economic_event_limit
+            )
+            < 1
+        ):
+            raise ValueError("Market evidence limits must be >= 1")
         return config

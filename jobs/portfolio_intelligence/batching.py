@@ -13,14 +13,41 @@ def matched_batch_rows[T: SymbolCandidate](
     label: str,
 ) -> Iterator[tuple[T, Mapping[str, Any]]]:
     rows = response_data.get("results") or []
+
     if not isinstance(rows, list):
         raise ValueError(f"{label} LLM results must be a list")
-    if len(rows) != len(batch):
-        raise ValueError(f"{label} LLM result count mismatch")
 
-    for source, row in zip(batch, rows, strict=True):
+    rows_by_symbol: dict[str, Mapping[str, Any]] = {}
+
+    for row in rows:
         if not isinstance(row, Mapping):
             raise ValueError(f"{label} LLM result must be an object")
-        if row.get("symbol") != source.symbol:
-            raise ValueError(f"{label} LLM symbol mismatch")
+
+        symbol = row.get("symbol")
+        if not isinstance(symbol, str) or not symbol:
+            raise ValueError(f"{label} LLM result missing symbol")
+
+        if symbol in rows_by_symbol:
+            raise ValueError(f"{label} LLM duplicate symbol: {symbol}")
+
+        rows_by_symbol[symbol] = row
+
+    expected_symbols = {source.symbol for source in batch}
+    unexpected_symbols = set(rows_by_symbol) - expected_symbols
+
+    if unexpected_symbols:
+        raise ValueError(
+            f"{label} LLM symbol mismatch: "
+            f"unexpected symbols {sorted(unexpected_symbols)}"
+        )
+
+    for source in batch:
+        row = rows_by_symbol.get(source.symbol)
+
+        if row is None:
+            row = {
+                "symbol": source.symbol,
+                "events": [],
+            }
+
         yield source, row

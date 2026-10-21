@@ -3,6 +3,7 @@ from datetime import date, timedelta
 
 from job_runtime.collections import batched, deduplicate_by
 from jobs.portfolio_intelligence.batching import matched_batch_rows
+from jobs.portfolio_intelligence.evidence import MarketEvidenceCollector
 from jobs.portfolio_intelligence.messages import format_upcoming_catalyst_message
 from jobs.portfolio_intelligence.models import BranchResult
 from jobs.portfolio_intelligence.parsing import (
@@ -26,18 +27,21 @@ class UpcomingCatalystBranch:
         today = date.today()
         end = today + timedelta(days=context.config.upcoming_window_days)
         known = recent_catalysts(
-            context.db,
-            [candidate.entity_id for candidate in candidates],
-            30,
+            context.db, [candidate.entity_id for candidate in candidates], 30
         )
         template = context.prompts.get("upcoming")
         accepted = []
+        collector = MarketEvidenceCollector(context.market_data, context.config)
+        economic_events = collector.common_economic_events()
 
         for batch in batched(candidates, context.config.batch_size):
             payload = [
                 {
                     **candidate.to_dict(),
                     "recentCatalysts": known.get(candidate.entity_id, []),
+                    "marketEvidence": collector.for_upcoming(
+                        candidate, today, end, economic_events=economic_events
+                    ).to_dict(),
                 }
                 for candidate in batch
             ]
@@ -50,13 +54,11 @@ class UpcomingCatalystBranch:
                         candidates=json.dumps(payload, default=str),
                     ),
                     grounded_search=True,
-                    max_tokens=8192,
+                    max_tokens=4096,
                 )
             )
             for source, row in matched_batch_rows(
-                batch,
-                response.data,
-                label="Upcoming",
+                batch, response.data, label="Upcoming"
             ):
                 for raw_event in row.get("events") or []:
                     try:
@@ -68,13 +70,9 @@ class UpcomingCatalystBranch:
                         continue
                     days = (event.event_date - today).days
                     severity, score = upcoming_catalyst_severity(
-                        days,
-                        source.allocation_pct,
+                        days, source.allocation_pct
                     )
-                    event_key = (
-                        f"{source.symbol}|{event.event_type}|"
-                        f"{event.event_date.isoformat()}"
-                    )
+                    event_key = f"{source.symbol}|{event.event_type}|{event.event_date.isoformat()}"
                     accepted.append(
                         {
                             **event.payload,
@@ -91,8 +89,7 @@ class UpcomingCatalystBranch:
                     )
 
         accepted = deduplicate_by(
-            accepted,
-            key=lambda item: (item["user_id"], item["eventKey"]),
+            accepted, key=lambda item: (item["user_id"], item["eventKey"])
         )
         result.accepted_count = len(accepted)
         diagnostics = NotificationDiagnostics()
@@ -115,6 +112,7 @@ class UpcomingCatalystBranch:
         result.diagnostics = {
             "windowStart": today.isoformat(),
             "windowEnd": end.isoformat(),
+            "marketEvidence": collector.diagnostics.to_dict(),
             **diagnostics.to_dict(),
         }
         return result

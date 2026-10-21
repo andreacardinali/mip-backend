@@ -1,19 +1,27 @@
+import logging
 import unittest
 
 import httpx
 
-from http_client.retry import RetryPolicy, request_with_retry
+from http_client.retry import (
+    RetryDelayStrategy,
+    RetryPolicy,
+    request_with_retry,
+)
 
 
 class SequenceTransport(httpx.BaseTransport):
-    def __init__(self, statuses):
-        self.statuses = list(statuses)
+    def __init__(self, responses):
+        self.responses = list(responses)
         self.calls = 0
 
     def handle_request(self, request):
-        status = self.statuses[min(self.calls, len(self.statuses) - 1)]
+        item = self.responses[min(self.calls, len(self.responses) - 1)]
         self.calls += 1
-        return httpx.Response(status, request=request, headers={"Retry-After": "0"})
+        if isinstance(item, int):
+            return httpx.Response(item, request=request)
+        status, headers, body = item
+        return httpx.Response(status, request=request, headers=headers, json=body)
 
 
 class RetryTests(unittest.TestCase):
@@ -57,18 +65,144 @@ class RetryTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(transport.calls, 2)
 
-    def test_max_retries_is_after_initial_attempt(self):
-        transport = SequenceTransport([503, 503, 503])
+    def test_retry_after_header_controls_delay(self):
+        sleeps = []
+        transport = SequenceTransport([(429, {"Retry-After": "42"}, {}), 200])
         with httpx.Client(transport=transport) as client:
-            with self.assertRaises(httpx.HTTPStatusError):
-                request_with_retry(
+            request_with_retry(
+                client,
+                "POST",
+                "https://example.test",
+                policy=RetryPolicy(max_retries=1, jitter_seconds=0),
+                retry_non_idempotent=True,
+                sleep=sleeps.append,
+            )
+        self.assertEqual(sleeps, [42.0])
+
+    def test_response_hint_controls_delay(self):
+        sleeps = []
+        transport = SequenceTransport([(429, {}, {"retry_after": 41.88}), 200])
+        with httpx.Client(transport=transport) as client:
+            request_with_retry(
+                client,
+                "POST",
+                "https://example.test",
+                policy=RetryPolicy(
+                    max_retries=1,
+                    jitter_seconds=0,
+                    delay_strategy=RetryDelayStrategy.HYBRID,
+                    response_delay_resolver=lambda response: response.json().get(
+                        "retry_after"
+                    ),
+                ),
+                retry_non_idempotent=True,
+                sleep=sleeps.append,
+            )
+        self.assertEqual(sleeps, [41.88])
+
+    def test_retry_log_contains_response_error(self):
+        responses = iter(
+            [
+                httpx.Response(
+                    500,
+                    json={
+                        "error": {
+                            "message": "temporary failure",
+                        }
+                    },
+                ),
+                httpx.Response(
+                    200,
+                    json={"ok": True},
+                ),
+            ]
+        )
+
+        transport = httpx.MockTransport(lambda request: next(responses))
+
+        with httpx.Client(transport=transport) as client:
+            with self.assertLogs(
+                "http_client.retry",
+                level=logging.WARNING,
+            ) as captured:
+                response = request_with_retry(
                     client,
-                    "GET",
-                    "https://example.test",
-                    policy=RetryPolicy(max_retries=2, jitter_seconds=0),
+                    "POST",
+                    "https://example.invalid",
+                    policy=RetryPolicy(
+                        max_retries=1,
+                        jitter_seconds=0,
+                    ),
+                    retry_non_idempotent=True,
                     sleep=lambda _: None,
                 )
-        self.assertEqual(transport.calls, 3)
+
+        self.assertEqual(response.status_code, 200)
+
+        log_output = "\n".join(captured.output)
+
+        self.assertIn("status=500", log_output)
+        self.assertIn(
+            "temporary failure",
+            log_output,
+        )
+        self.assertIn("attempt=1/2", log_output)
+
+    def test_retry_log_contains_exception_message(self):
+        attempts = 0
+
+        def handler(
+            request: httpx.Request,
+        ) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+
+            if attempts == 1:
+                raise httpx.ReadTimeout(
+                    "provider read timed out",
+                    request=request,
+                )
+
+            return httpx.Response(
+                200,
+                json={"ok": True},
+            )
+
+        transport = httpx.MockTransport(handler)
+
+        with httpx.Client(transport=transport) as client:
+            with self.assertLogs(
+                "http_client.retry",
+                level=logging.WARNING,
+            ) as captured:
+                response = request_with_retry(
+                    client,
+                    "POST",
+                    "https://example.invalid",
+                    policy=RetryPolicy(
+                        max_retries=1,
+                        jitter_seconds=0,
+                    ),
+                    retry_non_idempotent=True,
+                    sleep=lambda _: None,
+                )
+
+        self.assertEqual(response.status_code, 200)
+
+        log_output = "\n".join(captured.output)
+
+        self.assertIn(
+            "error_type=ReadTimeout",
+            log_output,
+        )
+        self.assertIn(
+            "provider read timed out",
+            log_output,
+        )
+        self.assertIn(
+            "attempt=1/2",
+            log_output,
+        )
 
 
 if __name__ == "__main__":

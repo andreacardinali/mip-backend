@@ -1,17 +1,24 @@
-# OpenFIGI primary exchange code
+# RPD extension for the MIP persistent LLM queue
 
-- OpenFIGI `exchCode` populates both `exchange` and `openfigi_exch_code`.
-- MIC is optional and is not part of `MISSING`.
-- `(symbol, exchange)` is a normal index, not a uniqueness constraint.
-- FIGI is the preferred unique external identifier.
-- FMP remains an explicit `full_refresh` fallback.
+Apply from the backend root after making a backup.
 
 ```bash
-cd /opt/mip/mip-backend
-unzip -o mip-openfigi-primary-exchange.zip -d /opt/mip/mip-backend
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f sql/011_openfigi_primary_exchange.sql
-python -m py_compile providers/openfigi.py providers/manager.py
-pytest -q tests/test_openfigi_primary_exchange.py
+unzip -o mip-llm-rpd-patch.zip -d .
+python scripts/apply_llm_rpd_python_patch.py
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \
+  -f sql/20261021_llm_persistent_queue_rpd.sql
 ./scripts/check.sh
-python -m scripts.refresh_entities --mode MISSING --debug
 ```
+
+Gemini configuration example:
+
+```dotenv
+INTELLIGENCE_LLM_REQUESTS_PER_MINUTE=15
+INTELLIGENCE_LLM_TOKENS_PER_MINUTE=250000
+INTELLIGENCE_LLM_REQUESTS_PER_DAY=1500
+INTELLIGENCE_LLM_DAILY_RESET_TIMEZONE=America/Los_Angeles
+INTELLIGENCE_LLM_RATE_LIMIT_SAFETY_FACTOR=0.90
+INTELLIGENCE_LLM_PERSISTENT_QUEUE_ENABLED=true
+```
+
+`REQUESTS_PER_DAY=0` disables the daily limiter. The SQL migration uses the existing timestamp triggers and does not assign `updated_at` manually.

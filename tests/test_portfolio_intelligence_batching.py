@@ -1,5 +1,6 @@
 import unittest
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 from jobs.portfolio_intelligence.batching import matched_batch_rows
 
@@ -27,16 +28,6 @@ class BatchMatchingTests(unittest.TestCase):
         self.assertEqual(rows[0][0].symbol, "AAPL")
         self.assertEqual(rows[1][1]["symbol"], "MSFT")
 
-    def test_rejects_result_count_mismatch(self):
-        with self.assertRaisesRegex(ValueError, "result count mismatch"):
-            list(
-                matched_batch_rows(
-                    [Candidate("AAPL")],
-                    {"results": []},
-                    label="Test",
-                )
-            )
-
     def test_rejects_symbol_mismatch(self):
         with self.assertRaisesRegex(ValueError, "symbol mismatch"):
             list(
@@ -56,6 +47,59 @@ class BatchMatchingTests(unittest.TestCase):
                     label="Test",
                 )
             )
+
+    def test_fills_missing_results_with_empty_events(self):
+        candidates = [
+            SimpleNamespace(symbol="AAPL"),
+            SimpleNamespace(symbol="MSFT"),
+        ]
+
+        rows = list(
+            matched_batch_rows(
+                candidates,
+                {"results": []},
+                label="Test",
+            )
+        )
+
+        self.assertEqual(len(rows), len(candidates))
+
+        for candidate, row in rows:
+            self.assertEqual(row["symbol"], candidate.symbol)
+            self.assertEqual(row["events"], [])
+
+    def test_fills_only_missing_symbols(self):
+        candidates = [
+            SimpleNamespace(symbol="AAPL"),
+            SimpleNamespace(symbol="MSFT"),
+        ]
+        first = candidates[0]
+
+        rows = list(
+            matched_batch_rows(
+                candidates,
+                {
+                    "results": [
+                        {
+                            "symbol": first.symbol,
+                            "events": [{"headline": "Evento"}],
+                        }
+                    ]
+                },
+                label="Test",
+            )
+        )
+
+        rows_by_symbol = {candidate.symbol: row for candidate, row in rows}
+
+        self.assertEqual(
+            rows_by_symbol["AAPL"]["events"],
+            [{"headline": "Evento"}],
+        )
+        self.assertEqual(
+            rows_by_symbol["MSFT"]["events"],
+            [],
+        )
 
 
 if __name__ == "__main__":

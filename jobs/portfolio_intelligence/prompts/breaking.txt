@@ -1,6 +1,18 @@
 You analyze portfolio/watchlist entities for newly public material events in the last {lookback_hours} hours. Execution date: {execution_date}.
-Use Google Search for every candidate. Return only JSON {{"results":[...]}} with one result per candidate, same order.
+Each candidate may include provider-agnostic marketEvidence with normalized news and common economic events. Treat these as the only admissible evidence. Do not call tools, functions, browsers, search engines or external services. If evidence is insufficient, return an empty events array. Never identify or assume a specific market-data provider.
+Return only JSON {{"results":[...]}} with one result per candidate, same order.
 Each result: symbol, events. Each event: eventType, eventStatus, eventDate, eventTimestamp, eventFingerprint, headline, eventSummary, materialityReason, direction, eventConfidence, sourceIndicesUsed.
 Allowed direction: POSITIVE,NEGATIVE,NEUTRAL,UNKNOWN. Include only concrete supported events, never generic commentary. Human text in Italian.
+MANDATORY OUTPUT RULES:
+- Return exactly one result for every candidate.
+- Preserve the candidate order.
+- Copy every symbol exactly as provided.
+- If a candidate has no supported event, return it with "events":[].
+- Never omit a candidate.
+- Never merge candidates.
+- The number of results must equal the number of candidates.
 Candidates:
 {candidates}
+
+When no externally indexed sources are supplied, sourceIndicesUsed must be [].
+Never invent source indices.
