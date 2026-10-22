@@ -1,4 +1,5 @@
 import json
+import logging
 import socket
 import time
 from dataclasses import dataclass
@@ -10,6 +11,8 @@ from sqlalchemy.orm import sessionmaker
 from llm.base import LLMProvider, LLMRequest, LLMResponse
 from llm.rate_limit import estimate_tokens
 from llm.retry_hints import exception_retry_delay
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +37,15 @@ class PersistentQueueConfig:
     completed_retention_days: int = 7
     failed_retention_days: int = 30
     abandoned_retention_days: int = 30
+
+
+@dataclass(frozen=True, slots=True)
+class QueueFailureResult:
+    status: str
+    retry_scheduled: bool
+    available_at: object | None
+    attempt_count: int
+    max_attempts: int
 
 
 class PersistentQueuedProvider(LLMProvider):
@@ -67,18 +79,72 @@ class PersistentQueuedProvider(LLMProvider):
     def queue_key(self) -> str:
         return f"{self.provider_name}:{self.model}"
 
-    def generate_json(self, request: LLMRequest) -> LLMResponse:
+    def generate_json(
+        self,
+        request: LLMRequest,
+    ) -> LLMResponse:
         self._maybe_maintain_queue()
+
         request_id = self._enqueue(request)
         started = time.monotonic()
-        while time.monotonic() - started < self.config.wait_timeout_seconds:
+        deadline = started + self.config.wait_timeout_seconds
+
+        logger.info(
+            "LLM queue request enqueued "
+            "request_id=%s queue_key=%s "
+            "wait_timeout_seconds=%.3f",
+            request_id,
+            self.queue_key,
+            self.config.wait_timeout_seconds,
+        )
+
+        while True:
+            remaining_seconds = deadline - time.monotonic()
+
+            if remaining_seconds <= 0:
+                status = self._timeout_request(
+                    request_id,
+                )
+
+                raise TimeoutError(
+                    "Timed out waiting for LLM queue " f"request {request_id}: {status}"
+                )
+
             if self._claim(request_id):
-                return self._execute(request_id, request)
+                logger.info(
+                    "LLM queue request claimed "
+                    "request_id=%s "
+                    "remaining_seconds=%.3f",
+                    request_id,
+                    remaining_seconds,
+                )
+
+                response = self._execute(
+                    request_id,
+                    request,
+                    deadline=deadline,
+                )
+
+                if response is not None:
+                    return response
+
             terminal = self._read_terminal(request_id)
+
             if terminal is not None:
                 return terminal
-            time.sleep(self.config.poll_seconds)
-        raise TimeoutError(f"Timed out waiting for LLM queue request {request_id}")
+
+            sleep_seconds = min(
+                self.config.poll_seconds,
+                max(
+                    0.0,
+                    deadline - time.monotonic(),
+                ),
+            )
+
+            if sleep_seconds <= 0:
+                continue
+
+            time.sleep(sleep_seconds)
 
     def _enqueue(self, request: LLMRequest) -> UUID:
         request_id = uuid4()
@@ -149,13 +215,61 @@ class PersistentQueuedProvider(LLMProvider):
             db.commit()
             return bool(claimed)
 
-    def _execute(self, request_id: UUID, request: LLMRequest) -> LLMResponse:
+    def _execute(
+        self,
+        request_id: UUID,
+        request: LLMRequest,
+        deadline: float,
+    ) -> LLMResponse | None:
         try:
             response = self.provider.generate_json(request)
         except Exception as exc:
-            self._fail(request_id, exc)
+            remaining_seconds = max(
+                0.0,
+                deadline - time.monotonic(),
+            )
+
+            failure = self._fail(
+                request_id,
+                exc,
+                remaining_seconds=(remaining_seconds),
+            )
+
+            logger.warning(
+                "LLM queue request failed "
+                "request_id=%s "
+                "status=%s "
+                "attempt=%s/%  "
+                "retry_scheduled=%s "
+                "available_at=%s "
+                "remaining_seconds=%.3f "
+                "erro*_type=%s error=%s",
+                request_id,
+                failure.status,
+                failure.attempt_count,
+                failure.max_attempts,
+                failure.retry_scheduled,
+                failure.available_at,
+                remaining_seconds,
+                type(exc).__name__,
+                exc,
+            )
+
+            if failure.retry_scheduled:
+                return None
+
             raise
-        self._complete(request_id, response)
+
+        self._complete(
+            request_id,
+            response,
+        )
+
+        logger.info(
+            "LLM queue request completed " "request_id=%s",
+            request_id,
+        )
+
         return response
 
     def _complete(self, request_id: UUID, response: LLMResponse) -> None:
@@ -173,61 +287,146 @@ class PersistentQueuedProvider(LLMProvider):
             )
             db.commit()
 
-    def _fail(self, request_id: UUID, exc: Exception) -> None:
-        delay = exception_retry_delay(exc)
+    def _fail(
+        self,
+        request_id: UUID,
+        exc: Exception,
+        *,
+        remaining_seconds: float,
+    ) -> QueueFailureResult:
+        suggested_delay = exception_retry_delay(exc)
+
         with self.session_factory() as db:
-            row = (
+            current = (
                 db.execute(
                     text(
                         """
-                    SELECT attempt_count, max_attempts, queue_key
-                    FROM llm_request_queue WHERE request_id=:request_id FOR UPDATE
-                """
+                        SELECT
+                            attempt_count,
+                            max_attempts,
+                            queue_key
+                        FROM llm_request_queue
+                        WHERE request_id = :request_id
+                        FOR UPDATE
+                        """
                     ),
-                    {"request_id": request_id},
+                    {
+                        "request_id": request_id,
+                    },
                 )
                 .mappings()
                 .one()
             )
-            retry = int(row["attempt_count"]) < int(row["max_attempts"])
-            wait = (
-                delay if delay is not None else min(300, 2 ** int(row["attempt_count"]))
+
+            attempt_count = int(current["attempt_count"])
+            max_attempts = int(current["max_attempts"])
+
+            default_delay = min(
+                300.0,
+                float(2**attempt_count),
             )
-            if delay is not None:
+
+            requested_wait = max(
+                0.0,
+                float(
+                    suggested_delay if suggested_delay is not None else default_delay
+                ),
+            )
+
+            required_remaining_seconds = requested_wait + self.config.poll_seconds
+
+            retry = (
+                attempt_count < max_attempts
+                and remaining_seconds > required_remaining_seconds
+            )
+
+            result = (
                 db.execute(
                     text(
                         """
-                        INSERT INTO llm_rate_limit_windows(queue_key, blocked_until)
-                        VALUES (:queue_key, now() + make_interval(secs => :wait))
-                        ON CONFLICT(queue_key) DO UPDATE
-                        SET blocked_until=GREATEST(
-                            llm_rate_limit_windows.blocked_until,
+                        UPDATE llm_request_queue
+                        SET
+                            status = CASE
+                                WHEN :retry
+                                THEN 'RETRY'
+                                ELSE 'FAILED'
+                            END,
+                            available_at = CASE
+                                WHEN :retry
+                                THEN now()
+                                     + make_interval(
+                                         secs => :wait
+                                     )
+                                ELSE available_at
+                            END,
+                            last_error = :error,
+                            locked_at = NULL,
+                            locked_by = NULL,
+                            lease_expires_at = NULL,
+                            completed_at = CASE
+                                WHEN :retry
+                                THEN NULL
+                                ELSE now()
+                            END
+                        WHERE request_id = :request_id
+                        RETURNING
+                            status,
+                            available_at,
+                            attempt_count,
+                            max_attempts
+                        """
+                    ),
+                    {
+                        "request_id": request_id,
+                        "retry": retry,
+                        "wait": requested_wait,
+                        "error": str(exc)[:4000],
+                    },
+                )
+                .mappings()
+                .one()
+            )
+
+            if retry and suggested_delay is not None:
+                db.execute(
+                    text(
+                        """
+                        INSERT INTO
+                            llm_rate_limit_windows(
+                                queue_key,
+                                blocked_until
+                            )
+                        VALUES (
+                            :queue_key,
+                            now()
+                            + make_interval(
+                                secs => :wait
+                            )
+                        )
+                        ON CONFLICT(queue_key)
+                        DO UPDATE
+                        SET blocked_until = GREATEST(
+                            llm_rate_limit_windows
+                                .blocked_until,
                             EXCLUDED.blocked_until
                         )
-                    """
+                        """
                     ),
-                    {"queue_key": row["queue_key"], "wait": wait},
+                    {
+                        "queue_key": current["queue_key"],
+                        "wait": requested_wait,
+                    },
                 )
-            db.execute(
-                text(
-                    """
-                    UPDATE llm_request_queue
-                    SET status=:status, available_at=CASE WHEN :retry
-                        THEN now() + make_interval(secs => :wait) ELSE available_at END,
-                        last_error=:error, locked_at=NULL, locked_by=NULL,
-                        completed_at=CASE WHEN :retry THEN NULL ELSE now() END
-                    WHERE request_id=:request_id
-                """
-                ),
-                {
-                    "request_id": request_id,
-                    "status": "RETRY" if retry else "FAILED",
-                    "retry": retry,
-                    "wait": wait,
-                    "error": str(exc)[:4000],
-                },
-            )
+
             db.commit()
+
+        return QueueFailureResult(
+            status=str(result["status"]),
+            retry_scheduled=retry,
+            available_at=result["available_at"],
+            attempt_count=int(result["attempt_count"]),
+            max_attempts=int(result["max_attempts"]),
+        )
 
     def _read_terminal(self, request_id: UUID) -> LLMResponse | None:
         with self.session_factory() as db:
@@ -277,3 +476,124 @@ class PersistentQueuedProvider(LLMProvider):
 
         self._maintain_queue()
         self._last_maintenance_at = now
+
+    def _timeout_request(
+        self,
+        request_id: UUID,
+    ) -> dict:
+        timeout_error = (
+            "Queue wait timeout exceeded after "
+            f"{self.config.wait_timeout_seconds:.3f} "
+            "seconds"
+        )
+
+        with self.session_factory() as db:
+            row = (
+                db.execute(
+                    text(
+                        """
+                        UPDATE llm_request_queue
+                        SET
+                            status = 'FAILED',
+                            last_error = CASE
+                                WHEN last_error IS NULL
+                                  OR last_error = ''
+                                THEN :timeout_error
+                                ELSE
+                                    last_error
+                                    || E'\n'
+                                    || :timeout_error
+                            END,
+                            locked_at = NULL,
+                            locked_by = NULL,
+                            lease_expires_at = NULL,
+                            completed_at = now()
+                        WHERE request_id = :request_id
+                          AND status IN (
+                              'PENDING',
+                              'RETRY'
+                          )
+                        RETURNING
+                            status,
+                            estimated_tokens,
+                            attempt_count,
+                            max_attempts,
+                            created_at,
+                            available_at,
+                            locked_at,
+                            lease_expires_at,
+                            last_error
+                        """
+                    ),
+                    {
+                        "request_id": request_id,
+                        "timeout_error": timeout_error,
+                    },
+                )
+                .mappings()
+                .one_or_none()
+            )
+
+            if row is None:
+                row = (
+                    db.execute(
+                        text(
+                            """
+                            SELECT
+                                status,
+                                estimated_tokens,
+                                attempt_count,
+                                max_attempts,
+                                created_at,
+                                available_at,
+                                locked_at,
+                                lease_expires_at,
+                                last_error
+                            FROM llm_request_queue
+                            WHERE request_id = :request_id
+                            """
+                        ),
+                        {
+                            "request_id": request_id,
+                        },
+                    )
+                    .mappings()
+                    .one_or_none()
+                )
+
+            db.commit()
+
+        return dict(row or {})
+
+    def _read_status(
+        self,
+        request_id: UUID,
+    ) -> dict:
+        with self.session_factory() as db:
+            row = (
+                db.execute(
+                    text(
+                        """
+                    SELECT
+                        status,
+                        estimated_tokens,
+                        attempt_count,
+                        max_attempts,
+                        created_at,
+                        available_at,
+                        locked_at,
+                        lease_expires_at,
+                        last_error
+                    FROM llm_request_queue
+                    WHERE request_id = :request_id
+                    """
+                    ),
+                    {
+                        "request_id": request_id,
+                    },
+                )
+                .mappings()
+                .one_or_none()
+            )
+
+        return dict(row or {})

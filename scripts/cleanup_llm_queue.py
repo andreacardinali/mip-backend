@@ -4,6 +4,7 @@ import argparse
 import sys
 from dataclasses import dataclass
 from datetime import timedelta
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
@@ -11,7 +12,16 @@ import psycopg
 from psycopg import Connection
 from psycopg.rows import dict_row
 
-from config.settings import settings
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(
+        0,
+        str(PROJECT_ROOT),
+    )
+
+from config.settings import settings  # noqa: E402
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,24 +39,12 @@ class CleanupResult:
         row: dict[str, Any],
     ) -> "CleanupResult":
         return cls(
-            completed_count=int(
-                row["p_completed_count"]
-            ),
-            failed_count=int(
-                row["p_failed_count"]
-            ),
-            abandoned_count=int(
-                row["p_abandoned_count"]
-            ),
-            orphaned_pending_count=int(
-                row["p_orphaned_pending_count"]
-            ),
-            expired_processing_count=int(
-                row["p_expired_processing_count"]
-            ),
-            purged_count=int(
-                row["p_purged_count"]
-            ),
+            completed_count=int(row["p_completed_count"]),
+            failed_count=int(row["p_failed_count"]),
+            abandoned_count=int(row["p_abandoned_count"]),
+            orphaned_pending_count=int(row["p_orphaned_pending_count"]),
+            expired_processing_count=int(row["p_expired_processing_count"]),
+            purged_count=int(row["p_purged_count"]),
         )
 
     @property
@@ -66,8 +64,7 @@ class CleanupResult:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Preview or execute cleanup of the persistent "
-            "LLM request queue."
+            "Preview or execute cleanup of the persistent " "LLM request queue."
         ),
     )
 
@@ -75,8 +72,7 @@ def parse_args() -> argparse.Namespace:
         "--execute",
         action="store_true",
         help=(
-            "Delete matching rows. Without this option, "
-            "only a dry-run is performed."
+            "Delete matching rows. Without this option, " "only a dry-run is performed."
         ),
     )
 
@@ -104,8 +100,7 @@ def parse_args() -> argparse.Namespace:
         "--queue-key",
         default=None,
         help=(
-            "Limit cleanup to one queue key, for example "
-            "'gemini:gemma-4-31b-it'."
+            "Limit cleanup to one queue key, for example " "'gemini:gemma-4-31b-it'."
         ),
     )
 
@@ -134,8 +129,7 @@ def parse_args() -> argparse.Namespace:
         "--yes",
         action="store_true",
         help=(
-            "Skip the interactive confirmation when used "
-            "together with --execute."
+            "Skip the interactive confirmation when used " "together with --execute."
         ),
     )
 
@@ -165,14 +159,10 @@ def positive_integer(value: str) -> int:
     try:
         parsed = int(value)
     except ValueError as exc:
-        raise argparse.ArgumentTypeError(
-            "must be an integer"
-        ) from exc
+        raise argparse.ArgumentTypeError("must be an integer") from exc
 
     if parsed < 1:
-        raise argparse.ArgumentTypeError(
-            "must be greater than zero"
-        )
+        raise argparse.ArgumentTypeError("must be greater than zero")
 
     return parsed
 
@@ -199,23 +189,16 @@ def normalize_database_url(url: str) -> str:
         "postgresql",
         "postgres",
     }:
-        raise ValueError(
-            "Unsupported DATABASE_URL scheme: "
-            f"{parsed.scheme!r}"
-        )
+        raise ValueError("Unsupported DATABASE_URL scheme: " f"{parsed.scheme!r}")
 
     return urlunsplit(parsed)
 
 
 def get_database_url() -> str:
-    value = str(
-        settings.get("DATABASE_URL", "") or ""
-    ).strip()
+    value = str(settings.get("DATABASE_URL", "") or "").strip()
 
     if not value:
-        raise RuntimeError(
-            "DATABASE_URL is not defined in .env"
-        )
+        raise RuntimeError("DATABASE_URL is not defined in .env")
 
     return normalize_database_url(value)
 
@@ -285,9 +268,7 @@ def call_cleanup(
         row = cursor.fetchone()
 
     if row is None:
-        raise RuntimeError(
-            "Cleanup procedure returned no result"
-        )
+        raise RuntimeError("Cleanup procedure returned no result")
 
     return CleanupResult.from_row(row)
 
@@ -298,45 +279,19 @@ def print_settings(
     database_description: str,
 ) -> None:
     if args.purge_all:
-        mode = (
-            "FULL PURGE"
-            if args.execute
-            else "FULL PURGE DRY RUN"
-        )
+        mode = "FULL PURGE" if args.execute else "FULL PURGE DRY RUN"
     else:
-        mode = (
-            "EXECUTE"
-            if args.execute
-            else "DRY RUN"
-        )
+        mode = "EXECUTE" if args.execute else "DRY RUN"
 
     print("LLM queue cleanup")
     print(f"  mode: {mode}")
     print(f"  database: {database_description}")
-    print(
-        "  queue key: "
-        f"{args.queue_key or '<all>'}"
-    )
-    print(
-        "  completed retention: "
-        f"{args.completed_days} days"
-    )
-    print(
-        "  failed retention: "
-        f"{args.failed_days} days"
-    )
-    print(
-        "  abandoned retention: "
-        f"{args.abandoned_days} days"
-    )
-    print(
-        "  include orphans: "
-        f"{args.include_orphans}"
-    )
-    print(
-        "  orphan age: "
-        f"{args.orphan_minutes} minutes"
-    )
+    print("  queue key: " f"{args.queue_key or '<all>'}")
+    print("  completed retention: " f"{args.completed_days} days")
+    print("  failed retention: " f"{args.failed_days} days")
+    print("  abandoned retention: " f"{args.abandoned_days} days")
+    print("  include orphans: " f"{args.include_orphans}")
+    print("  orphan age: " f"{args.orphan_minutes} minutes")
     print(f"  purge all: {args.purge_all}")
     print()
 
@@ -348,84 +303,48 @@ def print_result(
     purge_all: bool,
 ) -> None:
     if purge_all:
-        verb = (
-            "would be deleted"
-            if dry_run
-            else "deleted"
-        )
+        verb = "would be deleted" if dry_run else "deleted"
 
         print("Full purge result")
-        print(
-            f"  total rows {verb}: "
-            f"{result.purged_count}"
-        )
+        print(f"  total rows {verb}: " f"{result.purged_count}")
         return
-    verb = (
-        "would be deleted"
-        if dry_run
-        else "deleted"
-    )
+    verb = "would be deleted" if dry_run else "deleted"
 
     print("Cleanup result")
-    print(
-        f"  COMPLETED: {result.completed_count}"
-    )
-    print(
-        f"  FAILED: {result.failed_count}"
-    )
-    print(
-        f"  ABANDONED: {result.abandoned_count}"
-    )
-    print(
-        "  orphaned PENDING/RETRY: "
-        f"{result.orphaned_pending_count}"
-    )
-    print(
-        "  expired PROCESSING: "
-        f"{result.expired_processing_count}"
-    )
-    print(
-        f"  total {verb}: {result.total_count}"
-    )
+    print(f"  COMPLETED: {result.completed_count}")
+    print(f"  FAILED: {result.failed_count}")
+    print(f"  ABANDONED: {result.abandoned_count}")
+    print("  orphaned PENDING/RETRY: " f"{result.orphaned_pending_count}")
+    print("  expired PROCESSING: " f"{result.expired_processing_count}")
+    print(f"  total {verb}: {result.total_count}")
 
 
 def confirm_execution(
     *,
     purge_all: bool,
     queue_key: str | None,
+    force: bool,
 ) -> bool:
     if not purge_all:
-        answer = input(
-            "Delete the matching queue rows? "
-            "Type 'yes' to continue: "
-        )
+        answer = input("Delete the matching queue rows? " "Type 'yes' to continue: ")
 
         return answer.strip().lower() == "yes"
 
-    scope = (
-        queue_key
-        if queue_key is not None
-        else "ALL QUEUES"
-    )
+    scope = queue_key if queue_key is not None else "ALL QUEUES"
 
     print()
     print("WARNING: FULL QUEUE PURGE")
-    print(
-        "This deletes PENDING, RETRY and PROCESSING "
-        "requests."
-    )
-    print(
-        "Workers currently processing requests may "
-        "continue their provider calls."
-    )
+    print("This deletes PENDING, RETRY and PROCESSING requests.")
+    print("Workers currently processing requests may continue their provider calls.")
     print(f"Scope: {scope}")
     print()
 
-    answer = input(
-        "Type 'PURGE LLM QUEUE' to continue: "
-    )
+    if not force:
+        answer = input("Type 'PURGE LLM QUEUE' to continue: ")
 
-    return answer == "PURGE LLM QUEUE"
+        return answer == "PURGE LLM QUEUE"
+    else:
+        return force
 
 
 def main() -> int:
@@ -433,24 +352,21 @@ def main() -> int:
 
     if args.force and not args.purge_all:
         print(
-            "Configuration error: --force can only "
-            "be used with --purge-all.",
+            "Configuration error: --force can only be used with --purge-all.",
             file=sys.stderr,
         )
         return 2
 
     if args.force and not args.execute:
         print(
-            "Configuration error: --force requires "
-            "--execute.",
+            "Configuration error: --force requires --execute.",
             file=sys.stderr,
         )
         return 2
 
     if args.purge_all and args.include_orphans:
         print(
-            "Configuration error: --include-orphans "
-            "is redundant with --purge-all.",
+            "Configuration error: --include-orphans is redundant with --purge-all.",
             file=sys.stderr,
         )
         return 2
@@ -466,20 +382,14 @@ def main() -> int:
 
     print_settings(
         args,
-        database_description=describe_database(
-            database_url
-        ),
+        database_description=describe_database(database_url),
     )
 
-    if args.execute and not (
-        args.yes and (
-            not args.purge_all
-            or args.force
-        )
-    ):
+    if args.execute and not (args.yes and (not args.purge_all or args.force)):
         if not confirm_execution(
             purge_all=args.purge_all,
             queue_key=args.queue_key,
+            force=args.force,
         ):
             print("Cleanup cancelled.")
             return 0
@@ -489,21 +399,15 @@ def main() -> int:
             database_url,
             autocommit=False,
             connect_timeout=15,
-            application_name=(
-                "mip-llm-queue-cleanup"
-            ),
+            application_name=("mip-llm-queue-cleanup"),
         ) as connection:
             result = call_cleanup(
                 connection,
                 completed_days=args.completed_days,
                 failed_days=args.failed_days,
                 abandoned_days=args.abandoned_days,
-                include_orphans=(
-                    args.include_orphans
-                ),
-                orphan_age=timedelta(
-                    minutes=args.orphan_minutes
-                ),
+                include_orphans=(args.include_orphans),
+                orphan_age=timedelta(minutes=args.orphan_minutes),
                 queue_key=args.queue_key,
                 dry_run=not args.execute,
                 purge_all=args.purge_all,
@@ -530,10 +434,7 @@ def main() -> int:
 
     if not args.execute:
         print()
-        print(
-            "Dry-run completed. "
-            "Use --execute to delete these rows."
-        )
+        print("Dry-run completed. " "Use --execute to delete these rows.")
 
     return 0
 

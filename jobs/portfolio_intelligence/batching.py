@@ -1,4 +1,8 @@
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import (
+    Iterator,
+    Mapping,
+    Sequence,
+)
 from typing import Any, Protocol
 
 
@@ -17,37 +21,36 @@ def matched_batch_rows[T: SymbolCandidate](
     if not isinstance(rows, list):
         raise ValueError(f"{label} LLM results must be a list")
 
-    rows_by_symbol: dict[str, Mapping[str, Any]] = {}
-
-    for row in rows:
-        if not isinstance(row, Mapping):
-            raise ValueError(f"{label} LLM result must be an object")
-
-        symbol = row.get("symbol")
-        if not isinstance(symbol, str) or not symbol:
-            raise ValueError(f"{label} LLM result missing symbol")
-
-        if symbol in rows_by_symbol:
-            raise ValueError(f"{label} LLM duplicate symbol: {symbol}")
-
-        rows_by_symbol[symbol] = row
-
-    expected_symbols = {source.symbol for source in batch}
-    unexpected_symbols = set(rows_by_symbol) - expected_symbols
-
-    if unexpected_symbols:
+    if len(rows) != len(batch):
         raise ValueError(
-            f"{label} LLM symbol mismatch: "
-            f"unexpected symbols {sorted(unexpected_symbols)}"
+            f"{label} LLM result count mismatch: "
+            f"expected {len(batch)}, "
+            f"received {len(rows)}"
         )
 
-    for source in batch:
-        row = rows_by_symbol.get(source.symbol)
+    for index, (source, row) in enumerate(
+        zip(
+            batch,
+            rows,
+            strict=True,
+        )
+    ):
+        if not isinstance(row, Mapping):
+            raise ValueError(
+                f"{label} LLM result at index " f"{index} must be an object"
+            )
 
-        if row is None:
-            row = {
-                "symbol": source.symbol,
-                "events": [],
-            }
+        symbol = row.get("symbol")
+
+        if not isinstance(symbol, str) or not symbol:
+            raise ValueError(f"{label} LLM result at index " f"{index} missing symbol")
+
+        if symbol != source.symbol:
+            raise ValueError(
+                f"{label} LLM symbol mismatch "
+                f"at index {index}: "
+                f"expected {source.symbol!r}, "
+                f"received {symbol!r}"
+            )
 
         yield source, row

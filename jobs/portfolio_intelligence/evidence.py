@@ -97,49 +97,70 @@ class MarketEvidenceCollector:
         start: date,
         end: date,
         *,
-        economic_events: tuple[dict[str, Any], ...] = (),
+        economic_events: tuple[
+            dict[str, Any],
+            ...,
+        ] = (),
     ) -> MarketEvidence:
         if not self.config.market_evidence_enabled:
-            return MarketEvidence(economic_events=economic_events)
+            return MarketEvidence(
+                economic_events=economic_events,
+            )
 
         reference = instrument_reference(candidate)
-        earnings: list[Any] = []
-        if reference.instrument_type == InstrumentType.STOCK:
-            current = start
-            while current <= end:
-                values = self._best_effort(
-                    "earnings_calendar",
-                    lambda event_date=current: self.market_data.get_earnings_calendar(
-                        event_date,
-                        symbol=candidate.symbol,
-                    ),
-                )
-                earnings.extend(values or [])
-                current += timedelta(days=1)
 
-        holdings: tuple[dict[str, Any], ...] = ()
-        countries: tuple[dict[str, Any], ...] = ()
-        sectors: tuple[dict[str, Any], ...] = ()
-        if reference.instrument_type in {InstrumentType.ETF, InstrumentType.ETP}:
+        earnings: tuple[
+            dict[str, Any],
+            ...,
+        ] = ()
+
+        if reference.instrument_type == InstrumentType.STOCK:
+            earnings = self._upcoming_earnings(
+                candidate,
+                start,
+                end,
+            )
+
+        holdings: tuple[
+            dict[str, Any],
+            ...,
+        ] = ()
+        countries: tuple[
+            dict[str, Any],
+            ...,
+        ] = ()
+        sectors: tuple[
+            dict[str, Any],
+            ...,
+        ] = ()
+
+        if reference.instrument_type in {
+            InstrumentType.ETF,
+            InstrumentType.ETP,
+        }:
             holdings = _serialize_many(
                 self._best_effort(
                     "etf_holdings",
-                    lambda: self.market_data.get_etf_holdings(
-                        reference,
-                        limit=self.config.etf_holding_limit,
+                    lambda: (
+                        self.market_data.get_etf_holdings(
+                            reference,
+                            limit=(self.config.etf_holding_limit),
+                        )
                     ),
                 )
             )
+
             countries = _serialize_many(
                 self._best_effort(
                     "etf_countries",
-                    lambda: self.market_data.get_etf_countries(reference),
+                    lambda: (self.market_data.get_etf_countries(reference)),
                 )
             )
+
             sectors = _serialize_many(
                 self._best_effort(
                     "etf_sectors",
-                    lambda: self.market_data.get_etf_sectors(reference),
+                    lambda: (self.market_data.get_etf_sectors(reference)),
                 )
             )
 
@@ -147,7 +168,7 @@ class MarketEvidenceCollector:
             etf_holdings=holdings,
             etf_countries=countries,
             etf_sectors=sectors,
-            earnings=_serialize_many(earnings),
+            earnings=earnings,
             economic_events=economic_events,
         )
 
@@ -163,6 +184,78 @@ class MarketEvidenceCollector:
                 exc,
             )
             return []
+
+    def _upcoming_earnings(
+        self,
+        candidate: EntityCandidate,
+        start: date,
+        end: date,
+    ) -> tuple[dict[str, Any], ...]:
+        expected_symbol = candidate.symbol.strip().upper()
+
+        earnings_by_key: dict[
+            tuple[
+                str,
+                str,
+                int | None,
+                int | None,
+            ],
+            dict[str, Any],
+        ] = {}
+
+        current = start
+
+        while current <= end:
+            values = self._best_effort(
+                "earnings_calendar",
+                lambda event_date=current: (
+                    self.market_data.get_earnings_calendar(
+                        event_date,
+                        symbol=candidate.symbol,
+                    )
+                ),
+            )
+
+            for value in values or []:
+                serialized = _serialize(value)
+
+                symbol = str(serialized.get("symbol") or "").strip().upper()
+
+                if symbol != expected_symbol:
+                    continue
+
+                raw_event_date = str(serialized.get("event_date") or "").strip()
+
+                try:
+                    event_date = date.fromisoformat(raw_event_date)
+                except ValueError:
+                    continue
+
+                if not start <= event_date <= end:
+                    continue
+
+                key = (
+                    symbol,
+                    event_date.isoformat(),
+                    _optional_int(serialized.get("fiscal_year")),
+                    _optional_int(serialized.get("fiscal_quarter")),
+                )
+
+                earnings_by_key[key] = serialized
+
+            current += timedelta(days=1)
+
+        ordered = sorted(
+            earnings_by_key.values(),
+            key=lambda item: (
+                str(item.get("event_date") or ""),
+                str(item.get("symbol") or ""),
+                _optional_int(item.get("fiscal_year")) or 0,
+                _optional_int(item.get("fiscal_quarter")) or 0,
+            ),
+        )
+
+        return tuple(ordered)
 
 
 def instrument_reference(candidate: EntityCandidate) -> InstrumentReference:
@@ -199,3 +292,15 @@ def _json_value(value: Any):
     if isinstance(value, tuple):
         return list(value)
     return value
+
+
+def _optional_int(
+    value: Any,
+) -> int | None:
+    if value is None or value == "":
+        return None
+
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None

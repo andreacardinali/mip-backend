@@ -132,7 +132,7 @@ def request_with_retry(
 
             logger.error(
                 "HTTP request failed permanently "
-                "status=%s metho**%s attempt=%s/%s "
+                "status=%s method=%s attempt=%s/%s "
                 "error=%s",
                 response.status_code,
                 normalized_method,
