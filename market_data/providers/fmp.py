@@ -9,9 +9,10 @@ from market_data.exceptions import (
     ProviderTemporaryError,
 )
 from market_data.models import InstrumentProfile, InstrumentSearchResult
+from market_data.providers.base import MarketDataProvider
 
 
-class FMPProvider:
+class FMPProvider(MarketDataProvider):
     name = "fmp"
     capabilities = ProviderCapabilities(
         supported=frozenset(

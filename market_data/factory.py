@@ -6,7 +6,7 @@ from market_data.providers.eulerpool_intelligence import EulerpoolIntelligencePr
 from market_data.providers.fmp import FMPProvider
 from market_data.providers.ghostfolio import GhostfolioProvider
 from market_data.providers.openfigi import OpenFigiProvider
-from market_data.providers.yahoo import YahooMarketDataProvider
+from market_data.providers.yahoo import YahooProvider
 from market_data.registry import ProviderRegistry
 from market_data.service import MarketDataService
 
@@ -35,7 +35,7 @@ def create_market_data_service(config=None):
     config = config or MarketDataConfig.from_settings(settings)
     retry = _retry_policy(config)
     providers = [
-        YahooMarketDataProvider(timeout=config.http_timeout, retry_policy=retry),
+        YahooProvider(timeout=config.http_timeout, retry_policy=retry),
         EcbProvider(
             timeout=float(
                 settings.get("EXCHANGE_RATES_HTTP_TIMEOUT", config.http_timeout)
@@ -47,6 +47,7 @@ def create_market_data_service(config=None):
     ghostfolio_token = settings.get("GHOSTFOLIO_SECURITY_TOKEN")
     if ghostfolio_base_url and ghostfolio_token:
         providers.append(
+            YahooProvider(),
             GhostfolioProvider(
                 ghostfolio_base_url,
                 ghostfolio_token,

@@ -17,9 +17,10 @@ from market_data.exceptions import (
     ProviderTemporaryError,
 )
 from market_data.models import InstrumentProfile, InstrumentSearchResult, MarketQuote
+from market_data.providers.base import MarketDataProvider
 
 
-class GhostfolioProvider:
+class GhostfolioProvider(MarketDataProvider):
     name = "ghostfolio"
     capabilities = ProviderCapabilities(
         supported=frozenset(
@@ -67,7 +68,7 @@ class GhostfolioProvider:
             if isinstance(row, dict) and row.get("symbol")
         ]
 
-    def get_profile(self, instrument):
+    def _get_profile_once(self, instrument):
         if not instrument.symbol:
             raise InstrumentNotFoundError("Ghostfolio requires symbol")
         data_source = "YAHOO"
@@ -98,6 +99,18 @@ class GhostfolioProvider:
             source=self.name,
         )
 
+    def get_profile(self, instrument):
+        """Get a profile and transparently prime Ghostfolio when missing."""
+        try:
+            return self._get_profile_once(instrument)
+        except InstrumentNotFoundError:
+            if not self.refresh_profile(instrument):
+                raise
+            # A quick second read supports synchronous gathering. The existing
+            # queue retry handles asynchronous gathering without leaking
+            # provider-specific behavior to callers.
+            return self._get_profile_once(instrument)
+
     def get_quote(self, instrument):
         profile = self.get_profile(instrument)
         if profile.last_price is None:
@@ -109,7 +122,7 @@ class GhostfolioProvider:
             source=self.name,
         )
 
-    def refresh_profile(self, instrument, *, data_source="YAHOO"):
+    def refresh_profile(self, instrument, *, data_source="YAHOO") -> bool:
         if not instrument.symbol:
             raise InstrumentNotFoundError("Ghostfolio requires symbol")
         self._request(
@@ -120,6 +133,7 @@ class GhostfolioProvider:
             + _quote(instrument.symbol),
             retry_non_idempotent=False,
         )
+        return True
 
     def _authenticate(self, client):
         if self._auth_token:

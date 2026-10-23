@@ -1,145 +1,108 @@
+from __future__ import annotations
+
+import time
+from typing import Any
 from urllib.parse import quote
 
 import httpx
 
-from http_client.retry import RetryPolicy, request_with_retry
-from market_data.capabilities import (
-    InstrumentType,
-    MarketDataCapability,
-    ProviderCapabilities,
+from market_data.capabilities import InstrumentType, MarketDataCapability
+from market_data.exceptions import (
+    InstrumentNotFoundError,
+    InvalidProviderResponseError,
+    ProviderTemporaryError,
 )
-from market_data.exceptions import InstrumentNotFoundError
-from market_data.models import HistoryRequest, MarketQuote, PriceBar, PricePoint
+from market_data.models import MarketQuote
+from market_data.providers.base import MarketDataProvider
 
 YAHOO_CHART_BASE_URL = "https://query1.finance.yahoo.com/v8/finance/chart"
-_ALL = frozenset(
-    {
-        InstrumentType.STOCK,
-        InstrumentType.ETF,
-        InstrumentType.ETP,
-        InstrumentType.FUND,
-        InstrumentType.INDEX,
-        InstrumentType.CRYPTO,
-        InstrumentType.COMMODITY,
-        InstrumentType.UNKNOWN,
-    }
-)
 
 
-class YahooMarketDataProvider:
+class YahooProvider(MarketDataProvider):
+    """Yahoo Finance provider for exact-listing live prices."""
+
     name = "yahoo"
-    capabilities = ProviderCapabilities(
-        supported=frozenset(
-            {
-                MarketDataCapability.LIVE_PRICE,
-                MarketDataCapability.PRICE_HISTORY,
-                MarketDataCapability.OHLCV,
-            }
-        ),
-        instrument_types={
-            MarketDataCapability.LIVE_PRICE: _ALL,
-            MarketDataCapability.PRICE_HISTORY: _ALL,
-            MarketDataCapability.OHLCV: _ALL,
-        },
-    )
+    capabilities = {MarketDataCapability.LIVE_PRICE}
+    supported_capabilities = capabilities
+    instrument_types = set(InstrumentType)
+    supported_instrument_types = instrument_types
 
-    def __init__(self, *, timeout=30.0, retry_policy=None, client=None):
+    def __init__(self, *, timeout: float = 10.0, client: httpx.Client | None = None):
         self.timeout = timeout
-        self.retry_policy = retry_policy or RetryPolicy()
         self._client = client
 
-    def get_quote(self, instrument):
-        bars = self.get_ohlcv(
-            HistoryRequest(instrument=instrument, period="5d", interval="1d")
-        )
-        if not bars:
-            raise InstrumentNotFoundError(instrument.identifier)
-        bar = bars[-1]
-        return MarketQuote(
-            timestamp=bar.timestamp,
-            price=bar.close,
-            currency=instrument.currency,
-            source=self.name,
-        )
+    def supports(self, capability, instrument_type) -> bool:
+        return capability in self.capabilities and instrument_type in self.instrument_types
 
-    def get_price_history(self, request):
-        return [
-            PricePoint(
-                timestamp=bar.timestamp,
-                price=bar.close,
-                currency=request.instrument.currency,
-            )
-            for bar in self.get_ohlcv(request)
-        ]
-
-    def get_history(self, symbol, *, period, interval):
-        from market_data.models import InstrumentReference
-
-        return self.get_ohlcv(
-            HistoryRequest(
-                InstrumentReference(symbol=symbol), period=period, interval=interval
-            )
-        )
-
-    def get_ohlcv(self, request):
-        symbol = request.instrument.symbol
-        if not symbol:
+    def get_quote(self, instrument) -> MarketQuote:
+        if not instrument.symbol:
             raise InstrumentNotFoundError("Yahoo requires symbol")
-        url = f"{YAHOO_CHART_BASE_URL}/{quote(symbol, safe='')}"
-        owns = self._client is None
+        owns_client = self._client is None
         client = self._client or httpx.Client(
-            timeout=self.timeout, headers={"User-Agent": "Mozilla/5.0 mip-market-data"}
+            timeout=self.timeout,
+            headers={"User-Agent": "Mozilla/5.0"},
         )
-        params = {
-            "range": request.period,
-            "interval": request.interval,
-            "events": "div,splits",
-        }
-        if request.from_timestamp is not None:
-            params.pop("range", None)
-            params["period1"] = request.from_timestamp
-        if request.to_timestamp is not None:
-            params.pop("range", None)
-            params["period2"] = request.to_timestamp
         try:
-            response = request_with_retry(
-                client, "GET", url, policy=self.retry_policy, params=params
+            response = client.get(
+                f"{YAHOO_CHART_BASE_URL}/{quote(instrument.symbol, safe='')}",
+                params={"range": "5d", "interval": "1d"},
             )
-            payload = response.json()
+            return self._parse_response(response, instrument.symbol)
         finally:
-            if owns:
+            if owns_client:
                 client.close()
-        return self._parse_history(payload)
 
     @staticmethod
-    def _parse_history(payload):
-        chart = payload.get("chart") or {}
-        if chart.get("error"):
-            raise InstrumentNotFoundError(str(chart["error"]))
-        result = (chart.get("result") or [None])[0]
-        if not result:
-            return []
-        ts = result.get("timestamp") or []
-        q = ((result.get("indicators") or {}).get("quote") or [{}])[0]
-        rows = []
-        for i, timestamp in enumerate(ts):
-            vals = {
-                k: _at(q.get(k), i) for k in ("open", "high", "low", "close", "volume")
-            }
-            if any(vals[k] is None for k in ("open", "high", "low", "close")):
-                continue
-            rows.append(
-                PriceBar(
-                    int(timestamp),
-                    float(vals["open"]),
-                    float(vals["high"]),
-                    float(vals["low"]),
-                    float(vals["close"]),
-                    float(vals["volume"]) if vals["volume"] is not None else None,
-                )
+    def _parse_response(response: httpx.Response, symbol: str) -> MarketQuote:
+        if response.status_code == 404:
+            raise InstrumentNotFoundError(symbol)
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as error:
+            if response.status_code in {408, 425, 429} or response.status_code >= 500:
+                raise ProviderTemporaryError(f"Yahoo HTTP {response.status_code}") from error
+            raise InstrumentNotFoundError(symbol) from error
+        try:
+            payload: dict[str, Any] = response.json()
+        except ValueError as error:
+            raise InvalidProviderResponseError("Yahoo returned invalid JSON") from error
+
+        chart = payload.get("chart") if isinstance(payload, dict) else None
+        error_payload = chart.get("error") if isinstance(chart, dict) else None
+        results = chart.get("result") if isinstance(chart, dict) else None
+        if error_payload:
+            raise InstrumentNotFoundError(
+                error_payload.get("description") or str(error_payload)
             )
-        return rows
+        if not isinstance(results, list) or not results:
+            raise InstrumentNotFoundError(symbol)
+        result = results[0]
+        meta = result.get("meta") if isinstance(result, dict) else None
+        if not isinstance(meta, dict):
+            raise InvalidProviderResponseError("Yahoo response has no meta")
+
+        price = meta.get("regularMarketPrice")
+        timestamp = meta.get("regularMarketTime")
+        if price is None:
+            price, timestamp = _latest_close(result)
+        if price is None:
+            raise InstrumentNotFoundError(
+                f"Yahoo returned no market price for {symbol}"
+            )
+        return MarketQuote(
+            timestamp=int(timestamp or time.time()),
+            price=float(price),
+            currency=meta.get("currency"),
+            source="yahoo",
+        )
 
 
-def _at(values, index):
-    return None if not values or index >= len(values) else values[index]
+def _latest_close(result: dict[str, Any]) -> tuple[float | None, int | None]:
+    timestamps = result.get("timestamp") or []
+    indicators = result.get("indicators") or {}
+    quote_rows = indicators.get("quote") or []
+    closes = quote_rows[0].get("close") or [] if quote_rows else []
+    for index in range(min(len(timestamps), len(closes)) - 1, -1, -1):
+        if closes[index] is not None:
+            return float(closes[index]), int(timestamps[index])
+    return None, None

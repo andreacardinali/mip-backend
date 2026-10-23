@@ -17,6 +17,7 @@ from market_data.models import (
     PriceBar,
     PricePoint,
 )
+from market_data.providers.base import MarketDataProvider
 
 _PROFILE_TYPES = frozenset(
     {
@@ -28,7 +29,7 @@ _PROFILE_TYPES = frozenset(
 )
 
 
-class EulerpoolProvider:
+class EulerpoolProvider(MarketDataProvider):
     name = "eulerpool"
     capabilities = ProviderCapabilities(
         supported=frozenset(

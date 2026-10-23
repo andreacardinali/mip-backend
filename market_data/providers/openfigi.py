@@ -4,9 +4,10 @@ from http_client.retry import RetryPolicy, request_with_retry
 from market_data.capabilities import MarketDataCapability, ProviderCapabilities
 from market_data.exceptions import InstrumentNotFoundError
 from market_data.models import InstrumentProfile
+from market_data.providers.base import MarketDataProvider
 
 
-class OpenFigiProvider:
+class OpenFigiProvider(MarketDataProvider):
     name = "openfigi"
     capabilities = ProviderCapabilities(
         supported=frozenset(
