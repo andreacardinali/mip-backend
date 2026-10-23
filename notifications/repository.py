@@ -4,36 +4,49 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from notifications.models import NotificationDelivery
+from notifications.models import NotificationDelivery, NotificationTarget
 
 
 class NotificationRepository:
     def __init__(self, db: Session) -> None:
         self.db = db
 
-    def resolve_source_id(
+    def resolve_target(
         self,
         *,
         user_id: str,
-        channel: str,
-    ) -> str | None:
-        value = self.db.execute(
-            text(
-                """
-                SELECT source_id
-                FROM sp_get_user_notification_source(
-                    CAST(:user_id AS uuid),
-                    :channel
-                )
-                LIMIT 1
-                """
-            ),
-            {
-                "user_id": user_id,
-                "channel": channel.upper(),
-            },
-        ).scalar()
-        return str(value) if value else None
+        notification_type: str,
+        severity: str,
+        fallback_channel: str,
+    ) -> NotificationTarget:
+        row = (
+            self.db.execute(
+                text(
+                    """
+                    SELECT *
+                    FROM public.sp_resolve_user_notification_target(
+                        CAST(:user_id AS uuid),
+                        :notification_type,
+                        :severity,
+                        :fallback_channel
+                    )
+                    """
+                ),
+                {
+                    "user_id": user_id,
+                    "notification_type": notification_type,
+                    "severity": severity,
+                    "fallback_channel": fallback_channel,
+                },
+            )
+            .mappings()
+            .one()
+        )
+        return NotificationTarget(
+            source_id=str(row["source_id"]) if row["source_id"] else None,
+            channel=str(row["channel"]) if row["channel"] else None,
+            resolution_status=str(row["resolution_status"]),
+        )
 
     def enqueue(
         self,
@@ -54,7 +67,7 @@ class NotificationRepository:
         value = self.db.execute(
             text(
                 """
-                SELECT sp_enqueue_notification(
+                SELECT public.sp_enqueue_notification(
                     CAST(:user_id AS uuid),
                     CAST(:source_id AS uuid),
                     :channel,
@@ -89,7 +102,7 @@ class NotificationRepository:
 
     def release_stale(self, processing_timeout_seconds: int) -> int:
         value = self.db.execute(
-            text("SELECT sp_release_stale_notifications(:timeout_seconds)"),
+            text("SELECT public.sp_release_stale_notifications(:timeout_seconds)"),
             {"timeout_seconds": processing_timeout_seconds},
         ).scalar()
         return int(value or 0)
@@ -97,13 +110,12 @@ class NotificationRepository:
     def claim(self, limit: int) -> list[NotificationDelivery]:
         rows = (
             self.db.execute(
-                text("SELECT * FROM sp_claim_notifications(:limit)"),
+                text("SELECT * FROM public.sp_claim_notifications(:limit)"),
                 {"limit": limit},
             )
             .mappings()
             .all()
         )
-
         return [
             NotificationDelivery(
                 notification_id=str(row["notification_id"]),
@@ -128,15 +140,12 @@ class NotificationRepository:
         ]
 
     def mark_sent(
-        self,
-        *,
-        notification_id: str,
-        provider_message_id: str | None,
+        self, *, notification_id: str, provider_message_id: str | None
     ) -> None:
         self.db.execute(
             text(
                 """
-                SELECT sp_mark_notification_sent(
+                SELECT public.sp_mark_notification_sent(
                     CAST(:notification_id AS uuid),
                     :provider_message_id
                 )
@@ -159,7 +168,7 @@ class NotificationRepository:
         value = self.db.execute(
             text(
                 """
-                SELECT sp_mark_notification_failed(
+                SELECT public.sp_mark_notification_failed(
                     CAST(:notification_id AS uuid),
                     :error,
                     :max_retries,
@@ -178,7 +187,7 @@ class NotificationRepository:
 
     def purge(self, retention_days: int) -> int:
         value = self.db.execute(
-            text("SELECT sp_purge_notifications(:days)"),
+            text("SELECT public.sp_purge_notifications(:days)"),
             {"days": retention_days},
         ).scalar()
         return int(value or 0)

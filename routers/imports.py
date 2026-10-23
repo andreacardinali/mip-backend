@@ -34,7 +34,18 @@ def _has_price(payload) -> bool:
     return isinstance(payload, dict) and payload.get("last_price") is not None
 
 
+def _has_persisted_identity(payload) -> bool:
+    return (
+        isinstance(payload, dict)
+        and payload.get("entity_id") is not None
+        and payload.get("instrument_id") is not None
+    )
+
+
 def _enqueue_missing_price(db, local_payload, symbol, data_source):
+    if not _has_persisted_identity(local_payload):
+        return None
+
     return enqueue_price_refresh(
         db,
         instrument_id=local_payload["instrument_id"],
@@ -77,6 +88,7 @@ def import_entity(
         if (
             symbol_info
             and symbol_info.get("source") == "LOCAL"
+            and _has_persisted_identity(local_payload)
             and _has_price(local_payload)
         ):
             return {
@@ -94,15 +106,17 @@ def import_entity(
         )
 
         profile_payload = None
+
         if (
             symbol_info
             and symbol_info.get("source") == "CACHE"
-            and _has_price(local_payload)
+            and isinstance(local_payload, dict)
+            and local_payload.get("name")
             and not requested_isin
             and not requested_currency
             and not requested_exchange
         ):
-            profile_payload = local_payload
+            profile_payload = dict(local_payload)
 
         if profile_payload is None:
             reference = InstrumentReference(
@@ -120,7 +134,18 @@ def import_entity(
             profile_payload = profile.to_import_payload() if profile else None
 
         if not profile_payload:
-            if local_payload:
+            instrument_id = (
+                local_payload.get("instrument_id")
+                if isinstance(local_payload, dict)
+                else None
+            )
+            entity_id = (
+                local_payload.get("entity_id")
+                if isinstance(local_payload, dict)
+                else None
+            )
+
+            if local_payload and instrument_id and entity_id:
                 job_id = _enqueue_missing_price(
                     db,
                     local_payload,
@@ -128,16 +153,29 @@ def import_entity(
                     provider_data_source,
                 )
                 db.commit()
+
                 return {
-                    "entity_id": str(local_payload["entity_id"]),
-                    "instrument_id": str(local_payload["instrument_id"]),
+                    "entity_id": str(entity_id),
+                    "instrument_id": str(instrument_id),
                     "imported": False,
                     "source": symbol_info.get("source"),
                     "price_available": False,
                     "price_refresh_status": "QUEUED",
                     "price_refresh_job_id": job_id,
                 }
-            raise HTTPException(status_code=404, detail="symbol not found")
+
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "code": "SYMBOL_PROFILE_NOT_FOUND",
+                    "message": (
+                        "Il simbolo è presente nella cache di ricerca, "
+                        "ma non è ancora associato a uno strumento importato."
+                    ),
+                    "symbol": symbol,
+                    "source": (symbol_info.get("source") if symbol_info else None),
+                },
+            )
 
         # The user-selected symbol is the listing identity. Shared ISINs may
         # legitimately have several symbols, exchanges and currencies.

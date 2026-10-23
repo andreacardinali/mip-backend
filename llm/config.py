@@ -188,104 +188,104 @@ class LLMConfig:
             ),
             tokens_per_minute=int(
                 settings.get(
-                    (f"{normalized_prefix}_" "TOKENS_PER_MINUTE"),
+                    (f"{normalized_prefix}_TOKENS_PER_MINUTE"),
                     0,
                 )
                 or 0
             ),
             requests_per_minute=int(
                 settings.get(
-                    (f"{normalized_prefix}_" "REQUESTS_PER_MINUTE"),
+                    (f"{normalized_prefix}_REQUESTS_PER_MINUTE"),
                     0,
                 )
                 or 0
             ),
             requests_per_day=int(
                 settings.get(
-                    (f"{normalized_prefix}_" "REQUESTS_PER_DAY"),
+                    (f"{normalized_prefix}_REQUESTS_PER_DAY"),
                     0,
                 )
                 or 0
             ),
             daily_reset_timezone=str(
                 settings.get(
-                    (f"{normalized_prefix}_" "DAILY_RESET_TIMEZONE"),
+                    (f"{normalized_prefix}_DAILY_RESET_TIMEZONE"),
                     "America/Los_Angeles",
                 )
                 or "America/Los_Angeles"
             ).strip(),
             rate_limit_safety_factor=float(
                 settings.get(
-                    (f"{normalized_prefix}_" "RATE_LIMIT_SAFETY_FACTOR"),
+                    (f"{normalized_prefix}_RATE_LIMIT_SAFETY_FACTOR"),
                     0.90,
                 )
             ),
             retry_max_delay=float(
                 settings.get(
-                    (f"{normalized_prefix}_" "RETRY_MAX_DELAY"),
+                    (f"{normalized_prefix}_RETRY_MAX_DELAY"),
                     120.0,
                 )
             ),
             json_config=_get_json_object(
                 settings,
-                (f"{normalized_prefix}_" "JSON_CONFIG"),
+                (f"{normalized_prefix}_JSON_CONFIG"),
             ),
             persistent_queue_enabled=_get_bool(
                 settings,
-                (f"{normalized_prefix}_" "PERSISTENT_QUEUE_ENABLED"),
+                (f"{normalized_prefix}_PERSISTENT_QUEUE_ENABLED"),
                 False,
             ),
             queue_poll_seconds=float(
                 settings.get(
-                    (f"{normalized_prefix}_" "QUEUE_POLL_SECONDS"),
+                    (f"{normalized_prefix}_QUEUE_POLL_SECONDS"),
                     2.0,
                 )
             ),
             queue_stale_seconds=int(
                 settings.get(
-                    (f"{normalized_prefix}_" "QUEUE_STALE_SECONDS"),
+                    (f"{normalized_prefix}_QUEUE_STALE_SECONDS"),
                     900,
                 )
             ),
             queue_wait_timeout_seconds=float(
                 settings.get(
-                    (f"{normalized_prefix}_" "QUEUE_WAIT_TIMEOUT_SECONDS"),
+                    (f"{normalized_prefix}_QUEUE_WAIT_TIMEOUT_SECONDS"),
                     900.0,
                 )
             ),
             queue_lease_seconds=int(
                 settings.get(
-                    (f"{normalized_prefix}_" "QUEUE_LEASE_SECONDS"),
+                    (f"{normalized_prefix}_QUEUE_LEASE_SECONDS"),
                     300,
                 )
             ),
             queue_heartbeat_seconds=int(
                 settings.get(
-                    (f"{normalized_prefix}_" "QUEUE_HEARTBEAT_SECONDS"),
+                    (f"{normalized_prefix}_QUEUE_HEARTBEAT_SECONDS"),
                     60,
                 )
             ),
             queue_maintenance_interval_seconds=int(
                 settings.get(
-                    (f"{normalized_prefix}_QUEUE_" "MAINTENANCE_INTERVAL_SECONDS"),
+                    (f"{normalized_prefix}_QUEUE_MAINTENANCE_INTERVAL_SECONDS"),
                     600,
                 )
             ),
             queue_completed_retention_days=int(
                 settings.get(
-                    (f"{normalized_prefix}_QUEUE_" "COMPLETED_RETENTION_DAYS"),
+                    (f"{normalized_prefix}_QUEUE_COMPLETED_RETENTION_DAYS"),
                     7,
                 )
             ),
             queue_failed_retention_days=int(
                 settings.get(
-                    (f"{normalized_prefix}_QUEUE_" "FAILED_RETENTION_DAYS"),
+                    (f"{normalized_prefix}_QUEUE_FAILED_RETENTION_DAYS"),
                     30,
                 )
             ),
             queue_abandoned_retention_days=int(
                 settings.get(
-                    (f"{normalized_prefix}_QUEUE_" "ABANDONED_RETENTION_DAYS"),
+                    (f"{normalized_prefix}_QUEUE_ABANDONED_RETENTION_DAYS"),
                     30,
                 )
             ),
@@ -303,7 +303,7 @@ class LLMConfig:
         prefix: str = "LLM",
     ) -> None:
         if self.provider not in SUPPORTED_PROVIDERS:
-            raise ValueError(f"Unsupported {prefix}_PROVIDER: " f"{self.provider}")
+            raise ValueError(f"Unsupported {prefix}_PROVIDER: {self.provider}")
 
         if not self.model:
             raise ValueError(f"Missing {prefix}_MODEL")
@@ -342,10 +342,10 @@ class LLMConfig:
             raise ValueError(f"{prefix} rate limits must be >= 0")
 
         if not self.daily_reset_timezone:
-            raise ValueError(f"{prefix}_DAILY_RESET_TIMEZONE " "cannot be empty")
+            raise ValueError(f"{prefix}_DAILY_RESET_TIMEZONE cannot be empty")
 
         if not (0 < self.rate_limit_safety_factor <= 1):
-            raise ValueError(f"{prefix}_RATE_LIMIT_SAFETY_FACTOR " "must be in (0, 1]")
+            raise ValueError(f"{prefix}_RATE_LIMIT_SAFETY_FACTOR must be in (0, 1]")
 
         if self.retry_max_delay <= 0:
             raise ValueError(f"{prefix}_RETRY_MAX_DELAY must be > 0")
@@ -354,31 +354,29 @@ class LLMConfig:
             self.json_config,
             dict,
         ):
-            raise ValueError(f"{prefix}_JSON_CONFIG must be " "a JSON object")
+            raise ValueError(f"{prefix}_JSON_CONFIG must be a JSON object")
 
         invalid_json_keys = PROTECTED_JSON_CONFIG_KEYS & self.json_config.keys()
 
         if invalid_json_keys:
             formatted_keys = ", ".join(sorted(invalid_json_keys))
 
-            raise ValueError(
-                f"{prefix}_JSON_CONFIG cannot " f"override: {formatted_keys}"
-            )
+            raise ValueError(f"{prefix}_JSON_CONFIG cannot override: {formatted_keys}")
 
         if self.queue_poll_seconds <= 0:
-            raise ValueError(f"{prefix}_QUEUE_POLL_SECONDS " "must be > 0")
+            raise ValueError(f"{prefix}_QUEUE_POLL_SECONDS must be > 0")
 
         if self.queue_stale_seconds <= 0:
-            raise ValueError(f"{prefix}_QUEUE_STALE_SECONDS " "must be > 0")
+            raise ValueError(f"{prefix}_QUEUE_STALE_SECONDS must be > 0")
 
         if self.queue_wait_timeout_seconds <= 0:
-            raise ValueError(f"{prefix}_QUEUE_WAIT_TIMEOUT_SECONDS " "must be > 0")
+            raise ValueError(f"{prefix}_QUEUE_WAIT_TIMEOUT_SECONDS must be > 0")
 
         if self.queue_lease_seconds <= 0:
-            raise ValueError(f"{prefix}_QUEUE_LEASE_SECONDS " "must be > 0")
+            raise ValueError(f"{prefix}_QUEUE_LEASE_SECONDS must be > 0")
 
         if self.queue_heartbeat_seconds <= 0:
-            raise ValueError(f"{prefix}_QUEUE_HEARTBEAT_SECONDS " "must be > 0")
+            raise ValueError(f"{prefix}_QUEUE_HEARTBEAT_SECONDS must be > 0")
 
         if self.queue_heartbeat_seconds >= self.queue_lease_seconds:
             raise ValueError(
@@ -388,19 +386,13 @@ class LLMConfig:
             )
 
         if self.queue_maintenance_interval_seconds <= 0:
-            raise ValueError(
-                f"{prefix}_QUEUE_" "MAINTENANCE_INTERVAL_SECONDS " "must be > 0"
-            )
+            raise ValueError(f"{prefix}_QUEUE_MAINTENANCE_INTERVAL_SECONDS must be > 0")
 
         if self.queue_completed_retention_days < 1:
-            raise ValueError(
-                f"{prefix}_QUEUE_" "COMPLETED_RETENTION_DAYS " "must be >= 1"
-            )
+            raise ValueError(f"{prefix}_QUEUE_COMPLETED_RETENTION_DAYS must be >= 1")
 
         if self.queue_failed_retention_days < 1:
-            raise ValueError(f"{prefix}_QUEUE_" "FAILED_RETENTION_DAYS " "must be >= 1")
+            raise ValueError(f"{prefix}_QUEUE_FAILED_RETENTION_DAYS must be >= 1")
 
         if self.queue_abandoned_retention_days < 1:
-            raise ValueError(
-                f"{prefix}_QUEUE_" "ABANDONED_RETENTION_DAYS " "must be >= 1"
-            )
+            raise ValueError(f"{prefix}_QUEUE_ABANDONED_RETENTION_DAYS must be >= 1")

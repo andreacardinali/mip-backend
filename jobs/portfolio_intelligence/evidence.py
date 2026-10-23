@@ -51,6 +51,10 @@ class MarketEvidenceCollector:
         self.market_data = market_data
         self.config = config
         self.diagnostics = EvidenceDiagnostics()
+        self._earnings_calendar_cache: dict[
+            date,
+            tuple[dict[str, Any], ...],
+        ] = {}
 
     def common_economic_events(self) -> tuple[dict[str, Any], ...]:
         if not self.config.market_evidence_enabled:
@@ -185,13 +189,50 @@ class MarketEvidenceCollector:
             )
             return []
 
+    def _earnings_for_date(
+        self,
+        event_date: date,
+    ) -> tuple[dict[str, Any], ...]:
+        cached = self._earnings_calendar_cache.get(event_date)
+
+        if cached is not None:
+            return cached
+
+        values = self._best_effort(
+            "earnings_calendar",
+            lambda: self.market_data.get_earnings_calendar(
+                event_date,
+                symbol=None,
+            ),
+        )
+
+        serialized = _serialize_many(values)
+
+        self._earnings_calendar_cache[event_date] = serialized
+
+        return serialized
+
     def _upcoming_earnings(
         self,
         candidate: EntityCandidate,
         start: date,
         end: date,
     ) -> tuple[dict[str, Any], ...]:
-        expected_symbol = candidate.symbol.strip().upper()
+        expected_symbols = {
+            candidate.symbol.strip().upper(),
+        }
+
+        expected_symbols.update(
+            str(item.get("symbol") or "").strip().upper()
+            for item in getattr(
+                candidate,
+                "related_symbols",
+                (),
+            )
+            if item.get("symbol")
+        )
+
+        expected_symbols.discard("")
 
         earnings_by_key: dict[
             tuple[
@@ -206,22 +247,12 @@ class MarketEvidenceCollector:
         current = start
 
         while current <= end:
-            values = self._best_effort(
-                "earnings_calendar",
-                lambda event_date=current: (
-                    self.market_data.get_earnings_calendar(
-                        event_date,
-                        symbol=candidate.symbol,
-                    )
-                ),
-            )
+            values = self._earnings_for_date(current)
 
-            for value in values or []:
-                serialized = _serialize(value)
-
+            for serialized in values:
                 symbol = str(serialized.get("symbol") or "").strip().upper()
 
-                if symbol != expected_symbol:
+                if symbol not in expected_symbols:
                     continue
 
                 raw_event_date = str(serialized.get("event_date") or "").strip()

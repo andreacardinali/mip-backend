@@ -5,3 +5,4 @@ python -m compileall auth config http_client job_runtime jobs llm market_analysi
 python -m unittest discover -s tests -p 'test_*.py'
 black --check .
 ruff check .
+pytest -q

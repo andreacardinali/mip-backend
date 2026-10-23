@@ -6,6 +6,7 @@ from typing import Any
 class EnqueueStatus(StrEnum):
     CREATED = "CREATED"
     DISABLED = "DISABLED"
+    PREFERENCE_DISABLED = "PREFERENCE_DISABLED"
     SOURCE_NOT_FOUND = "SOURCE_NOT_FOUND"
     DUPLICATE = "DUPLICATE"
 
@@ -22,6 +23,13 @@ class EnqueueResult:
     def __bool__(self) -> bool:
         """Keep existing boolean callers compatible during migration."""
         return self.created
+
+
+@dataclass(frozen=True, slots=True)
+class NotificationTarget:
+    source_id: str | None
+    channel: str | None
+    resolution_status: str
 
 
 @dataclass(frozen=True, slots=True)

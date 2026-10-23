@@ -49,7 +49,7 @@ class UpcomingCatalystBranch:
             batch_symbols = [candidate.symbol for candidate in batch]
 
             logger.info(
-                "Upcoming Catalyst batch started " "batch=%s symbols=%s",
+                "Upcoming Catalyst batch started batch=%s symbols=%s",
                 batch_index,
                 batch_symbols,
             )
@@ -171,13 +171,18 @@ class UpcomingCatalystBranch:
                     severity, score = upcoming_catalyst_severity(
                         days, source.allocation_pct
                     )
-                    event_key = f"{source.symbol}|{event.event_type}|{event.event_date.isoformat()}"
+                    event_key = (
+                        f"{source.entity_id}|"
+                        f"{event.event_type}|"
+                        f"{event.event_date.isoformat()}"
+                    )
                     accepted.append(
                         {
                             **event.payload,
                             "user_id": source.user_id,
                             "entity_id": source.entity_id,
                             "symbol": source.symbol,
+                            "relatedSymbols": source.related_symbols,
                             "name": source.name,
                             "eventKey": event_key,
                             "daysUntilEvent": days,
@@ -188,7 +193,11 @@ class UpcomingCatalystBranch:
                     )
 
         accepted = deduplicate_by(
-            accepted, key=lambda item: (item["user_id"], item["eventKey"])
+            accepted,
+            key=lambda item: (
+                item["user_id"],
+                item["eventKey"],
+            ),
         )
         result.accepted_count = len(accepted)
         diagnostics = NotificationDiagnostics()

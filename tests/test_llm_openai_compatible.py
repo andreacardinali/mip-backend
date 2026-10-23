@@ -170,11 +170,7 @@ class OpenAICompatibleProviderTests(unittest.TestCase):
             "TEST_API_KEY": "test-key",
             "TEST_MODEL": ("google/gemma-4-31b-it"),
             "TEST_JSON_CONFIG": (
-                "{"
-                '"chat_template_kwargs":'
-                '{"enable_thinking":false},'
-                '"stream":false'
-                "}"
+                '{"chat_template_kwargs":{"enable_thinking":false},"stream":false}'
             ),
         }
 

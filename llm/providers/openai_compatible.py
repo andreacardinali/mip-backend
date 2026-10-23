@@ -94,7 +94,7 @@ class OpenAICompatibleProvider(LLMProvider):
         if invalid_json_keys:
             formatted_keys = ", ".join(sorted(invalid_json_keys))
 
-            raise ValueError("json_config cannot override: " f"{formatted_keys}")
+            raise ValueError(f"json_config cannot override: {formatted_keys}")
 
         self.base_url = normalized_base_url
         self.api_key = api_key.strip()
@@ -145,7 +145,7 @@ class OpenAICompatibleProvider(LLMProvider):
                 response = request_with_retry(
                     client,
                     "POST",
-                    (f"{self.base_url}/" "chat/completions"),
+                    (f"{self.base_url}/chat/completions"),
                     policy=self.retry_policy,
                     retry_non_idempotent=True,
                     headers=headers,
@@ -216,9 +216,7 @@ class OpenAICompatibleProvider(LLMProvider):
     ) -> None:
         for key in PROTECTED_JSON_CONFIG_KEYS:
             if body.get(key) != standard_body.get(key):
-                raise ValueError(
-                    "json_config changed protected " f"request field: {key}"
-                )
+                raise ValueError(f"json_config changed protected request field: {key}")
 
     @staticmethod
     def _decode_response(
@@ -259,12 +257,12 @@ class OpenAICompatibleProvider(LLMProvider):
         choice = choices[0]
 
         if not isinstance(choice, dict):
-            raise RuntimeError("LLM returned an invalid choice: " f"{choice!r}")
+            raise RuntimeError(f"LLM returned an invalid choice: {choice!r}")
 
         message = choice.get("message") or {}
 
         if not isinstance(message, dict):
-            raise RuntimeError("LLM returned an invalid message: " f"{message!r}")
+            raise RuntimeError(f"LLM returned an invalid message: {message!r}")
 
         text = message.get("content")
 
@@ -286,7 +284,7 @@ class OpenAICompatibleProvider(LLMProvider):
         try:
             body = response.text.strip()
         except Exception as exc:
-            return "<unable to read response body: " f"{type(exc).__name__}: {exc}>"
+            return f"<unable to read response body: {type(exc).__name__}: {exc}>"
 
         if not body:
             return "<empty response body>"

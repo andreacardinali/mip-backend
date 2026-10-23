@@ -36,14 +36,12 @@ def matched_batch_rows[T: SymbolCandidate](
         )
     ):
         if not isinstance(row, Mapping):
-            raise ValueError(
-                f"{label} LLM result at index " f"{index} must be an object"
-            )
+            raise ValueError(f"{label} LLM result at index {index} must be an object")
 
         symbol = row.get("symbol")
 
         if not isinstance(symbol, str) or not symbol:
-            raise ValueError(f"{label} LLM result at index " f"{index} missing symbol")
+            raise ValueError(f"{label} LLM result at index {index} missing symbol")
 
         if symbol != source.symbol:
             raise ValueError(

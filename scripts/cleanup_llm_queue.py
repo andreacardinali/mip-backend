@@ -12,7 +12,6 @@ import psycopg
 from psycopg import Connection
 from psycopg.rows import dict_row
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 if str(PROJECT_ROOT) not in sys.path:
@@ -63,16 +62,14 @@ class CleanupResult:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description=(
-            "Preview or execute cleanup of the persistent " "LLM request queue."
-        ),
+        description=("Preview or execute cleanup of the persistent LLM request queue."),
     )
 
     parser.add_argument(
         "--execute",
         action="store_true",
         help=(
-            "Delete matching rows. Without this option, " "only a dry-run is performed."
+            "Delete matching rows. Without this option, only a dry-run is performed."
         ),
     )
 
@@ -99,9 +96,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--queue-key",
         default=None,
-        help=(
-            "Limit cleanup to one queue key, for example " "'gemini:gemma-4-31b-it'."
-        ),
+        help=("Limit cleanup to one queue key, for example 'gemini:gemma-4-31b-it'."),
     )
 
     parser.add_argument(
@@ -128,9 +123,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--yes",
         action="store_true",
-        help=(
-            "Skip the interactive confirmation when used " "together with --execute."
-        ),
+        help=("Skip the interactive confirmation when used together with --execute."),
     )
 
     parser.add_argument(
@@ -147,8 +140,7 @@ def parse_args() -> argparse.Namespace:
         "--force",
         action="store_true",
         help=(
-            "Allow a non-interactive full purge. "
-            "Requires --purge-all --execute --yes."
+            "Allow a non-interactive full purge. Requires --purge-all --execute --yes."
         ),
     )
 
@@ -189,7 +181,7 @@ def normalize_database_url(url: str) -> str:
         "postgresql",
         "postgres",
     }:
-        raise ValueError("Unsupported DATABASE_URL scheme: " f"{parsed.scheme!r}")
+        raise ValueError(f"Unsupported DATABASE_URL scheme: {parsed.scheme!r}")
 
     return urlunsplit(parsed)
 
@@ -286,12 +278,12 @@ def print_settings(
     print("LLM queue cleanup")
     print(f"  mode: {mode}")
     print(f"  database: {database_description}")
-    print("  queue key: " f"{args.queue_key or '<all>'}")
-    print("  completed retention: " f"{args.completed_days} days")
-    print("  failed retention: " f"{args.failed_days} days")
-    print("  abandoned retention: " f"{args.abandoned_days} days")
-    print("  include orphans: " f"{args.include_orphans}")
-    print("  orphan age: " f"{args.orphan_minutes} minutes")
+    print(f"  queue key: {args.queue_key or '<all>'}")
+    print(f"  completed retention: {args.completed_days} days")
+    print(f"  failed retention: {args.failed_days} days")
+    print(f"  abandoned retention: {args.abandoned_days} days")
+    print(f"  include orphans: {args.include_orphans}")
+    print(f"  orphan age: {args.orphan_minutes} minutes")
     print(f"  purge all: {args.purge_all}")
     print()
 
@@ -306,7 +298,7 @@ def print_result(
         verb = "would be deleted" if dry_run else "deleted"
 
         print("Full purge result")
-        print(f"  total rows {verb}: " f"{result.purged_count}")
+        print(f"  total rows {verb}: {result.purged_count}")
         return
     verb = "would be deleted" if dry_run else "deleted"
 
@@ -314,8 +306,8 @@ def print_result(
     print(f"  COMPLETED: {result.completed_count}")
     print(f"  FAILED: {result.failed_count}")
     print(f"  ABANDONED: {result.abandoned_count}")
-    print("  orphaned PENDING/RETRY: " f"{result.orphaned_pending_count}")
-    print("  expired PROCESSING: " f"{result.expired_processing_count}")
+    print(f"  orphaned PENDING/RETRY: {result.orphaned_pending_count}")
+    print(f"  expired PROCESSING: {result.expired_processing_count}")
     print(f"  total {verb}: {result.total_count}")
 
 
@@ -326,7 +318,7 @@ def confirm_execution(
     force: bool,
 ) -> bool:
     if not purge_all:
-        answer = input("Delete the matching queue rows? " "Type 'yes' to continue: ")
+        answer = input("Delete the matching queue rows? Type 'yes' to continue: ")
 
         return answer.strip().lower() == "yes"
 
@@ -434,7 +426,7 @@ def main() -> int:
 
     if not args.execute:
         print()
-        print("Dry-run completed. " "Use --execute to delete these rows.")
+        print("Dry-run completed. Use --execute to delete these rows.")
 
     return 0
 

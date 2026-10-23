@@ -61,7 +61,7 @@ class BreakingCatalystBranch:
                     if event.confidence < 60:
                         continue
                     event_key = (
-                        f"{source.symbol}|{event.event_type}|"
+                        f"{source.entity_id}|{event.event_type}|"
                         f"{event.event_day}|{event.fingerprint}"
                     )
                     accepted.append(
@@ -76,6 +76,7 @@ class BreakingCatalystBranch:
                                 event.confidence, source.allocation_pct
                             ),
                             "sources": response.sources,
+                            "relatedSymbols": source.related_symbols,
                         }
                     )
 

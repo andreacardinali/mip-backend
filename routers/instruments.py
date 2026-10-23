@@ -14,7 +14,6 @@ async def get_instruments(
     db = SessionLocal()
 
     try:
-
         rows = db.execute(
             text(
                 """
@@ -29,5 +28,4 @@ async def get_instruments(
         return [dict(row._mapping) for row in rows]
 
     finally:
-
         db.close()

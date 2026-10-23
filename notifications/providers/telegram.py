@@ -5,6 +5,7 @@ from typing import Any
 
 import httpx
 
+from notifications.credentials import decrypt_credential
 from notifications.models import NotificationDelivery, NotificationSendResult
 
 TELEGRAM_API_BASE_URL = "https://api.telegram.org"
@@ -46,8 +47,11 @@ class TelegramConfig:
         timeout_seconds: float,
     ) -> TelegramConfig:
         config = delivery.source_config
+        encrypted = str(config.get("credential_encrypted") or "").strip()
+        legacy = str(config.get("bot_token") or config.get("token") or "").strip()
+        token = decrypt_credential(encrypted) if encrypted else legacy
         return cls(
-            bot_token=str(config.get("bot_token") or config.get("token") or "").strip(),
+            bot_token=token,
             chat_id=str(
                 config.get("chat_id") or delivery.source_external_id or ""
             ).strip(),
@@ -84,20 +88,13 @@ class TelegramClient:
         try:
             return [
                 self._send_chunk(client, chunk)
-                for chunk in _split_message(
-                    message,
-                    self.config.chunk_size,
-                )
+                for chunk in _split_message(message, self.config.chunk_size)
             ]
         finally:
             if owns_client:
                 client.close()
 
-    def _send_chunk(
-        self,
-        client: httpx.Client,
-        text: str,
-    ) -> TelegramMessageResult:
+    def _send_chunk(self, client: httpx.Client, text: str) -> TelegramMessageResult:
         payload: dict[str, Any] = {
             "chat_id": self.config.chat_id,
             "text": text,
@@ -116,7 +113,6 @@ class TelegramClient:
         message_id = result.get("message_id")
         if message_id is None:
             raise TelegramDeliveryError("Telegram response does not contain message_id")
-
         return TelegramMessageResult(
             message_id=int(message_id),
             chat_id=(result.get("chat") or {}).get("id", self.config.chat_id),
@@ -130,10 +126,7 @@ class TelegramProvider:
     def __init__(self, *, timeout_seconds: float = 30.0) -> None:
         self.timeout_seconds = timeout_seconds
 
-    def send(
-        self,
-        delivery: NotificationDelivery,
-    ) -> NotificationSendResult:
+    def send(self, delivery: NotificationDelivery) -> NotificationSendResult:
         client = TelegramClient(
             TelegramConfig.from_delivery(
                 delivery,
@@ -153,7 +146,6 @@ def _telegram_response(response: httpx.Response) -> dict[str, Any]:
     except ValueError as exc:
         response.raise_for_status()
         raise TelegramDeliveryError("Telegram returned a non-JSON response") from exc
-
     if response.is_error or not body.get("ok"):
         description = body.get("description", "unknown Telegram error")
         raise TelegramDeliveryError(
@@ -174,7 +166,6 @@ def _split_message(message: str, limit: int) -> list[str]:
         raise ValueError("Notification message cannot be empty")
     if len(text) <= limit:
         return [text]
-
     chunks: list[str] = []
     remaining = text
     while remaining:

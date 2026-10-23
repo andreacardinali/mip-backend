@@ -15,7 +15,6 @@ async def get_watchlists(
     db = SessionLocal()
 
     try:
-
         rows = db.execute(
             text(
                 """
@@ -33,7 +32,6 @@ async def get_watchlists(
         return [dict(row._mapping) for row in rows]
 
     finally:
-
         db.close()
 
 
@@ -46,7 +44,6 @@ async def upsert_watchlist(
     db = SessionLocal()
 
     try:
-
         watchlist_id = db.execute(
             text(
                 """
@@ -74,7 +71,6 @@ async def upsert_watchlist(
         }
 
     finally:
-
         db.close()
 
 
@@ -108,5 +104,4 @@ async def delete_watchlist(
         return {"deleted": deleted}
 
     finally:
-
         db.close()

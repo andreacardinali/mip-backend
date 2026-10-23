@@ -165,7 +165,7 @@ def main() -> None:
     load_jobs()
 
     logger.info(
-        "Scheduler started " "timezone=%s jobs=%s",
+        "Scheduler started timezone=%s jobs=%s",
         SCHEDULER_TIMEZONE,
         len(scheduler.get_jobs()),
     )

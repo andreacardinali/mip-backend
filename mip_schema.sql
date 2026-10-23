@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict wck1JZYaPB5l6cLr9Jzh37XqXHzAjg20Xn9EKHXvPCjlJOiKRNMTG7bCNKUNMO8
+\restrict RYRt57tkbXJmZn0Y7B9EMyzXWr2Pp6KiHt2wOCQPyJZYbOoAiK2ddmq8a2eYJih
 
 -- Dumped from database version 18.6 (Debian 18.6-1.pgdg13+2)
 -- Dumped by pg_dump version 18.6 (Debian 18.6-1.pgdg13+2)
@@ -2146,6 +2146,32 @@ $$;
 
 
 --
+-- Name: sp_delete_user_notification_source(uuid, uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_delete_user_notification_source(p_user_id uuid, p_source_id uuid) RETURNS boolean
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM public.notification_subscriptions ns
+        WHERE ns.user_id = p_user_id
+          AND ns.source_id = p_source_id
+          AND ns.enabled = true
+    ) THEN
+        RAISE EXCEPTION 'Notification source is used by an enabled preference';
+    END IF;
+
+    DELETE FROM public.user_sources us
+    WHERE us.user_id = p_user_id
+      AND us.source_id = p_source_id;
+    RETURN FOUND;
+END;
+$$;
+
+
+--
 -- Name: sp_delete_watchlist(uuid, uuid); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -2508,6 +2534,29 @@ $$;
 
 
 --
+-- Name: sp_get_entity_symbols(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_get_entity_symbols(p_entity_id uuid) RETURNS TABLE(instrument_id uuid, symbol character varying, exchange character varying, currency_code character, is_source_symbol boolean)
+    LANGUAGE sql STABLE
+    AS $$
+    SELECT
+        i.instrument_id,
+        i.symbol,
+        i.exchange,
+        i.currency_code,
+        false AS is_source_symbol
+    FROM public.instruments i
+    WHERE i.entity_id = p_entity_id
+      AND NULLIF(btrim(i.symbol), '') IS NOT NULL
+    ORDER BY
+        i.symbol,
+        i.exchange NULLS LAST,
+        i.instrument_id;
+$$;
+
+
+--
 -- Name: sp_get_instruments(integer); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -2709,6 +2758,158 @@ ORDER BY
     a.user_id,
     a.symbol,
     a.exchange NULLS LAST;
+$$;
+
+
+--
+-- Name: sp_get_intelligence_entity_candidates(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_get_intelligence_entity_candidates() RETURNS TABLE(user_id uuid, entity_id uuid, instrument_id uuid, symbol character varying, name character varying, exchange character varying, currency_code character, instrument_type character varying, quantity numeric, market_value numeric, allocation_pct numeric, in_portfolio boolean, in_watchlist boolean, related_symbols jsonb)
+    LANGUAGE sql STABLE
+    AS $$
+WITH user_entities AS (
+    SELECT
+        pf.user_id,
+        i.entity_id,
+        sum(p.quantity)::numeric AS quantity,
+        sum(
+            coalesce(
+                p.quantity * i.last_price,
+                0
+            )
+        )::numeric AS market_value,
+        true AS in_portfolio,
+        false AS in_watchlist
+    FROM public.positions p
+    JOIN public.portfolios pf
+      ON pf.portfolio_id = p.portfolio_id
+    JOIN public.instruments i
+      ON i.instrument_id = p.instrument_id
+    JOIN public.entities e
+      ON e.entity_id = i.entity_id
+    JOIN public.users u
+      ON u.user_id = pf.user_id
+     AND u.is_active = true
+    WHERE e.active = true
+    GROUP BY
+        pf.user_id,
+        i.entity_id
+
+    UNION ALL
+
+    SELECT DISTINCT
+        w.user_id,
+        wi.entity_id,
+        0::numeric AS quantity,
+        0::numeric AS market_value,
+        false AS in_portfolio,
+        true AS in_watchlist
+    FROM public.watchlist_items wi
+    JOIN public.watchlists w
+      ON w.watchlist_id = wi.watchlist_id
+    JOIN public.users u
+      ON u.user_id = w.user_id
+     AND u.is_active = true
+    JOIN public.entities e
+      ON e.entity_id = wi.entity_id
+    WHERE e.active = true
+),
+aggregated AS (
+    SELECT
+        ue.user_id,
+        ue.entity_id,
+        sum(ue.quantity)::numeric AS quantity,
+        sum(ue.market_value)::numeric AS market_value,
+        bool_or(ue.in_portfolio) AS in_portfolio,
+        bool_or(ue.in_watchlist) AS in_watchlist
+    FROM user_entities ue
+    GROUP BY
+        ue.user_id,
+        ue.entity_id
+),
+representative AS (
+    SELECT DISTINCT ON (
+        a.user_id,
+        a.entity_id
+    )
+        a.user_id,
+        a.entity_id,
+        i.instrument_id,
+        i.symbol,
+        i.exchange,
+        i.currency_code,
+        i.instrument_type
+    FROM aggregated a
+    JOIN public.instruments i
+      ON i.entity_id = a.entity_id
+    LEFT JOIN public.positions p
+      ON p.instrument_id = i.instrument_id
+    LEFT JOIN public.portfolios pf
+      ON pf.portfolio_id = p.portfolio_id
+     AND pf.user_id = a.user_id
+    WHERE NULLIF(btrim(i.symbol), '') IS NOT NULL
+    ORDER BY
+        a.user_id,
+        a.entity_id,
+        (pf.portfolio_id IS NOT NULL) DESC,
+        i.price_as_of DESC NULLS LAST,
+        i.instrument_id
+),
+totals AS (
+    SELECT
+        a.user_id,
+        nullif(sum(a.market_value), 0) AS total_value
+    FROM aggregated a
+    GROUP BY a.user_id
+)
+SELECT
+    a.user_id,
+    a.entity_id,
+    r.instrument_id,
+    r.symbol,
+    e.name,
+    r.exchange,
+    r.currency_code,
+    r.instrument_type,
+    a.quantity,
+    a.market_value,
+    CASE
+        WHEN t.total_value IS NULL THEN 0
+        ELSE round(
+            a.market_value / t.total_value * 100,
+            4
+        )
+    END AS allocation_pct,
+    a.in_portfolio,
+    a.in_watchlist,
+    (
+        SELECT jsonb_agg(
+            jsonb_build_object(
+                'instrument_id', i.instrument_id,
+                'symbol', i.symbol,
+                'exchange', i.exchange,
+                'currency', i.currency_code
+            )
+            ORDER BY
+                i.symbol,
+                i.exchange NULLS LAST
+        )
+        FROM public.instruments i
+        WHERE i.entity_id = a.entity_id
+    ) AS related_symbols
+FROM aggregated a
+JOIN representative r
+  ON r.user_id = a.user_id
+ AND r.entity_id = a.entity_id
+JOIN public.entities e
+  ON e.entity_id = a.entity_id
+JOIN totals t
+  ON t.user_id = a.user_id
+ORDER BY
+    a.user_id,
+    e.name,
+    a.entity_id;
 $$;
 
 
@@ -2938,23 +3139,44 @@ $$;
 -- Name: sp_get_recent_catalysts(uuid[], integer); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.sp_get_recent_catalysts(p_entity_ids uuid[], p_days integer DEFAULT 30) RETURNS TABLE(entity_id uuid, catalyst_type character varying, catalyst_date timestamp with time zone, status character varying, importance numeric, title text, source character varying, raw_payload jsonb)
+CREATE FUNCTION public.sp_get_recent_catalysts(p_entity_ids uuid[], p_days integer DEFAULT 30) RETURNS TABLE(catalyst_id uuid, entity_id uuid, catalyst_type character varying, catalyst_date timestamp with time zone, status character varying, importance numeric, title text, source character varying, raw_payload jsonb, symbols jsonb)
     LANGUAGE sql STABLE
     AS $$
-SELECT
-    c.entity_id,
-    c.catalyst_type,
-    c.catalyst_date,
-    c.status,
-    c.importance,
-    c.title,
-    c.source,
-    c.raw_payload
-FROM catalysts c
-WHERE c.entity_id = ANY(p_entity_ids)
-  AND c.catalyst_date >=
-      now() - make_interval(days => p_days)
-ORDER BY c.catalyst_date DESC;
+    SELECT
+        c.catalyst_id,
+        c.entity_id,
+        c.catalyst_type,
+        c.catalyst_date,
+        c.status,
+        c.importance,
+        c.title,
+        c.source,
+        c.raw_payload,
+        COALESCE(
+            (
+                SELECT jsonb_agg(
+                    jsonb_build_object(
+                        'instrument_id', i.instrument_id,
+                        'symbol', i.symbol,
+                        'exchange', i.exchange,
+                        'currency', i.currency_code
+                    )
+                    ORDER BY
+                        i.symbol,
+                        i.exchange NULLS LAST
+                )
+                FROM public.instruments i
+                WHERE i.entity_id = c.entity_id
+            ),
+            '[]'::jsonb
+        ) AS symbols
+    FROM public.catalysts c
+    WHERE c.entity_id = ANY(p_entity_ids)
+      AND c.catalyst_date >=
+          now() - make_interval(days => GREATEST(p_days, 0))
+    ORDER BY
+        c.catalyst_date DESC,
+        c.catalyst_id;
 $$;
 
 
@@ -3083,6 +3305,174 @@ $$;
 
 
 --
+-- Name: sp_get_user_catalyst_facets(uuid, character varying); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_get_user_catalyst_facets(p_user_id uuid, p_scope character varying DEFAULT 'MY_ASSETS'::character varying) RETURNS jsonb
+    LANGUAGE sql STABLE
+    AS $$
+WITH rows AS (
+    SELECT *
+    FROM public.sp_get_user_catalysts(
+        p_user_id,
+        p_scope,
+        NULL,
+        NULL,
+        NULL,
+        NULL,
+        NULL,
+        NULL,
+        2000
+    )
+)
+SELECT jsonb_build_object(
+    'types', COALESCE((
+        SELECT jsonb_agg(value ORDER BY value)
+        FROM (SELECT DISTINCT catalyst_type AS value FROM rows WHERE catalyst_type IS NOT NULL) q
+    ), '[]'::jsonb),
+    'statuses', COALESCE((
+        SELECT jsonb_agg(value ORDER BY value)
+        FROM (SELECT DISTINCT status AS value FROM rows WHERE status IS NOT NULL) q
+    ), '[]'::jsonb),
+    'sources', COALESCE((
+        SELECT jsonb_agg(value ORDER BY value)
+        FROM (SELECT DISTINCT source AS value FROM rows WHERE source IS NOT NULL) q
+    ), '[]'::jsonb)
+);
+$$;
+
+
+--
+-- Name: sp_get_user_catalysts(uuid, character varying, timestamp with time zone, timestamp with time zone, character varying, character varying, numeric, character varying, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_get_user_catalysts(p_user_id uuid, p_scope character varying DEFAULT 'MY_ASSETS'::character varying, p_date_from timestamp with time zone DEFAULT NULL::timestamp with time zone, p_date_to timestamp with time zone DEFAULT NULL::timestamp with time zone, p_catalyst_type character varying DEFAULT NULL::character varying, p_status character varying DEFAULT NULL::character varying, p_importance_min numeric DEFAULT NULL::numeric, p_query character varying DEFAULT NULL::character varying, p_limit integer DEFAULT 500) RETURNS TABLE(catalyst_id uuid, entity_id uuid, entity_name character varying, symbol character varying, exchange character varying, catalyst_type character varying, catalyst_date timestamp with time zone, status character varying, importance numeric, title text, source character varying, raw_payload jsonb, in_portfolio boolean, in_watchlist boolean, asset_scope character varying)
+    LANGUAGE plpgsql STABLE
+    AS $$
+
+DECLARE
+    v_scope varchar;
+    v_query varchar;
+BEGIN
+    v_scope := UPPER(COALESCE(NULLIF(BTRIM(p_scope), ''), 'MY_ASSETS'));
+    v_query := NULLIF(BTRIM(p_query), '');
+
+    IF v_scope NOT IN ('MY_ASSETS', 'PORTFOLIO', 'WATCHLIST', 'ALL') THEN
+        RAISE EXCEPTION 'Unsupported catalyst scope: %', p_scope;
+    END IF;
+
+    IF p_limit < 1 OR p_limit > 2000 THEN
+        RAISE EXCEPTION 'p_limit must be between 1 and 2000';
+    END IF;
+
+    RETURN QUERY
+    WITH user_entities AS (
+        SELECT
+            scoped_entities.entity_id,
+            BOOL_OR(scoped_entities.in_portfolio) AS in_portfolio,
+            BOOL_OR(scoped_entities.in_watchlist) AS in_watchlist
+        FROM (
+            SELECT
+                i.entity_id,
+                true AS in_portfolio,
+                false AS in_watchlist
+            FROM public.positions pos
+            JOIN public.portfolios pf
+              ON pf.portfolio_id = pos.portfolio_id
+            JOIN public.instruments i
+              ON i.instrument_id = pos.instrument_id
+            WHERE pf.user_id = p_user_id
+
+            UNION ALL
+
+            SELECT
+                wi.entity_id,
+                false AS in_portfolio,
+                true AS in_watchlist
+            FROM public.watchlist_items wi
+            JOIN public.watchlists w
+              ON w.watchlist_id = wi.watchlist_id
+            WHERE w.user_id = p_user_id
+        ) scoped_entities
+        GROUP BY scoped_entities.entity_id
+    ), preferred_instrument AS (
+        SELECT DISTINCT ON (i.entity_id)
+            i.entity_id,
+            i.symbol,
+            i.exchange
+        FROM public.instruments i
+        ORDER BY
+            i.entity_id,
+            (i.symbol IS NULL),
+            (i.exchange IS NULL),
+            i.updated_at DESC NULLS LAST,
+            i.created_at DESC NULLS LAST,
+            i.instrument_id
+    )
+    SELECT
+        c.catalyst_id,
+        c.entity_id,
+        e.name AS entity_name,
+        pi.symbol,
+        pi.exchange,
+        c.catalyst_type,
+        c.catalyst_date,
+        c.status,
+        c.importance,
+        c.title,
+        c.source,
+        c.raw_payload,
+        COALESCE(ue.in_portfolio, false),
+        COALESCE(ue.in_watchlist, false),
+        CASE
+            WHEN COALESCE(ue.in_portfolio, false)
+             AND COALESCE(ue.in_watchlist, false) THEN 'BOTH'
+            WHEN COALESCE(ue.in_portfolio, false) THEN 'PORTFOLIO'
+            WHEN COALESCE(ue.in_watchlist, false) THEN 'WATCHLIST'
+            ELSE 'GLOBAL'
+        END::varchar AS asset_scope
+    FROM public.catalysts c
+    JOIN public.entities e
+      ON e.entity_id = c.entity_id
+    LEFT JOIN user_entities ue
+      ON ue.entity_id = c.entity_id
+    LEFT JOIN preferred_instrument pi
+      ON pi.entity_id = c.entity_id
+    WHERE (p_date_from IS NULL OR c.catalyst_date >= p_date_from)
+      AND (p_date_to IS NULL OR c.catalyst_date <= p_date_to)
+      AND (
+          NULLIF(BTRIM(p_catalyst_type), '') IS NULL
+          OR UPPER(c.catalyst_type) = UPPER(BTRIM(p_catalyst_type))
+      )
+      AND (
+          NULLIF(BTRIM(p_status), '') IS NULL
+          OR UPPER(c.status) = UPPER(BTRIM(p_status))
+      )
+      AND (p_importance_min IS NULL OR c.importance >= p_importance_min)
+      AND (
+          v_query IS NULL
+          OR e.name ILIKE '%' || v_query || '%'
+          OR pi.symbol ILIKE '%' || v_query || '%'
+          OR c.title ILIKE '%' || v_query || '%'
+          OR c.source ILIKE '%' || v_query || '%'
+      )
+      AND CASE v_scope
+          WHEN 'MY_ASSETS' THEN ue.entity_id IS NOT NULL
+          WHEN 'PORTFOLIO' THEN COALESCE(ue.in_portfolio, false)
+          WHEN 'WATCHLIST' THEN COALESCE(ue.in_watchlist, false)
+          ELSE true
+      END
+    ORDER BY
+        c.catalyst_date ASC NULLS LAST,
+        c.importance DESC NULLS LAST,
+        e.name,
+        c.catalyst_id
+    LIMIT p_limit;
+END;
+$$;
+
+
+--
 -- Name: sp_get_user_for_login(character varying); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -3097,6 +3487,50 @@ SELECT
 FROM users
 WHERE username =
       p_username;
+$$;
+
+
+--
+-- Name: sp_get_user_notification_preferences(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_get_user_notification_preferences(p_user_id uuid) RETURNS TABLE(notification_type character varying, label character varying, description text, enabled boolean, source_id uuid, severity_min character varying)
+    LANGUAGE sql STABLE
+    AS $$
+WITH notification_types(notification_type, label, description, default_enabled) AS (
+    VALUES
+        ('UPCOMING_CATALYST'::varchar, 'Catalyst imminenti'::varchar,
+         'Eventi attesi nei prossimi giorni.'::text, true),
+        ('BREAKING_CATALYST'::varchar, 'Catalyst urgenti'::varchar,
+         'Notizie ed eventi rilevanti appena rilevati.'::text, true),
+        ('DAILY_MOVER'::varchar, 'Movimenti giornalieri'::varchar,
+         'Variazioni di prezzo rilevanti rilevate durante la giornata.'::text, false)
+), default_source AS (
+    SELECT us.source_id
+    FROM public.user_sources us
+    WHERE us.user_id = p_user_id
+      AND COALESCE((us.config->>'enabled')::boolean, true) = true
+    ORDER BY us.created_at DESC
+    LIMIT 1
+)
+SELECT
+    nt.notification_type,
+    nt.label,
+    nt.description,
+    COALESCE(ns.enabled, nt.default_enabled),
+    COALESCE(ns.source_id, ds.source_id),
+    ns.severity_min
+FROM notification_types nt
+LEFT JOIN public.notification_subscriptions ns
+  ON ns.user_id = p_user_id
+ AND ns.portfolio_id IS NULL
+ AND UPPER(ns.event_type) = nt.notification_type
+LEFT JOIN default_source ds ON true
+ORDER BY CASE nt.notification_type
+    WHEN 'UPCOMING_CATALYST' THEN 1
+    WHEN 'BREAKING_CATALYST' THEN 2
+    ELSE 3
+END;
 $$;
 
 
@@ -3123,6 +3557,53 @@ WHERE us.user_id = p_user_id
       ) = true
 ORDER BY us.created_at DESC
 LIMIT 1;
+$$;
+
+
+--
+-- Name: sp_get_user_notification_source_config(uuid, uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_get_user_notification_source_config(p_user_id uuid, p_source_id uuid) RETURNS TABLE(source_id uuid, source_type character varying, source_name character varying, external_id text, config jsonb)
+    LANGUAGE sql STABLE
+    AS $$
+SELECT
+    us.source_id,
+    UPPER(us.source_type)::varchar,
+    us.source_name,
+    us.external_id,
+    COALESCE(us.config, '{}'::jsonb)
+FROM public.user_sources us
+WHERE us.user_id = p_user_id
+  AND us.source_id = p_source_id;
+$$;
+
+
+--
+-- Name: sp_get_user_notification_sources(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_get_user_notification_sources(p_user_id uuid) RETURNS TABLE(source_id uuid, channel character varying, source_name character varying, external_id_masked text, enabled boolean, credential_configured boolean, created_at timestamp with time zone)
+    LANGUAGE sql STABLE
+    AS $$
+SELECT
+    us.source_id,
+    UPPER(us.source_type)::varchar,
+    us.source_name,
+    CASE
+        WHEN us.external_id IS NULL THEN NULL
+        WHEN length(us.external_id) <= 4 THEN repeat('*', length(us.external_id))
+        ELSE repeat('*', GREATEST(length(us.external_id) - 4, 4))
+             || right(us.external_id, 4)
+    END,
+    COALESCE((us.config->>'enabled')::boolean, true),
+    COALESCE(NULLIF(us.config->>'credential_encrypted', ''),
+             NULLIF(us.config->>'bot_token', ''),
+             NULLIF(us.config->>'token', '')) IS NOT NULL,
+    us.created_at
+FROM public.user_sources us
+WHERE us.user_id = p_user_id
+ORDER BY us.created_at, us.source_name;
 $$;
 
 
@@ -4012,6 +4493,75 @@ $$;
 
 
 --
+-- Name: sp_resolve_user_notification_target(uuid, character varying, character varying, character varying); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_resolve_user_notification_target(p_user_id uuid, p_notification_type character varying, p_severity character varying, p_fallback_channel character varying DEFAULT 'TELEGRAM'::character varying) RETURNS TABLE(source_id uuid, channel character varying, resolution_status character varying)
+    LANGUAGE plpgsql STABLE
+    AS $$
+DECLARE
+    v_subscription public.notification_subscriptions%ROWTYPE;
+    v_source public.user_sources%ROWTYPE;
+    v_severity_rank integer;
+    v_minimum_rank integer;
+BEGIN
+    SELECT ns.*
+    INTO v_subscription
+    FROM public.notification_subscriptions ns
+    WHERE ns.user_id = p_user_id
+      AND ns.portfolio_id IS NULL
+      AND UPPER(ns.event_type) = UPPER(p_notification_type)
+    LIMIT 1;
+
+    IF FOUND THEN
+        IF NOT v_subscription.enabled THEN
+            RETURN QUERY SELECT NULL::uuid, NULL::varchar, 'PREFERENCE_DISABLED'::varchar;
+            RETURN;
+        END IF;
+
+        v_severity_rank := CASE UPPER(COALESCE(p_severity, 'LOW'))
+            WHEN 'CRITICAL' THEN 4 WHEN 'HIGH' THEN 3
+            WHEN 'MEDIUM' THEN 2 ELSE 1 END;
+        v_minimum_rank := CASE UPPER(COALESCE(v_subscription.severity_min, 'LOW'))
+            WHEN 'CRITICAL' THEN 4 WHEN 'HIGH' THEN 3
+            WHEN 'MEDIUM' THEN 2 ELSE 1 END;
+
+        IF v_severity_rank < v_minimum_rank THEN
+            RETURN QUERY SELECT NULL::uuid, NULL::varchar, 'PREFERENCE_DISABLED'::varchar;
+            RETURN;
+        END IF;
+
+        SELECT us.*
+        INTO v_source
+        FROM public.user_sources us
+        WHERE us.source_id = v_subscription.source_id
+          AND us.user_id = p_user_id
+          AND COALESCE((us.config->>'enabled')::boolean, true) = true;
+    ELSE
+        SELECT us.*
+        INTO v_source
+        FROM public.user_sources us
+        WHERE us.user_id = p_user_id
+          AND UPPER(us.source_type) = UPPER(p_fallback_channel)
+          AND COALESCE((us.config->>'enabled')::boolean, true) = true
+        ORDER BY us.created_at DESC
+        LIMIT 1;
+    END IF;
+
+    IF v_source.source_id IS NULL THEN
+        RETURN QUERY SELECT NULL::uuid, NULL::varchar, 'SOURCE_NOT_FOUND'::varchar;
+        RETURN;
+    END IF;
+
+    RETURN QUERY SELECT
+        v_source.source_id,
+        UPPER(v_source.source_type)::varchar,
+        'RESOLVED'::varchar;
+END;
+$$;
+
+
+--
 -- Name: sp_search_assets(character varying, integer, integer); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -4191,6 +4741,28 @@ BEGIN
     WHERE entity_id = p_entity_id;
 
     RETURN v_observation_id;
+END;
+$$;
+
+
+--
+-- Name: sp_set_user_notification_source_enabled(uuid, uuid, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_set_user_notification_source_enabled(p_user_id uuid, p_source_id uuid, p_enabled boolean) RETURNS boolean
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    UPDATE public.user_sources us
+    SET config = jsonb_set(
+        COALESCE(us.config, '{}'::jsonb),
+        '{enabled}',
+        to_jsonb(p_enabled),
+        true
+    )
+    WHERE us.user_id = p_user_id
+      AND us.source_id = p_source_id;
+    RETURN FOUND;
 END;
 $$;
 
@@ -4556,160 +5128,170 @@ $$;
 
 
 --
--- Name: sp_upsert_catalyst(text, text, timestamp without time zone, text, text, text, text, jsonb); Type: FUNCTION; Schema: public; Owner: -
+-- Name: sp_upsert_catalyst(uuid, text, text, timestamp with time zone, text, text, text, text, jsonb); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.sp_upsert_catalyst(p_symbol text, p_entity_subtype text, p_entity_date timestamp without time zone, p_entity_status text, p_importance text, p_title text, p_source text, p_payload jsonb) RETURNS uuid
+CREATE FUNCTION public.sp_upsert_catalyst(p_entity_id uuid, p_symbol text, p_entity_subtype text, p_entity_date timestamp with time zone, p_entity_status text, p_importance text, p_title text, p_source text, p_payload jsonb) RETURNS uuid
     LANGUAGE plpgsql
     AS $$
 DECLARE
-
-    v_entity_id UUID;
-    v_instrument_id UUID;
-
-    v_catalyst_type VARCHAR(50);
-
-    v_importance NUMERIC;
-
+    v_entity_id uuid;
+    v_catalyst_id uuid;
+    v_catalyst_type varchar(50);
+    v_importance numeric;
+	v_catalyst_day date;
+    v_symbol text;
+    v_matching_entity_ids uuid[];
 BEGIN
-
-    ------------------------------------------------------------------
-    -- Map catalyst type
-    ------------------------------------------------------------------
+    v_symbol := upper(nullif(btrim(p_symbol), ''));
 
     v_catalyst_type :=
-        CASE p_entity_subtype
-
-            WHEN 'QUARTERLY_EARNINGS'
-                THEN 'EARNINGS'
-
-            WHEN 'CASH_DIVIDEND'
-                THEN 'DIVIDEND'
-
-            WHEN 'STOCK_SPLIT'
-                THEN 'SPLIT'
-
+        CASE upper(coalesce(p_entity_subtype, ''))
+            WHEN 'QUARTERLY_EARNINGS' THEN 'EARNINGS'
+            WHEN 'EARNINGS' THEN 'EARNINGS'
+            WHEN 'CASH_DIVIDEND' THEN 'DIVIDEND'
+            WHEN 'DIVIDEND' THEN 'DIVIDEND'
+            WHEN 'STOCK_SPLIT' THEN 'SPLIT'
+            WHEN 'SPLIT' THEN 'SPLIT'
             ELSE 'OTHER'
-
         END;
 
-    ------------------------------------------------------------------
-    -- Map importance
-    ------------------------------------------------------------------
-
     v_importance :=
-        CASE UPPER(COALESCE(p_importance,'MEDIUM'))
-
+        CASE upper(coalesce(p_importance, 'MEDIUM'))
             WHEN 'HIGH' THEN 90
             WHEN 'MEDIUM' THEN 50
             WHEN 'LOW' THEN 10
-
             ELSE 50
-
         END;
+	v_catalyst_day :=
+	    COALESCE(
+	        NULLIF(
+	            p_payload->>'date',
+	            ''
+	        )::date,
+	        (p_entity_date AT TIME ZONE 'UTC')::date
+	    );
+    /*
+     * L'entity_id esplicito è sempre autorevole.
+     */
+    IF p_entity_id IS NOT NULL THEN
+        SELECT e.entity_id
+        INTO v_entity_id
+        FROM public.entities e
+        WHERE e.entity_id = p_entity_id
+          AND e.active = true;
 
-    ------------------------------------------------------------------
-    -- Resolve existing instrument
-    ------------------------------------------------------------------
+        IF v_entity_id IS NULL THEN
+            RAISE EXCEPTION
+                'Active entity not found: %',
+                p_entity_id;
+        END IF;
 
-    SELECT
-        i.instrument_id,
-        e.entity_id
-    INTO
-        v_instrument_id,
-        v_entity_id
-    FROM instruments i
-    JOIN entities e
-        ON e.entity_id = i.entity_id
-    WHERE i.symbol = p_symbol
-    LIMIT 1;
+        IF v_symbol IS NOT NULL
+           AND NOT EXISTS (
+               SELECT 1
+               FROM public.instruments i
+               WHERE i.entity_id = v_entity_id
+                 AND upper(btrim(i.symbol)) = v_symbol
+           )
+        THEN
+            RAISE EXCEPTION
+                'Symbol % does not belong to entity %',
+                p_symbol,
+                v_entity_id;
+        END IF;
+    ELSE
+        IF v_symbol IS NULL THEN
+            RAISE EXCEPTION
+                'Either p_entity_id or p_symbol is required';
+        END IF;
 
-
-    ------------------------------------------------------------------
-    -- Create entity if missing
-    ------------------------------------------------------------------
-
-    IF v_entity_id IS NULL THEN
-
-        INSERT INTO entities
-        (
-            name,
-            entity_type
+        SELECT array_agg(
+            DISTINCT i.entity_id
+            ORDER BY i.entity_id
         )
-        VALUES
-        (
-            p_symbol,
-            'COMPANY'
-        )
-        RETURNING entity_id
-        INTO v_entity_id;
+        INTO v_matching_entity_ids
+        FROM public.instruments i
+        JOIN public.entities e
+          ON e.entity_id = i.entity_id
+        WHERE e.active = true
+          AND upper(btrim(i.symbol)) = v_symbol;
 
+        IF COALESCE(array_length(v_matching_entity_ids, 1), 0) = 0 THEN
+            RAISE EXCEPTION
+                'No entity found for symbol %',
+                p_symbol;
+        END IF;
+
+        IF array_length(v_matching_entity_ids, 1) > 1 THEN
+            RAISE EXCEPTION
+                'Symbol % resolves to multiple entities: %',
+                p_symbol,
+                v_matching_entity_ids;
+        END IF;
+
+        v_entity_id := v_matching_entity_ids[1];
     END IF;
 
-    ------------------------------------------------------------------
-    -- Create instrument if missing
-    ------------------------------------------------------------------
-
-    IF v_instrument_id IS NULL THEN
-
-        INSERT INTO instruments
-        (
-            entity_id,
-            symbol,
-            instrument_type
-        )
-        VALUES
-        (
-            v_entity_id,
-            p_symbol,
-            'STOCK'
-        )
-        ON CONFLICT DO NOTHING;
-
-    END IF;
-
-    ------------------------------------------------------------------
-    -- Upsert catalyst
-    ------------------------------------------------------------------
-
-    INSERT INTO catalysts
-    (
-        entity_id,
-        catalyst_type,
-        catalyst_date,
-        status,
-        importance,
-        title,
-        source,
-        raw_payload
-    )
-    VALUES
-    (
+	INSERT INTO public.catalysts (
+	    entity_id,
+	    catalyst_type,
+	    catalyst_day,
+	    catalyst_date,
+	    status,
+	    importance,
+	    title,
+	    source,
+	    raw_payload
+	)
+    VALUES (
         v_entity_id,
         v_catalyst_type,
+		v_catalyst_day,
         p_entity_date,
         p_entity_status,
         v_importance,
         p_title,
         p_source,
-        p_payload
+        COALESCE(p_payload, '{}'::jsonb)
+        || jsonb_strip_nulls(
+            jsonb_build_object(
+                'source_symbol', v_symbol,
+                'entity_id', v_entity_id
+            )
+        )
     )
-    ON CONFLICT
-    (
-        entity_id,
-        catalyst_type,
-        catalyst_date
-    )
-    DO UPDATE
-    SET
-        status      = EXCLUDED.status,
-        importance  = EXCLUDED.importance,
-        title       = EXCLUDED.title,
-        source      = EXCLUDED.source,
-        raw_payload = EXCLUDED.raw_payload;
+	ON CONFLICT (
+		entity_id,
+		catalyst_type,
+		source,
+		catalyst_day
+	)
+    DO UPDATE SET
+	    catalyst_date = COALESCE(
+	        EXCLUDED.catalyst_date,
+	        public.catalysts.catalyst_date
+	    ),
+        status = EXCLUDED.status,
+        importance = GREATEST(
+            COALESCE(public.catalysts.importance, 0),
+            COALESCE(EXCLUDED.importance, 0)
+        ),
+        title = COALESCE(
+            NULLIF(EXCLUDED.title, ''),
+            public.catalysts.title
+        ),
+        source = COALESCE(
+            NULLIF(EXCLUDED.source, ''),
+            public.catalysts.source
+        ),
+        raw_payload =
+            COALESCE(public.catalysts.raw_payload, '{}'::jsonb)
+            || COALESCE(EXCLUDED.raw_payload, '{}'::jsonb)
+    RETURNING catalyst_id
+    INTO v_catalyst_id;
 
-    RETURN v_entity_id;
-
+    RETURN v_catalyst_id;
 END;
 $$;
 
@@ -5259,6 +5841,139 @@ $$;
 
 
 --
+-- Name: sp_upsert_user_notification_preference(uuid, character varying, boolean, uuid, character varying); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_upsert_user_notification_preference(p_user_id uuid, p_notification_type character varying, p_enabled boolean, p_source_id uuid, p_severity_min character varying DEFAULT NULL::character varying) RETURNS uuid
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_notification_type varchar;
+    v_severity_min varchar;
+    v_subscription_id uuid;
+BEGIN
+    v_notification_type := UPPER(NULLIF(BTRIM(p_notification_type), ''));
+    v_severity_min := UPPER(NULLIF(BTRIM(p_severity_min), ''));
+
+    IF v_notification_type NOT IN (
+        'UPCOMING_CATALYST',
+        'BREAKING_CATALYST',
+        'DAILY_MOVER'
+    ) THEN
+        RAISE EXCEPTION 'Unsupported notification type: %', p_notification_type;
+    END IF;
+
+    IF v_severity_min IS NOT NULL
+       AND v_severity_min NOT IN ('LOW', 'MEDIUM', 'HIGH', 'CRITICAL')
+    THEN
+        RAISE EXCEPTION 'Unsupported minimum severity: %', p_severity_min;
+    END IF;
+
+    IF p_enabled AND p_source_id IS NULL THEN
+        RAISE EXCEPTION 'An enabled notification preference requires a source';
+    END IF;
+
+    IF p_source_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1
+        FROM public.user_sources us
+        WHERE us.source_id = p_source_id
+          AND us.user_id = p_user_id
+          AND COALESCE((us.config->>'enabled')::boolean, true) = true
+    ) THEN
+        RAISE EXCEPTION 'Enabled notification source does not belong to user';
+    END IF;
+
+    INSERT INTO public.notification_subscriptions (
+        user_id,
+        portfolio_id,
+        event_type,
+        source_id,
+        enabled,
+        severity_min,
+        config
+    )
+    VALUES (
+        p_user_id,
+        NULL,
+        v_notification_type,
+        p_source_id,
+        p_enabled,
+        v_severity_min,
+        '{}'::jsonb
+    )
+    ON CONFLICT (user_id, event_type)
+    WHERE portfolio_id IS NULL
+    DO UPDATE SET
+        source_id = EXCLUDED.source_id,
+        enabled = EXCLUDED.enabled,
+        severity_min = EXCLUDED.severity_min
+    RETURNING subscription_id INTO v_subscription_id;
+
+    RETURN v_subscription_id;
+END;
+$$;
+
+
+--
+-- Name: sp_upsert_user_notification_source(uuid, uuid, character varying, character varying, text, jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_upsert_user_notification_source(p_user_id uuid, p_source_id uuid, p_source_type character varying, p_source_name character varying, p_external_id text, p_config jsonb) RETURNS uuid
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_source_id uuid;
+    v_source_type varchar;
+    v_source_name varchar;
+    v_external_id text;
+BEGIN
+    v_source_type := UPPER(NULLIF(BTRIM(p_source_type), ''));
+    v_source_name := NULLIF(BTRIM(p_source_name), '');
+    v_external_id := NULLIF(BTRIM(p_external_id), '');
+
+    IF v_source_type NOT IN ('TELEGRAM') THEN
+        RAISE EXCEPTION 'Unsupported notification source type: %', p_source_type;
+    END IF;
+    IF v_source_name IS NULL THEN
+        RAISE EXCEPTION 'Notification source name cannot be empty';
+    END IF;
+    IF v_external_id IS NULL THEN
+        RAISE EXCEPTION 'Notification destination cannot be empty';
+    END IF;
+
+    IF p_source_id IS NULL THEN
+        INSERT INTO public.user_sources (
+            user_id, source_type, source_name, external_id, config
+        )
+        VALUES (
+            p_user_id,
+            v_source_type,
+            v_source_name,
+            v_external_id,
+            COALESCE(p_config, '{}'::jsonb)
+        )
+        RETURNING source_id INTO v_source_id;
+    ELSE
+        UPDATE public.user_sources us
+        SET source_type = v_source_type,
+            source_name = v_source_name,
+            external_id = v_external_id,
+            config = COALESCE(p_config, '{}'::jsonb)
+        WHERE us.source_id = p_source_id
+          AND us.user_id = p_user_id
+        RETURNING us.source_id INTO v_source_id;
+
+        IF v_source_id IS NULL THEN
+            RAISE EXCEPTION 'Notification source not found';
+        END IF;
+    END IF;
+
+    RETURN v_source_id;
+END;
+$$;
+
+
+--
 -- Name: sp_upsert_watchlist(uuid, uuid, character varying, text); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -5503,7 +6218,8 @@ CREATE TABLE public.catalysts (
     importance numeric,
     title text,
     source character varying(50),
-    raw_payload jsonb
+    raw_payload jsonb,
+    catalyst_day date NOT NULL
 );
 
 
@@ -7608,10 +8324,10 @@ CREATE UNIQUE INDEX uq_cache_portfolio_theme_exposure ON public.cache_portfolio_
 
 
 --
--- Name: uq_catalyst; Type: INDEX; Schema: public; Owner: -
+-- Name: uq_catalyst_business_key; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE UNIQUE INDEX uq_catalyst ON public.catalysts USING btree (entity_id, catalyst_type, catalyst_date);
+CREATE UNIQUE INDEX uq_catalyst_business_key ON public.catalysts USING btree (entity_id, catalyst_type, source, catalyst_day);
 
 
 --
@@ -7717,6 +8433,13 @@ CREATE UNIQUE INDEX uq_news_entity ON public.news_entities USING btree (news_id,
 --
 
 CREATE UNIQUE INDEX uq_news_impact ON public.news_impacts USING btree (news_id, entity_id);
+
+
+--
+-- Name: uq_notification_subscriptions_user_event; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_notification_subscriptions_user_event ON public.notification_subscriptions USING btree (user_id, event_type) WHERE (portfolio_id IS NULL);
 
 
 --
@@ -8557,5 +9280,5 @@ ALTER TABLE ONLY public.watchlists
 -- PostgreSQL database dump complete
 --
 
-\unrestrict wck1JZYaPB5l6cLr9Jzh37XqXHzAjg20Xn9EKHXvPCjlJOiKRNMTG7bCNKUNMO8
+\unrestrict RYRt57tkbXJmZn0Y7B9EMyzXWr2Pp6KiHt2wOCQPyJZYbOoAiK2ddmq8a2eYJih
 

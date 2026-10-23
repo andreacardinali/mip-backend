@@ -178,7 +178,7 @@ class BatchMatchingTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             ValueError,
-            ("symbol mismatch at index 0: " "expected 'AAPL', received 'MSFT'"),
+            ("symbol mismatch at index 0: expected 'AAPL', received 'MSFT'"),
         ):
             list(
                 matched_batch_rows(
@@ -227,7 +227,7 @@ class BatchMatchingTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             ValueError,
-            ("result count mismatch: " "expected 2, received 0"),
+            ("result count mismatch: expected 2, received 0"),
         ):
             list(
                 matched_batch_rows(
@@ -268,7 +268,7 @@ class BatchMatchingTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             ValueError,
-            ("result count mismatch: " "expected 2, received 1"),
+            ("result count mismatch: expected 2, received 1"),
         ):
             list(
                 matched_batch_rows(
@@ -303,7 +303,7 @@ class BatchMatchingTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             ValueError,
-            ("result count mismatch: " "expected 1, received 2"),
+            ("result count mismatch: expected 1, received 2"),
         ):
             list(
                 matched_batch_rows(
@@ -325,7 +325,7 @@ class BatchMatchingTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             ValueError,
-            ("result at index 0 " "must be an object"),
+            ("result at index 0 must be an object"),
         ):
             list(
                 matched_batch_rows(
@@ -351,7 +351,7 @@ class BatchMatchingTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             ValueError,
-            ("result at index 0 " "missing symbol"),
+            ("result at index 0 missing symbol"),
         ):
             list(
                 matched_batch_rows(
@@ -379,7 +379,7 @@ class BatchMatchingTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             ValueError,
-            ("result at index 0 " "missing symbol"),
+            ("result at index 0 missing symbol"),
         ):
             list(
                 matched_batch_rows(

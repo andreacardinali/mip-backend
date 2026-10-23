@@ -51,7 +51,7 @@ def create_provider(
         )
 
     else:
-        raise ValueError("Unsupported LLM provider: " f"{config.provider}")
+        raise ValueError(f"Unsupported LLM provider: {config.provider}")
 
     if not config.persistent_queue_enabled:
         return provider
@@ -64,7 +64,7 @@ def create_provider(
         provider_name=config.provider,
         model=config.model,
         config=PersistentQueueConfig(
-            queue_key=(f"{config.provider}:" f"{config.model}"),
+            queue_key=(f"{config.provider}:{config.model}"),
             max_attempts=(config.max_retries + 1),
             tokens_per_minute=(config.tokens_per_minute),
             requests_per_minute=(config.requests_per_minute),

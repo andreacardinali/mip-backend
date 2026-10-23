@@ -107,14 +107,12 @@ class PersistentQueuedProvider(LLMProvider):
                 )
 
                 raise TimeoutError(
-                    "Timed out waiting for LLM queue " f"request {request_id}: {status}"
+                    f"Timed out waiting for LLM queue request {request_id}: {status}"
                 )
 
             if self._claim(request_id):
                 logger.info(
-                    "LLM queue request claimed "
-                    "request_id=%s "
-                    "remaining_seconds=%.3f",
+                    "LLM queue request claimed request_id=%s remaining_seconds=%.3f",
                     request_id,
                     remaining_seconds,
                 )
@@ -266,7 +264,7 @@ class PersistentQueuedProvider(LLMProvider):
         )
 
         logger.info(
-            "LLM queue request completed " "request_id=%s",
+            "LLM queue request completed request_id=%s",
             request_id,
         )
 

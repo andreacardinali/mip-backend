@@ -9,14 +9,24 @@ from jobs.portfolio_intelligence.models import EntityCandidate
 
 def load_candidates(db: Session) -> list[EntityCandidate]:
     rows = (
-        db.execute(text("SELECT * FROM sp_get_intelligence_candidates()"))
+        db.execute(
+            text(
+                """
+                SELECT *
+                FROM public.sp_get_intelligence_entity_candidates()
+                """
+            )
+        )
         .mappings()
         .all()
     )
+
     return [_candidate_from_row(row) for row in rows]
 
 
-def _candidate_from_row(row: Mapping[str, Any]) -> EntityCandidate:
+def _candidate_from_row(
+    row: Mapping[str, Any],
+) -> EntityCandidate:
     return EntityCandidate(
         user_id=str(row["user_id"]),
         entity_id=str(row["entity_id"]),
@@ -31,4 +41,5 @@ def _candidate_from_row(row: Mapping[str, Any]) -> EntityCandidate:
         allocation_pct=float(row["allocation_pct"] or 0),
         in_portfolio=bool(row["in_portfolio"]),
         in_watchlist=bool(row["in_watchlist"]),
+        related_symbols=list(row["related_symbols"] or []),
     )

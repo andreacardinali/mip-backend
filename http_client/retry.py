@@ -31,7 +31,7 @@ def _response_error_message(
     try:
         body = response.text.strip()
     except Exception as exc:
-        return "<unable to read response body: " f"{type(exc).__name__}: {exc}>"
+        return f"<unable to read response body: {type(exc).__name__}: {exc}>"
 
     if not body:
         return "<empty response body>"
@@ -151,9 +151,7 @@ def request_with_retry(
         )
         error_message = _response_error_message(response)
         logger.warning(
-            "HTTP request retry status=%s "
-            "method=%s attempt=%s/%s delay=%.3f "
-            "error=%s",
+            "HTTP request retry status=%s method=%s attempt=%s/%s delay=%.3f error=%s",
             response.status_code,
             normalized_method,
             attempt + 1,

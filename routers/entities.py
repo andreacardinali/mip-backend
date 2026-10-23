@@ -14,7 +14,6 @@ async def get_entities(
     db = SessionLocal()
 
     try:
-
         rows = db.execute(
             text(
                 """
@@ -29,5 +28,4 @@ async def get_entities(
         return [dict(row._mapping) for row in rows]
 
     finally:
-
         db.close()

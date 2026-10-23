@@ -19,6 +19,7 @@ class EntityCandidate:
     allocation_pct: float = 0.0
     in_portfolio: bool = False
     in_watchlist: bool = False
+    related_symbols: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

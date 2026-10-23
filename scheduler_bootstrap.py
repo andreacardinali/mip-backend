@@ -67,13 +67,11 @@ def validate_job_definition(
     missing_fields = required_fields - definition.keys()
 
     if missing_fields:
-        raise JobDefinitionError(
-            f"{path}: missing fields: " f"{sorted(missing_fields)}"
-        )
+        raise JobDefinitionError(f"{path}: missing fields: {sorted(missing_fields)}")
 
     if definition["schema_version"] != 1:
         raise JobDefinitionError(
-            f"{path}: unsupported " "schema_version " f"{definition['schema_version']}"
+            f"{path}: unsupported schema_version {definition['schema_version']}"
         )
 
     for field in (
@@ -89,7 +87,7 @@ def validate_job_definition(
     trigger = definition["trigger"]
 
     if not isinstance(trigger, dict):
-        raise JobDefinitionError(f"{path}: trigger must be " "an object")
+        raise JobDefinitionError(f"{path}: trigger must be an object")
 
     trigger_type = str(trigger.get("type", "")).strip().lower()
 
@@ -103,7 +101,7 @@ def validate_job_definition(
             )
             or not cron_expression.strip()
         ):
-            raise JobDefinitionError(f"{path}: missing " "cron_expression")
+            raise JobDefinitionError(f"{path}: missing cron_expression")
 
         try:
             CronTrigger.from_crontab(
@@ -112,12 +110,12 @@ def validate_job_definition(
             )
         except Exception as exc:
             raise JobDefinitionError(
-                f"{path}: invalid " "cron_expression " f"{cron_expression}"
+                f"{path}: invalid cron_expression {cron_expression}"
             ) from exc
 
         if trigger.get("interval_minutes") is not None:
             raise JobDefinitionError(
-                f"{path}: interval_minutes " "is not allowed for cron"
+                f"{path}: interval_minutes is not allowed for cron"
             )
 
     elif trigger_type == "interval":
@@ -130,21 +128,21 @@ def validate_job_definition(
             )
             or interval_minutes <= 0
         ):
-            raise JobDefinitionError(f"{path}: invalid " "interval_minutes")
+            raise JobDefinitionError(f"{path}: invalid interval_minutes")
 
         if trigger.get("cron_expression") is not None:
             raise JobDefinitionError(
-                f"{path}: cron_expression " "is not allowed for interval"
+                f"{path}: cron_expression is not allowed for interval"
             )
 
     else:
-        raise JobDefinitionError(f"{path}: unsupported " f"trigger type {trigger_type}")
+        raise JobDefinitionError(f"{path}: unsupported trigger type {trigger_type}")
 
     try:
         module = importlib.import_module(definition["python_module"])
     except Exception as exc:
         raise JobDefinitionError(
-            f"{path}: cannot import " f"{definition['python_module']}"
+            f"{path}: cannot import {definition['python_module']}"
         ) from exc
 
     run_function = getattr(
@@ -155,7 +153,7 @@ def validate_job_definition(
 
     if not callable(run_function):
         raise JobDefinitionError(
-            f"{path}: module " f"{definition['python_module']} " "does not expose run()"
+            f"{path}: module {definition['python_module']} does not expose run()"
         )
 
 
@@ -168,7 +166,7 @@ def bootstrap_scheduler_jobs(
 
     if not definition_paths:
         raise JobDefinitionError(
-            "No scheduler job definitions " f"found under {jobs_root}"
+            f"No scheduler job definitions found under {jobs_root}"
         )
 
     definitions: list[tuple[Path, dict[str, Any]]] = []
@@ -184,7 +182,7 @@ def bootstrap_scheduler_jobs(
         job_key = definition["job_key"]
 
         if job_key in job_keys:
-            raise JobDefinitionError("Duplicate job_key " f"{job_key} in {path}")
+            raise JobDefinitionError(f"Duplicate job_key {job_key} in {path}")
 
         job_keys.add(job_key)
 
@@ -213,9 +211,7 @@ def bootstrap_scheduler_jobs(
             )
 
             logger.info(
-                "Job definition registered "
-                "file=%s job_key=%s "
-                "job_id=%s action=%s",
+                "Job definition registered file=%s job_key=%s job_id=%s action=%s",
                 path,
                 definition["job_key"],
                 result["job_id"],
