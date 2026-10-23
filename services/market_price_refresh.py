@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from db import SessionLocal
 from market_data.factory import market_data
+from market_data.models import InstrumentReference
 
 logger = logging.getLogger(__name__)
 
@@ -226,16 +227,30 @@ def process_price_refresh_queue() -> dict:
 
         try:
             profile = market_data.get_profile(
-                symbol,
-                data_source=data_source,
-                require_price=True,
-                price_timeout_seconds=3,
+                InstrumentReference(
+                    symbol=symbol,
+                ),
+                include_quote=True,
             )
 
-            if not profile or profile.get("last_price") is None:
-                raise RuntimeError("Provider returned no market price")
+            profile_payload = (
+                profile.to_import_payload()
+                if profile
+                else None
+            )
 
-            _persist_profile_and_complete(job, profile)
+            if (
+                not profile_payload
+                or profile_payload.get("last_price") is None
+            ):
+                raise RuntimeError(
+                    "Provider returned no market price"
+                )
+
+            _persist_profile_and_complete(
+                job,
+                profile_payload,
+            )
             completed += 1
             result = "COMPLETED"
         except Exception as exc:
