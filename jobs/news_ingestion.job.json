@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "job_key": "news_ingestion",
+  "job_name": "News Ingestion",
+  "python_module": "jobs.news_ingestion.worker",
+  "trigger": {"type": "cron", "cron_expression": "5 * * * *"},
+  "enabled_by_default": true
+}

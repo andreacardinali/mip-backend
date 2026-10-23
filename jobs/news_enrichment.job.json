@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "job_key": "news_enrichment",
+  "job_name": "News Entity Scoring",
+  "python_module": "jobs.news_enrichment.worker",
+  "trigger": {
+    "type": "cron",
+    "cron_expression": "25 * * * *"
+  },
+  "enabled_by_default": true
+}

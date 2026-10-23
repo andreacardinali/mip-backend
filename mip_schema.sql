@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict BS1kesVWOYRgm4nkFnmwu7W1b1hwJFyjeGGFesE1mFeQ9w6ggIOKCqxbM9JrjsC
+\restrict G45nSDksMYI4Eesm8HJzRFYbPW3VyHeJULpSL4Wr7bbhd0XJvQdjabFftS5IIo9
 
 -- Dumped from database version 18.6 (Debian 18.6-1.pgdg13+2)
 -- Dumped by pg_dump version 18.6 (Debian 18.6-1.pgdg13+2)
@@ -4118,6 +4118,510 @@ BEGIN
  GET DIAGNOSTICS v_count = ROW_COUNT;
  RETURN v_count > 0;
 END; $$;
+
+
+--
+-- Name: sp_news_get_user_news(uuid, character varying, timestamp with time zone, timestamp with time zone, character varying, numeric, numeric, numeric, character varying, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_news_get_user_news(p_user_id uuid, p_scope character varying DEFAULT 'MY_ASSETS'::character varying, p_date_from timestamp with time zone DEFAULT NULL::timestamp with time zone, p_date_to timestamp with time zone DEFAULT NULL::timestamp with time zone, p_source character varying DEFAULT NULL::character varying, p_sentiment_min numeric DEFAULT NULL::numeric, p_sentiment_max numeric DEFAULT NULL::numeric, p_impact_min numeric DEFAULT NULL::numeric, p_query character varying DEFAULT NULL::character varying, p_limit integer DEFAULT 500) RETURNS TABLE(news_id uuid, cluster_id uuid, title text, summary text, url text, published_at timestamp with time zone, source character varying, entities jsonb, symbols jsonb, relevance numeric, sentiment numeric, impact numeric, direct_impact numeric, propagated_impact numeric, confidence numeric, in_portfolio boolean, in_watchlist boolean, asset_scope character varying, raw_json jsonb)
+    LANGUAGE plpgsql STABLE
+    AS $$
+DECLARE
+    v_scope varchar;
+    v_query varchar;
+BEGIN
+    v_scope := upper(coalesce(nullif(btrim(p_scope), ''), 'MY_ASSETS'));
+    v_query := nullif(btrim(p_query), '');
+
+    IF v_scope NOT IN ('MY_ASSETS', 'PORTFOLIO', 'WATCHLIST', 'ALL') THEN
+        RAISE EXCEPTION 'Unsupported news scope: %', p_scope;
+    END IF;
+    IF p_limit < 1 OR p_limit > 2000 THEN
+        RAISE EXCEPTION 'p_limit must be between 1 and 2000';
+    END IF;
+    IF p_sentiment_min IS NOT NULL AND p_sentiment_max IS NOT NULL
+       AND p_sentiment_min > p_sentiment_max THEN
+        RAISE EXCEPTION 'sentiment_min cannot exceed sentiment_max';
+    END IF;
+
+    RETURN QUERY
+    WITH user_entities AS (
+        SELECT x.entity_id,
+               bool_or(x.in_portfolio) AS in_portfolio,
+               bool_or(x.in_watchlist) AS in_watchlist
+        FROM (
+            SELECT i.entity_id, true AS in_portfolio, false AS in_watchlist
+            FROM public.positions pos
+            JOIN public.portfolios pf ON pf.portfolio_id = pos.portfolio_id
+            JOIN public.instruments i ON i.instrument_id = pos.instrument_id
+            WHERE pf.user_id = p_user_id
+            UNION ALL
+            SELECT wi.entity_id, false, true
+            FROM public.watchlist_items wi
+            JOIN public.watchlists w ON w.watchlist_id = wi.watchlist_id
+            WHERE w.user_id = p_user_id
+        ) x
+        GROUP BY x.entity_id
+    ), news_rollup AS (
+        SELECT
+            n.news_id,
+            n.cluster_id,
+            n.title,
+            n.summary,
+            n.url,
+            n.published_at,
+            ns.name::varchar AS source,
+            n.raw_json,
+            coalesce(jsonb_agg(DISTINCT jsonb_build_object(
+                'entity_id', e.entity_id,
+                'name', e.name,
+                'relevance', ne.relevance,
+                'sentiment', ne.sentiment,
+                'impact', ne.impact
+            )) FILTER (WHERE e.entity_id IS NOT NULL), '[]'::jsonb) AS entities,
+            coalesce(jsonb_agg(DISTINCT jsonb_build_object(
+                'symbol', i.symbol,
+                'exchange', i.exchange
+            )) FILTER (WHERE i.instrument_id IS NOT NULL), '[]'::jsonb) AS symbols,
+            max(ne.relevance) AS relevance,
+            CASE WHEN count(ne.sentiment) > 0 THEN avg(ne.sentiment) END AS sentiment,
+            max(ne.impact) AS impact,
+            max(ni.direct_impact) AS direct_impact,
+            max(ni.propagated_impact) AS propagated_impact,
+            max(ni.confidence) AS confidence,
+            bool_or(coalesce(ue.in_portfolio, false)) AS in_portfolio,
+            bool_or(coalesce(ue.in_watchlist, false)) AS in_watchlist
+        FROM public.news n
+        LEFT JOIN public.news_sources ns ON ns.source_id = n.source_id
+        LEFT JOIN public.news_entities ne ON ne.news_id = n.news_id
+        LEFT JOIN public.entities e ON e.entity_id = ne.entity_id
+        LEFT JOIN public.instruments i ON i.entity_id = e.entity_id
+        LEFT JOIN public.news_impacts ni
+          ON ni.news_id = n.news_id AND ni.entity_id = ne.entity_id
+        LEFT JOIN user_entities ue ON ue.entity_id = ne.entity_id
+        GROUP BY n.news_id, n.cluster_id, n.title, n.summary, n.url,
+                 n.published_at, ns.name, n.raw_json
+    )
+    SELECT
+        r.news_id, r.cluster_id, r.title, r.summary, r.url, r.published_at,
+        r.source, r.entities, r.symbols, r.relevance, r.sentiment, r.impact,
+        r.direct_impact, r.propagated_impact, r.confidence,
+        r.in_portfolio, r.in_watchlist,
+        CASE
+            WHEN r.in_portfolio AND r.in_watchlist THEN 'BOTH'
+            WHEN r.in_portfolio THEN 'PORTFOLIO'
+            WHEN r.in_watchlist THEN 'WATCHLIST'
+            ELSE 'GLOBAL'
+        END::varchar,
+        r.raw_json
+    FROM news_rollup r
+    WHERE (p_date_from IS NULL OR r.published_at >= p_date_from)
+      AND (p_date_to IS NULL OR r.published_at <= p_date_to)
+      AND (nullif(btrim(p_source), '') IS NULL OR upper(r.source) = upper(btrim(p_source)))
+      AND (p_sentiment_min IS NULL OR r.sentiment >= p_sentiment_min)
+      AND (p_sentiment_max IS NULL OR r.sentiment <= p_sentiment_max)
+      AND (p_impact_min IS NULL OR greatest(coalesce(r.impact, 0), coalesce(r.direct_impact, 0), coalesce(r.propagated_impact, 0)) >= p_impact_min)
+      AND (v_query IS NULL OR r.title ILIKE '%' || v_query || '%'
+           OR r.summary ILIKE '%' || v_query || '%'
+           OR r.source ILIKE '%' || v_query || '%'
+           OR r.entities::text ILIKE '%' || v_query || '%'
+           OR r.symbols::text ILIKE '%' || v_query || '%')
+      AND CASE v_scope
+          WHEN 'MY_ASSETS' THEN r.in_portfolio OR r.in_watchlist
+          WHEN 'PORTFOLIO' THEN r.in_portfolio
+          WHEN 'WATCHLIST' THEN r.in_watchlist
+          ELSE true
+      END
+    ORDER BY r.published_at DESC NULLS LAST, r.news_id
+    LIMIT p_limit;
+END;
+$$;
+
+
+--
+-- Name: sp_news_get_user_news_facets(uuid, character varying); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_news_get_user_news_facets(p_user_id uuid, p_scope character varying DEFAULT 'MY_ASSETS'::character varying) RETURNS jsonb
+    LANGUAGE sql STABLE
+    AS $$
+WITH rows AS (
+    SELECT * FROM public.sp_news_get_user_news(
+        p_user_id, p_scope, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 2000
+    )
+)
+SELECT jsonb_build_object(
+    'sources', coalesce((
+        SELECT jsonb_agg(source ORDER BY source)
+        FROM (SELECT DISTINCT source FROM rows WHERE source IS NOT NULL) q
+    ), '[]'::jsonb),
+    'published_from', (SELECT min(published_at) FROM rows),
+    'published_to', (SELECT max(published_at) FROM rows)
+);
+$$;
+
+
+--
+-- Name: sp_news_list_ingestion_targets(boolean, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_news_list_ingestion_targets(p_include_all boolean DEFAULT false, p_limit integer DEFAULT 500) RETURNS TABLE(entity_id uuid, instrument_id uuid, symbol character varying, exchange character varying, instrument_type character varying, currency_code character varying, isin character varying)
+    LANGUAGE plpgsql STABLE
+    AS $$
+BEGIN
+    IF p_limit < 1 OR p_limit > 10000 THEN
+        RAISE EXCEPTION 'p_limit must be between 1 and 10000';
+    END IF;
+
+    RETURN QUERY
+    WITH wanted_entities AS (
+        SELECT DISTINCT i.entity_id
+        FROM public.positions p
+        JOIN public.instruments i
+          ON i.instrument_id = p.instrument_id
+        WHERE i.entity_id IS NOT NULL
+
+        UNION
+
+        SELECT DISTINCT wi.entity_id
+        FROM public.watchlist_items wi
+        WHERE wi.entity_id IS NOT NULL
+    ),
+    ranked_instruments AS (
+        SELECT
+            i.entity_id,
+            i.instrument_id,
+            i.symbol::varchar AS symbol,
+            i.exchange::varchar AS exchange,
+            i.instrument_type::varchar AS instrument_type,
+            i.currency_code::varchar AS currency_code,
+            NULL::varchar AS isin,
+            row_number() OVER (
+                PARTITION BY i.entity_id
+                ORDER BY
+                    CASE
+                        WHEN i.instrument_type::text IN ('STOCK', 'ETF')
+                            THEN 0
+                        ELSE 1
+                    END,
+                    i.updated_at DESC NULLS LAST,
+                    i.instrument_id
+            ) AS row_number
+        FROM public.instruments i
+        WHERE i.entity_id IS NOT NULL
+          AND (
+              p_include_all
+              OR EXISTS (
+                  SELECT 1
+                  FROM wanted_entities we
+                  WHERE we.entity_id = i.entity_id
+              )
+          )
+    )
+    SELECT
+        ri.entity_id,
+        ri.instrument_id,
+        ri.symbol,
+        ri.exchange,
+        ri.instrument_type,
+        ri.currency_code,
+        ri.isin
+    FROM ranked_instruments ri
+    WHERE ri.row_number = 1
+    ORDER BY ri.entity_id
+    LIMIT p_limit;
+END;
+$$;
+
+
+--
+-- Name: sp_news_list_pending_entity_scores(integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_news_list_pending_entity_scores(p_limit integer DEFAULT 200) RETURNS TABLE(news_entity_id uuid, news_id uuid, entity_id uuid, entity_name text, symbols jsonb, title text, summary text, source_name character varying, published_at timestamp with time zone)
+    LANGUAGE plpgsql STABLE
+    AS $$
+BEGIN
+    IF p_limit < 1 OR p_limit > 5000 THEN
+        RAISE EXCEPTION 'p_limit must be between 1 and 5000';
+    END IF;
+
+    RETURN QUERY
+    SELECT
+        ne.news_entity_id,
+        ne.news_id,
+        ne.entity_id,
+        e.name::text AS entity_name,
+        coalesce(
+            jsonb_agg(
+                DISTINCT jsonb_build_object(
+                    'symbol', i.symbol,
+                    'exchange', i.exchange
+                )
+            ) FILTER (WHERE i.instrument_id IS NOT NULL),
+            '[]'::jsonb
+        ) AS symbols,
+        n.title,
+        n.summary,
+        ns.name AS source_name,
+        n.published_at
+    FROM public.news_entities ne
+    JOIN public.news n ON n.news_id = ne.news_id
+    JOIN public.entities e ON e.entity_id = ne.entity_id
+    LEFT JOIN public.news_sources ns ON ns.source_id = n.source_id
+    LEFT JOIN public.instruments i ON i.entity_id = ne.entity_id
+    WHERE ne.relevance IS NULL
+       OR ne.sentiment IS NULL
+       OR ne.impact IS NULL
+    GROUP BY
+        ne.news_entity_id,
+        ne.news_id,
+        ne.entity_id,
+        e.name,
+        n.title,
+        n.summary,
+        ns.name,
+        n.published_at
+    ORDER BY n.published_at DESC NULLS LAST, ne.news_entity_id
+    LIMIT p_limit;
+END;
+$$;
+
+
+--
+-- Name: sp_news_update_entity_scores(jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_news_update_entity_scores(p_scores jsonb) RETURNS integer
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_updated integer;
+BEGIN
+    IF jsonb_typeof(p_scores) <> 'array' THEN
+        RAISE EXCEPTION 'p_scores must be a JSON array';
+    END IF;
+
+    WITH parsed AS (
+        SELECT
+            (value->>'news_entity_id')::uuid AS news_entity_id,
+            greatest(0.0, least(1.0, (value->>'relevance')::numeric)) AS relevance,
+            greatest(-1.0, least(1.0, (value->>'sentiment')::numeric)) AS sentiment,
+            greatest(0.0, least(1.0, (value->>'impact')::numeric)) AS impact
+        FROM jsonb_array_elements(p_scores)
+    )
+    UPDATE public.news_entities ne
+    SET
+        relevance = parsed.relevance,
+        sentiment = parsed.sentiment,
+        impact = parsed.impact
+    FROM parsed
+    WHERE ne.news_entity_id = parsed.news_entity_id;
+
+    GET DIAGNOSTICS v_updated = ROW_COUNT;
+    RETURN v_updated;
+END;
+$$;
+
+
+--
+-- Name: sp_news_upsert_article(uuid, jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_news_upsert_article(p_entity_id uuid, p_payload jsonb) RETURNS jsonb
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_source_id uuid;
+    v_news_id uuid;
+    v_content_hash varchar(64);
+    v_source_name varchar(100);
+    v_title text;
+    v_summary text;
+    v_url text;
+    v_published_at timestamptz;
+    v_news_inserted boolean := false;
+    v_association_inserted boolean := false;
+BEGIN
+    IF p_entity_id IS NULL THEN
+        RAISE EXCEPTION 'p_entity_id is required';
+    END IF;
+
+    IF p_payload IS NULL
+       OR jsonb_typeof(p_payload) <> 'object'
+    THEN
+        RAISE EXCEPTION 'p_payload must be a JSON object';
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM public.entities e
+        WHERE e.entity_id = p_entity_id
+    ) THEN
+        RAISE EXCEPTION 'Entity not found: %', p_entity_id;
+    END IF;
+
+    v_source_name := left(
+        coalesce(
+            nullif(btrim(p_payload->>'source_name'), ''),
+            nullif(btrim(p_payload->>'publisher'), ''),
+            nullif(btrim(p_payload->>'source'), ''),
+            nullif(btrim(p_payload->>'provider'), ''),
+            'UNKNOWN'
+        ),
+        100
+    );
+
+    v_title := coalesce(
+        nullif(btrim(p_payload->>'headline'), ''),
+        nullif(btrim(p_payload->>'title'), '')
+    );
+
+    v_summary := nullif(
+        btrim(p_payload->>'summary'),
+        ''
+    );
+
+    v_url := coalesce(
+        nullif(btrim(p_payload->>'url'), ''),
+        nullif(btrim(p_payload->>'link'), '')
+    );
+
+    v_published_at := coalesce(
+        nullif(p_payload->>'published_at', '')::timestamptz,
+        nullif(p_payload->>'publishedAt', '')::timestamptz,
+        nullif(p_payload->>'date', '')::timestamptz
+    );
+
+    IF v_title IS NULL THEN
+        RAISE EXCEPTION 'News title/headline is required';
+    END IF;
+
+    /*
+     * Preferisce una chiave sorgente stabile quando presente.
+     * In assenza di external_id, utilizza URL e contenuto normalizzato.
+     */
+    v_content_hash := encode(
+        digest(
+            concat_ws(
+                '|',
+                lower(v_source_name),
+                coalesce(
+                    nullif(btrim(p_payload->>'external_id'), ''),
+                    nullif(btrim(p_payload->>'id'), ''),
+                    ''
+                ),
+                coalesce(lower(v_url), ''),
+                lower(v_title),
+                coalesce(v_published_at::text, '')
+            ),
+            'sha256'
+        ),
+        'hex'
+    );
+
+    INSERT INTO public.news_sources (
+        name
+    )
+    VALUES (
+        v_source_name
+    )
+    ON CONFLICT (name)
+    DO UPDATE SET
+        name = EXCLUDED.name
+    RETURNING source_id
+    INTO v_source_id;
+
+    INSERT INTO public.news (
+        source_id,
+        title,
+        summary,
+        url,
+        content_hash,
+        published_at,
+        raw_json
+    )
+    VALUES (
+        v_source_id,
+        v_title,
+        v_summary,
+        v_url,
+        v_content_hash,
+        v_published_at,
+        p_payload
+    )
+    ON CONFLICT (content_hash)
+    DO NOTHING
+    RETURNING news_id
+    INTO v_news_id;
+
+    IF v_news_id IS NOT NULL THEN
+        v_news_inserted := true;
+    ELSE
+        SELECT n.news_id
+        INTO v_news_id
+        FROM public.news n
+        WHERE n.content_hash = v_content_hash;
+    END IF;
+
+    IF v_news_id IS NULL THEN
+        RAISE EXCEPTION
+            'Unable to resolve news row for content hash %',
+            v_content_hash;
+    END IF;
+
+    /*
+     * Se la notizia esisteva già, aggiorna soltanto i dati integrativi
+     * senza cancellare valori già presenti con valori nulli.
+     */
+    IF NOT v_news_inserted THEN
+        UPDATE public.news n
+        SET
+            source_id = coalesce(n.source_id, v_source_id),
+            title = coalesce(nullif(v_title, ''), n.title),
+            summary = coalesce(v_summary, n.summary),
+            url = coalesce(v_url, n.url),
+            published_at = coalesce(v_published_at, n.published_at),
+            raw_json =
+                coalesce(n.raw_json, '{}'::jsonb)
+                || coalesce(p_payload, '{}'::jsonb)
+        WHERE n.news_id = v_news_id;
+    END IF;
+
+    INSERT INTO public.news_entities (
+        news_id,
+        entity_id,
+        relevance,
+        sentiment,
+        impact
+    )
+    VALUES (
+        v_news_id,
+        p_entity_id,
+        nullif(p_payload->>'relevance', '')::numeric,
+        nullif(p_payload->>'sentiment', '')::numeric,
+        nullif(p_payload->>'impact', '')::numeric
+    )
+    ON CONFLICT (news_id, entity_id)
+    DO NOTHING;
+
+    v_association_inserted := FOUND;
+
+    RETURN jsonb_build_object(
+        'news_id', v_news_id,
+        'inserted', v_news_inserted,
+        'updated', NOT v_news_inserted,
+        'association_inserted', v_association_inserted,
+        'associations_inserted',
+            CASE
+                WHEN v_association_inserted THEN 1
+                ELSE 0
+            END,
+        'content_hash', v_content_hash
+    );
+END;
+$$;
 
 
 --
@@ -8467,6 +8971,27 @@ CREATE INDEX ix_market_price_refresh_due ON public.market_price_refresh_queue US
 
 
 --
+-- Name: ix_news_entities_entity_news; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_news_entities_entity_news ON public.news_entities USING btree (entity_id, news_id);
+
+
+--
+-- Name: ix_news_published_at; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_news_published_at ON public.news USING btree (published_at DESC);
+
+
+--
+-- Name: ix_news_source_published; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_news_source_published ON public.news USING btree (source_id, published_at DESC);
+
+
+--
 -- Name: ix_notification_subscriptions_user; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -9570,5 +10095,5 @@ ALTER TABLE ONLY public.watchlists
 -- PostgreSQL database dump complete
 --
 
-\unrestrict BS1kesVWOYRgm4nkFnmwu7W1b1hwJFyjeGGFesE1mFeQ9w6ggIOKCqxbM9JrjsC
+\unrestrict G45nSDksMYI4Eesm8HJzRFYbPW3VyHeJULpSL4Wr7bbhd0XJvQdjabFftS5IIo9
 
