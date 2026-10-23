@@ -1,5 +1,6 @@
 import logging
 from dataclasses import fields
+from datetime import UTC, datetime, timedelta
 
 from market_data.capabilities import InstrumentType, MarketDataCapability
 from market_data.config import MarketDataConfig
@@ -9,6 +10,7 @@ from market_data.exceptions import (
     InstrumentNotFoundError,
     InvalidProviderResponseError,
     ProviderTemporaryError,
+    StaleMarketPriceError,
 )
 from market_data.models import (
     ExchangeRateSnapshot,
@@ -63,6 +65,7 @@ class MarketDataService:
                 InstrumentNotFoundError,
                 InvalidProviderResponseError,
                 ProviderTemporaryError,
+                StaleMarketPriceError,
             ) as error:
                 failures.append((provider.name, error))
                 logger.info(
@@ -102,9 +105,26 @@ class MarketDataService:
         return self._first(
             MarketDataCapability.LIVE_PRICE,
             reference.instrument_type,
-            lambda provider: provider.get_quote(reference),
+            lambda provider: self._validated_quote(provider, reference),
             required=required,
         )
+
+    def _validated_quote(self, provider, reference):
+        quote = provider.get_quote(reference)
+        if quote.timestamp is None:
+            raise StaleMarketPriceError(
+                f"{provider.name} returned quote without timestamp"
+            )
+        quote_time = datetime.fromtimestamp(int(quote.timestamp), tz=UTC)
+        age = datetime.now(UTC) - quote_time
+        if age > timedelta(hours=self.config.max_quote_age_hours):
+            raise StaleMarketPriceError(
+                f"{provider.name} stale quote for {reference.identifier}: "
+                f"price_as_of={quote_time.isoformat()} "
+                f"age_hours={age.total_seconds()/3600:.1f} "
+                f"max_age_hours={self.config.max_quote_age_hours:.1f}"
+            )
+        return quote
 
     def get_price_history(self, request: HistoryRequest):
         return self._first(
@@ -216,6 +236,7 @@ class MarketDataService:
                 InstrumentNotFoundError,
                 InvalidProviderResponseError,
                 ProviderTemporaryError,
+                StaleMarketPriceError,
             ) as error:
                 failures.append((provider.name, error))
                 logger.info(

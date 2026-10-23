@@ -1,24 +1,20 @@
-# RPD extension for the MIP persistent LLM queue
-
-Apply from the backend root after making a backup.
+# Patch freschezza prezzi e ricerca Yahoo
 
 ```bash
-unzip -o mip-llm-rpd-patch.zip -d .
-python scripts/apply_llm_rpd_python_patch.py
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \
-  -f sql/20261021_llm_persistent_queue_rpd.sql
-./scripts/check.sh
+cd /opt/mip/mip-backend
+unzip -o /percorso/mip-market-price-freshness-search-fix.zip -d .
+source .venv/bin/activate
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f sql/20261023_market_price_freshness.sql
+python apply_patch.py
+python -m compileall -q market_data services routers
+pytest -q
 ```
 
-Gemini configuration example:
+Configurazione consigliata:
 
-```dotenv
-INTELLIGENCE_LLM_REQUESTS_PER_MINUTE=15
-INTELLIGENCE_LLM_TOKENS_PER_MINUTE=250000
-INTELLIGENCE_LLM_REQUESTS_PER_DAY=1500
-INTELLIGENCE_LLM_DAILY_RESET_TIMEZONE=America/Los_Angeles
-INTELLIGENCE_LLM_RATE_LIMIT_SAFETY_FACTOR=0.90
-INTELLIGENCE_LLM_PERSISTENT_QUEUE_ENABLED=true
+```env
+MARKET_DATA_MAX_QUOTE_AGE_HOURS=96
+MARKET_DATA_SYMBOL_SEARCH_ORDER=yahoo,eulerpool,ghostfolio,fmp
 ```
 
-`REQUESTS_PER_DAY=0` disables the daily limiter. The SQL migration uses the existing timestamp triggers and does not assign `updated_at` manually.
+Riavvia backend e processo scheduler/worker prezzi.

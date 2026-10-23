@@ -1,5 +1,5 @@
 from dataclasses import asdict, dataclass, field, replace
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -105,6 +105,11 @@ class InstrumentProfile:
             "description": self.description,
             "last_price": self.last_price,
             "price_timestamp": self.price_timestamp,
+            "price_as_of": (
+                datetime.fromtimestamp(self.price_timestamp, tz=UTC).isoformat()
+                if self.price_timestamp is not None
+                else None
+            ),
             "price_source": price_source,
             "market_sector": self.market_sector,
             "source": profile_source,

@@ -1,5 +1,4 @@
 import re
-import time
 from datetime import datetime
 
 import httpx
@@ -17,10 +16,9 @@ from market_data.exceptions import (
     ProviderTemporaryError,
 )
 from market_data.models import InstrumentProfile, InstrumentSearchResult, MarketQuote
-from market_data.providers.base import MarketDataProvider
 
 
-class GhostfolioProvider(MarketDataProvider):
+class GhostfolioProvider:
     name = "ghostfolio"
     capabilities = ProviderCapabilities(
         supported=frozenset(
@@ -113,10 +111,18 @@ class GhostfolioProvider(MarketDataProvider):
 
     def get_quote(self, instrument):
         profile = self.get_profile(instrument)
+
         if profile.last_price is None:
             raise InstrumentNotFoundError(instrument.identifier)
+
+        if profile.price_timestamp is None:
+            raise ProviderTemporaryError(
+                "Ghostfolio returned a market price "
+                f"without a reliable timestamp for {instrument.identifier}"
+            )
+
         return MarketQuote(
-            timestamp=profile.price_timestamp or int(time.time()),
+            timestamp=profile.price_timestamp,
             price=profile.last_price,
             currency=profile.currency,
             source=self.name,
@@ -245,22 +251,33 @@ def _weighted(values, *keys):
 
 def _latest_market_price(value):
     rows = list(value.values()) if isinstance(value, dict) else value
-    rows = [row for row in (rows or []) if isinstance(row, dict)]
+    rows = [
+        row
+        for row in (rows or [])
+        if isinstance(row, dict)
+        and row.get("marketPrice") is not None
+        and not bool(row.get("isCarriedForward"))
+        and str(row.get("state") or "CLOSE").upper() == "CLOSE"
+    ]
+
     rows.sort(key=lambda row: row.get("date") or "")
+
     for row in reversed(rows):
-        if row.get("marketPrice") is not None:
-            timestamp = None
-            date_value = row.get("date")
-            if date_value:
-                try:
-                    timestamp = int(
-                        datetime.fromisoformat(
-                            str(date_value).replace("Z", "+00:00")
-                        ).timestamp()
-                    )
-                except (TypeError, ValueError):
-                    timestamp = None
-            return float(row["marketPrice"]), timestamp
+        date_value = row.get("date")
+        if not date_value:
+            continue
+
+        try:
+            timestamp = int(
+                datetime.fromisoformat(
+                    str(date_value).replace("Z", "+00:00")
+                ).timestamp()
+            )
+        except (TypeError, ValueError):
+            continue
+
+        return float(row["marketPrice"]), timestamp
+
     return None, None
 
 

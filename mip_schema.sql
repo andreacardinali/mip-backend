@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict wu1xXh9kqDMF8vIL2cVFbUDtqjF7wnkAGtES6weSg5yZjKIxsA1E8MlYgSSni7p
+\restrict PdIuWuQuqIVnxqKce8Ku2v8LpdqxZMfhS4Ot7ztbwjdTGOI4DvWHpkuhLDdhYv0
 
 -- Dumped from database version 18.6 (Debian 18.6-1.pgdg13+2)
 -- Dumped by pg_dump version 18.6 (Debian 18.6-1.pgdg13+2)
@@ -2954,37 +2954,52 @@ WITH portfolio_data AS (
         pf.base_currency,
         u.reporting_currency,
         COUNT(pos.position_id) AS positions_count,
-        COALESCE(SUM(
-            CASE
-                WHEN pos.position_id IS NULL OR pos.avg_price IS NULL THEN 0
-                ELSE fx_convert(
-                    pos.quantity * pos.avg_price,
-                    i.currency_code,
-                    pf.base_currency
-                )
-            END
-        ), 0)::numeric AS invested_value_native,
-        COALESCE(SUM(
-            CASE
-                WHEN pos.position_id IS NULL OR i.last_price IS NULL THEN 0
-                ELSE fx_convert(
-                    pos.quantity * i.last_price,
-                    i.currency_code,
-                    pf.base_currency
-                )
-            END
-        ), 0)::numeric AS portfolio_value_native
-    FROM portfolios pf
-    JOIN users u
+        COALESCE(
+            SUM(
+                CASE
+                    WHEN pos.position_id IS NULL
+                      OR pos.avg_price IS NULL
+                      OR NULLIF(BTRIM(i.currency_code), '') IS NULL
+                    THEN 0
+                    ELSE public.fx_convert(
+                        pos.quantity * pos.avg_price,
+                        i.currency_code,
+                        pf.base_currency
+                    )
+                END
+            ),
+            0
+        )::numeric AS invested_value_native,
+        COALESCE(
+            SUM(
+                CASE
+                    WHEN pos.position_id IS NULL
+                      OR i.last_price IS NULL
+                      OR NULLIF(BTRIM(i.currency_code), '') IS NULL
+                    THEN 0
+                    ELSE public.fx_convert(
+                        pos.quantity * i.last_price,
+                        i.currency_code,
+                        pf.base_currency
+                    )
+                END
+            ),
+            0
+        )::numeric AS portfolio_value_native
+    FROM public.portfolios pf
+    JOIN public.users u
       ON u.user_id = pf.user_id
-    LEFT JOIN positions pos
+    LEFT JOIN public.positions pos
       ON pos.portfolio_id = pf.portfolio_id
-    LEFT JOIN instruments i
+    LEFT JOIN public.instruments i
       ON i.instrument_id = pos.instrument_id
     WHERE pf.portfolio_id = p_portfolio_id
       AND pf.user_id = p_user_id
-    GROUP BY pf.base_currency, u.reporting_currency
-), totals AS (
+    GROUP BY
+        pf.base_currency,
+        u.reporting_currency
+),
+totals AS (
     SELECT
         base_currency,
         reporting_currency,
@@ -3000,9 +3015,36 @@ SELECT
     invested_value_native,
     portfolio_value_native,
     profit_loss_native,
-    fx_convert(invested_value_native, base_currency, reporting_currency),
-    fx_convert(portfolio_value_native, base_currency, reporting_currency),
-    fx_convert(profit_loss_native, base_currency, reporting_currency),
+    CASE
+        WHEN NULLIF(BTRIM(base_currency), '') IS NULL
+          OR NULLIF(BTRIM(reporting_currency), '') IS NULL
+        THEN NULL
+        ELSE public.fx_convert(
+            invested_value_native,
+            base_currency,
+            reporting_currency
+        )
+    END,
+    CASE
+        WHEN NULLIF(BTRIM(base_currency), '') IS NULL
+          OR NULLIF(BTRIM(reporting_currency), '') IS NULL
+        THEN NULL
+        ELSE public.fx_convert(
+            portfolio_value_native,
+            base_currency,
+            reporting_currency
+        )
+    END,
+    CASE
+        WHEN NULLIF(BTRIM(base_currency), '') IS NULL
+          OR NULLIF(BTRIM(reporting_currency), '') IS NULL
+        THEN NULL
+        ELSE public.fx_convert(
+            profit_loss_native,
+            base_currency,
+            reporting_currency
+        )
+    END,
     CASE
         WHEN invested_value_native > 0
         THEN (profit_loss_native / invested_value_native) * 100
@@ -3136,6 +3178,50 @@ $$;
 
 
 --
+-- Name: sp_get_positions_with_pricing(uuid, uuid, numeric); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_get_positions_with_pricing(p_portfolio_id uuid, p_user_id uuid, p_max_age_hours numeric DEFAULT 96) RETURNS SETOF jsonb
+    LANGUAGE sql STABLE
+    AS $$
+    SELECT
+        to_jsonb(p)
+        || jsonb_build_object(
+            'price_as_of', i.price_as_of,
+            'price_age_hours',
+                CASE
+                    WHEN i.price_as_of IS NULL THEN NULL
+                    ELSE EXTRACT(EPOCH FROM (now() - i.price_as_of)) / 3600.0
+                END,
+            'price_is_stale',
+                CASE
+                    WHEN i.last_price IS NULL OR i.price_as_of IS NULL THEN NULL
+                    ELSE i.price_as_of < now() - make_interval(
+                        secs => (p_max_age_hours * 3600)::double precision
+                    )
+                END,
+            'price_refresh_status',
+                COALESCE(
+                    q.status,
+                    CASE
+                        WHEN i.last_price IS NOT NULL THEN 'COMPLETED'
+                        ELSE 'UNAVAILABLE'
+                    END
+                ),
+            'price_refresh_attempt_count', q.attempt_count,
+            'price_refresh_max_attempts', q.max_attempts,
+            'price_refresh_next_attempt_at', q.next_attempt_at,
+            'price_refresh_error', q.last_error
+        )
+    FROM public.sp_get_positions(p_portfolio_id, p_user_id) p
+    JOIN public.instruments i
+      ON i.instrument_id = p.instrument_id
+    LEFT JOIN public.market_price_refresh_queue q
+      ON q.instrument_id = p.instrument_id;
+$$;
+
+
+--
 -- Name: sp_get_recent_catalysts(uuid[], integer); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -3188,118 +3274,102 @@ CREATE FUNCTION public.sp_get_symbol(p_symbol character varying, p_cache_hours i
     LANGUAGE plpgsql
     AS $$
 DECLARE
-    v_symbol VARCHAR;
-
-    v_local JSONB;
-    v_cache JSONB;
+    v_symbol varchar;
+    v_local jsonb;
+    v_cache jsonb;
+    v_cache_item jsonb;
 BEGIN
+    v_symbol := UPPER(NULLIF(BTRIM(p_symbol), ''));
 
-    v_symbol :=
-        UPPER(
-            TRIM(
-                p_symbol
-            )
+    IF v_symbol IS NULL THEN
+        RETURN jsonb_build_object(
+            'found', false,
+            'source', 'MISS',
+            'payload', NULL
         );
+    END IF;
 
-    ------------------------------------------------------------------
+    ---------------------------------------------------------------------------
     -- LOCAL
-    ------------------------------------------------------------------
+    ---------------------------------------------------------------------------
 
-    SELECT
-        jsonb_build_object(
-            'found', TRUE,
-            'source', 'LOCAL',
-
-            'payload',
-            jsonb_build_object(
-                'entity_id',
-                e.entity_id,
-
-                'instrument_id',
-                i.instrument_id,
-
-                'symbol',
-                i.symbol,
-
-                'name',
-                e.name,
-
-                'exchange',
-                i.exchange,
-
-                'type',
-                i.instrument_type
-            )
+    SELECT jsonb_build_object(
+        'found', true,
+        'source', 'LOCAL',
+        'payload', jsonb_build_object(
+            'entity_id', i.entity_id,
+            'instrument_id', i.instrument_id,
+            'symbol', i.symbol,
+            'name', e.name,
+            'exchange', i.exchange,
+            'exchange_code', i.exchange,
+            'type', i.instrument_type,
+            'instrument_type', i.instrument_type,
+            'currency', i.currency_code,
+            'currency_code', i.currency_code,
+            'data_source', i.data_source,
+            'last_price', i.last_price,
+            'price_as_of', i.price_as_of
         )
+    )
     INTO v_local
-    FROM instruments i
-    JOIN entities e
-      ON e.entity_id =
-         i.entity_id
-    WHERE UPPER(i.symbol) =
-          v_symbol
+    FROM public.instruments i
+    JOIN public.entities e
+      ON e.entity_id = i.entity_id
+    WHERE UPPER(BTRIM(i.symbol)) = v_symbol
+    ORDER BY
+        CASE
+            WHEN NULLIF(BTRIM(i.currency_code), '') IS NOT NULL THEN 0
+            ELSE 1
+        END,
+        CASE
+            WHEN i.last_price IS NOT NULL THEN 0
+            ELSE 1
+        END,
+        i.updated_at DESC,
+        i.instrument_id
     LIMIT 1;
 
     IF v_local IS NOT NULL THEN
-
         RETURN v_local;
-
     END IF;
 
-    ------------------------------------------------------------------
+    ---------------------------------------------------------------------------
     -- CACHE
-    ------------------------------------------------------------------
+    ---------------------------------------------------------------------------
 
-    v_cache :=
-        sp_get_market_cache(
-            LOWER(v_symbol),
-            p_cache_hours
-        );
+    v_cache := public.sp_get_market_cache(
+        LOWER(v_symbol),
+        p_cache_hours
+    );
 
     IF v_cache IS NOT NULL
        AND jsonb_typeof(v_cache) = 'array'
     THEN
+        SELECT item
+        INTO v_cache_item
+        FROM jsonb_array_elements(v_cache) AS item
+        WHERE UPPER(item->>'symbol') = v_symbol
+        LIMIT 1;
 
-        RETURN jsonb_build_object(
-            'found',
-            TRUE,
-
-            'source',
-            'CACHE',
-
-            'payload',
-            (
-                SELECT item
-                FROM jsonb_array_elements(
-                    v_cache
-                ) item
-                WHERE
-                    UPPER(
-                        item->>'symbol'
-                    )
-                    =
-                    v_symbol
-                LIMIT 1
-            )
-        );
-
+        IF v_cache_item IS NOT NULL THEN
+            RETURN jsonb_build_object(
+                'found', true,
+                'source', 'CACHE',
+                'payload', v_cache_item
+            );
+        END IF;
     END IF;
 
-    ------------------------------------------------------------------
+    ---------------------------------------------------------------------------
     -- MISS
-    ------------------------------------------------------------------
+    ---------------------------------------------------------------------------
 
     RETURN jsonb_build_object(
-        'found',
-        FALSE,
-
-        'source',
-        'MISS',
-
-        'payload',
-        NULL
+        'found', false,
+        'source', 'MISS',
+        'payload', NULL
     );
-
 END;
 $$;
 
@@ -3646,6 +3716,54 @@ $$;
 
 
 --
+-- Name: sp_get_watchlist_items_with_pricing(uuid, uuid, numeric); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_get_watchlist_items_with_pricing(p_watchlist_id uuid, p_user_id uuid, p_max_age_hours numeric DEFAULT 96) RETURNS SETOF jsonb
+    LANGUAGE sql STABLE
+    AS $$
+    SELECT
+        to_jsonb(w)
+        || jsonb_build_object(
+            'instrument_id', i.instrument_id,
+            'currency_code', i.currency_code,
+            'price_as_of', i.price_as_of,
+            'price_age_hours',
+                CASE
+                    WHEN i.price_as_of IS NULL THEN NULL
+                    ELSE EXTRACT(EPOCH FROM (now() - i.price_as_of)) / 3600.0
+                END,
+            'price_is_stale',
+                CASE
+                    WHEN w.last_price IS NULL OR i.price_as_of IS NULL THEN NULL
+                    ELSE i.price_as_of < now() - make_interval(
+                        secs => (p_max_age_hours * 3600)::double precision
+                    )
+                END,
+            'price_refresh_status',
+                COALESCE(
+                    q.status,
+                    CASE
+                        WHEN w.last_price IS NOT NULL THEN 'COMPLETED'
+                        ELSE 'UNAVAILABLE'
+                    END
+                ),
+            'price_refresh_attempt_count', q.attempt_count,
+            'price_refresh_max_attempts', q.max_attempts,
+            'price_refresh_next_attempt_at', q.next_attempt_at,
+            'price_refresh_error', q.last_error
+        )
+    FROM public.sp_get_watchlist_items(p_watchlist_id, p_user_id) w
+    LEFT JOIN public.instruments i
+      ON i.entity_id = w.entity_id
+     AND i.symbol = w.symbol
+     AND i.exchange IS NOT DISTINCT FROM w.exchange
+    LEFT JOIN public.market_price_refresh_queue q
+      ON q.instrument_id = i.instrument_id;
+$$;
+
+
+--
 -- Name: sp_get_watchlists(uuid); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -3855,6 +3973,78 @@ BEGIN
     END IF;
 END;
 $$;
+
+
+--
+-- Name: sp_market_data_enqueue_incomplete_instruments(boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_market_data_enqueue_incomplete_instruments(p_include_missing_price boolean DEFAULT false) RETURNS TABLE(candidates_count integer, enqueued_count integer)
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_candidates_count integer := 0;
+    v_enqueued_count integer := 0;
+    v_instrument record;
+BEGIN
+    FOR v_instrument IN
+        SELECT
+            i.instrument_id,
+            i.symbol,
+            COALESCE(
+                NULLIF(UPPER(BTRIM(i.data_source)), ''),
+                'YAHOO'
+            ) AS data_source
+        FROM public.instruments i
+        WHERE NULLIF(BTRIM(i.currency_code), '') IS NULL
+           OR (
+               p_include_missing_price
+               AND (
+                   i.last_price IS NULL
+                   OR i.price_as_of IS NULL
+               )
+           )
+        ORDER BY
+            i.created_at,
+            i.instrument_id
+    LOOP
+        v_candidates_count := v_candidates_count + 1;
+
+        PERFORM public.sp_enqueue_market_price_refresh(
+            v_instrument.instrument_id,
+            v_instrument.symbol,
+            v_instrument.data_source
+        );
+
+        v_enqueued_count := v_enqueued_count + 1;
+    END LOOP;
+
+    RETURN QUERY
+    SELECT
+        v_candidates_count,
+        v_enqueued_count;
+END;
+$$;
+
+
+--
+-- Name: sp_market_data_update_instrument_price(uuid, numeric, timestamp with time zone); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_market_data_update_instrument_price(p_instrument_id uuid, p_last_price numeric, p_price_as_of timestamp with time zone) RETURNS boolean
+    LANGUAGE plpgsql
+    AS $$
+DECLARE v_count integer;
+BEGIN
+ IF p_last_price IS NULL OR p_price_as_of IS NULL THEN
+  RAISE EXCEPTION 'last_price and price_as_of are required';
+ END IF;
+ UPDATE instruments
+ SET last_price=p_last_price, price_as_of=p_price_as_of
+ WHERE instrument_id=p_instrument_id AND (price_as_of IS NULL OR p_price_as_of >= price_as_of);
+ GET DIAGNOSTICS v_count = ROW_COUNT;
+ RETURN v_count > 0;
+END; $$;
 
 
 --
@@ -5782,60 +5972,86 @@ CREATE FUNCTION public.sp_upsert_position(p_position_id uuid, p_portfolio_id uui
     LANGUAGE plpgsql
     AS $$
 DECLARE
-    v_position_id UUID;
+    v_position_id uuid;
+    v_currency_code char(3);
 BEGIN
+    IF p_portfolio_id IS NULL
+       OR NOT EXISTS (
+           SELECT 1
+           FROM public.portfolios pf
+           WHERE pf.portfolio_id = p_portfolio_id
+             AND pf.user_id = p_user_id
+       )
+    THEN
+        RAISE EXCEPTION
+            'Portfolio not found or not accessible: %',
+            p_portfolio_id
+            USING ERRCODE = '23503';
+    END IF;
 
-	IF p_portfolio_id IS NOT NULL AND p_portfolio_id IN (SELECT portfolio_id FROM portfolios WHERE user_id = p_user_id) THEN
-	    IF p_position_id IS NULL THEN
-	
-	        INSERT INTO positions
-	        (
-	            portfolio_id,
-	            instrument_id,
-	            quantity,
-	            avg_price,
-	            opened_at,
-	            notes
-	        )
-	        VALUES
-	        (
-	            p_portfolio_id,
-	            p_instrument_id,
-	            p_quantity,
-	            p_avg_price,
-	            p_opened_at,
-	            p_notes
-	        )
-	        RETURNING position_id
-	        INTO v_position_id;
-	
-	    ELSE
-	
-	        UPDATE positions
-	        SET
-	            instrument_id =
-	                p_instrument_id,
-	            quantity =
-	                p_quantity,
-	            avg_price =
-	                p_avg_price,
-	            opened_at =
-	                p_opened_at,
-	            notes =
-	                p_notes
-	        WHERE position_id =
-	              p_position_id;
-	
-	        v_position_id :=
-	            p_position_id;
-	
-	    END IF;
-	ELSE
-		RAISE EXCEPTION 'Portfolio not found';
-	END IF;
+    SELECT i.currency_code
+    INTO v_currency_code
+    FROM public.instruments i
+    WHERE i.instrument_id = p_instrument_id;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION
+            'Instrument not found: %',
+            p_instrument_id
+            USING ERRCODE = '23503';
+    END IF;
+
+    IF NULLIF(BTRIM(v_currency_code), '') IS NULL THEN
+        RAISE EXCEPTION
+            'Instrument % has no currency',
+            p_instrument_id
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF p_position_id IS NULL THEN
+        INSERT INTO public.positions
+        (
+            portfolio_id,
+            instrument_id,
+            quantity,
+            avg_price,
+            opened_at,
+            notes
+        )
+        VALUES
+        (
+            p_portfolio_id,
+            p_instrument_id,
+            p_quantity,
+            p_avg_price,
+            p_opened_at,
+            p_notes
+        )
+        RETURNING position_id
+        INTO v_position_id;
+    ELSE
+        UPDATE public.positions
+        SET
+            instrument_id = p_instrument_id,
+            quantity = p_quantity,
+            avg_price = p_avg_price,
+            opened_at = p_opened_at,
+            notes = p_notes
+        WHERE position_id = p_position_id
+          AND portfolio_id = p_portfolio_id
+        RETURNING position_id
+        INTO v_position_id;
+
+        IF v_position_id IS NULL THEN
+            RAISE EXCEPTION
+                'Position % not found in portfolio %',
+                p_position_id,
+                p_portfolio_id
+                USING ERRCODE = '23503';
+        END IF;
+    END IF;
 
     RETURN v_position_id;
-
 END;
 $$;
 
@@ -6604,7 +6820,8 @@ CREATE TABLE public.instruments (
     updated_at timestamp with time zone DEFAULT now(),
     market_sector character varying(50),
     price_source_id uuid,
-    price_as_of timestamp with time zone
+    price_as_of timestamp with time zone,
+    CONSTRAINT ck_instruments_currency_code_present CHECK ((NULLIF(btrim((currency_code)::text), ''::text) IS NOT NULL))
 );
 
 
@@ -9280,5 +9497,5 @@ ALTER TABLE ONLY public.watchlists
 -- PostgreSQL database dump complete
 --
 
-\unrestrict wu1xXh9kqDMF8vIL2cVFbUDtqjF7wnkAGtES6weSg5yZjKIxsA1E8MlYgSSni7p
+\unrestrict PdIuWuQuqIVnxqKce8Ku2v8LpdqxZMfhS4Ot7ztbwjdTGOI4DvWHpkuhLDdhYv0
 

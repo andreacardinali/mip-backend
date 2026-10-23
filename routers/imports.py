@@ -42,6 +42,14 @@ def _has_persisted_identity(payload) -> bool:
     )
 
 
+def _has_currency(payload) -> bool:
+    return (
+        isinstance(payload, dict)
+        and _clean_optional(payload.get("currency") or payload.get("currency_code"))
+        is not None
+    )
+
+
 def _enqueue_missing_price(db, local_payload, symbol, data_source):
     if not _has_persisted_identity(local_payload):
         return None
@@ -89,6 +97,7 @@ def import_entity(
             symbol_info
             and symbol_info.get("source") == "LOCAL"
             and _has_persisted_identity(local_payload)
+            and _has_currency(local_payload)
             and _has_price(local_payload)
         ):
             return {
@@ -112,6 +121,7 @@ def import_entity(
             and symbol_info.get("source") == "CACHE"
             and isinstance(local_payload, dict)
             and local_payload.get("name")
+            and local_payload.get("currency")
             and not requested_isin
             and not requested_currency
             and not requested_exchange
@@ -128,10 +138,28 @@ def import_entity(
             )
             profile = market_data.get_profile(
                 reference,
-                required_fields={"name"},
+                required_fields={
+                    "name",
+                    "currency",
+                },
                 include_quote=True,
             )
             profile_payload = profile.to_import_payload() if profile else None
+
+            if profile_payload and not _clean_optional(profile_payload.get("currency")):
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "code": "INSTRUMENT_CURRENCY_UNRESOLVED",
+                        "message": (
+                            "Impossibile determinare la valuta dello strumento. "
+                            "Lo strumento non è stato importato."
+                        ),
+                        "symbol": symbol,
+                        "exchange": requested_exchange,
+                        "data_source": provider_data_source,
+                    },
+                )
 
         if not profile_payload:
             instrument_id = (

@@ -14,6 +14,10 @@ class ProviderTemporaryError(MarketDataError):
     pass
 
 
+class StaleMarketPriceError(ProviderTemporaryError):
+    pass
+
+
 class ProviderRateLimitError(ProviderTemporaryError):
     pass
 
@@ -23,7 +27,7 @@ class InvalidProviderResponseError(MarketDataError):
 
 
 class AllProvidersFailedError(MarketDataError):
-    def __init__(self, capability: str, failures: list[tuple[str, Exception]]):
+    def __init__(self, capability, failures):
         self.capability = capability
         self.failures = failures
         detail = "; ".join(f"{name}: {error}" for name, error in failures)

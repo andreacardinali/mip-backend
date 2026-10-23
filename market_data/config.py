@@ -9,7 +9,7 @@ class SettingsReader(Protocol):
 
 
 DEFAULT_ORDERS = {
-    MarketDataCapability.SYMBOL_SEARCH: ("eulerpool", "ghostfolio", "fmp"),
+    MarketDataCapability.SYMBOL_SEARCH: ("yahoo", "eulerpool", "ghostfolio", "fmp"),
     MarketDataCapability.PROFILE: ("eulerpool", "ghostfolio", "fmp"),
     MarketDataCapability.IDENTIFIERS: ("openfigi", "eulerpool", "ghostfolio"),
     MarketDataCapability.EXCHANGE: ("eulerpool", "openfigi", "fmp"),
@@ -36,6 +36,7 @@ class MarketDataConfig:
     http_timeout: float
     http_max_retries: int
     http_retry_base_seconds: float
+    max_quote_age_hours: float = 96.0
 
     @classmethod
     def from_settings(cls, settings: SettingsReader) -> "MarketDataConfig":
@@ -50,6 +51,9 @@ class MarketDataConfig:
             http_retry_base_seconds=float(
                 settings.get("MARKET_DATA_HTTP_RETRY_BASE_SECONDS", 1.0)
             ),
+            max_quote_age_hours=float(
+                settings.get("MARKET_DATA_MAX_QUOTE_AGE_HOURS", 96.0)
+            ),
         )
         config.validate()
         return config
@@ -59,6 +63,8 @@ class MarketDataConfig:
             raise ValueError("MARKET_DATA_HTTP_TIMEOUT must be > 0")
         if self.http_max_retries < 0:
             raise ValueError("MARKET_DATA_HTTP_MAX_RETRIES must be >= 0")
+        if self.max_quote_age_hours <= 0:
+            raise ValueError("MARKET_DATA_MAX_QUOTE_AGE_HOURS must be > 0")
         for capability, providers in self.provider_orders.items():
             if not providers:
                 raise ValueError(f"No provider configured for {capability.value}")

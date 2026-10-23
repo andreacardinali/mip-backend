@@ -25,4 +25,4 @@ export MIP_TOKEN="$(
 
 unset MIP_PASSWORD
 
-echo "Token acquisito: ${#MIP_TOKEN} caratteri"
+echo "Token acquisito su \$MIP_TOKEN: ${#MIP_TOKEN} caratteri"

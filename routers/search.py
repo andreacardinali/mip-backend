@@ -28,6 +28,7 @@ async def search_symbols(
 
     cache_key = query.lower()
     isin_search = _is_isin(query)
+    exact_symbol_search = bool(re.fullmatch(r"[A-Za-z0-9^=._-]+", query))
     db = SessionLocal()
 
     try:
@@ -47,10 +48,38 @@ async def search_symbols(
         # A symbol/name search can stop at LOCAL or CACHE. An ISIN identifies
         # a product that can have multiple listings, so local data must not
         # hide provider results for the other currencies/exchanges.
-        if not isin_search and search_result and search_result.get("source") != "MISS":
+        if (
+            not isin_search
+            and not exact_symbol_search
+            and search_result
+            and search_result.get("source") != "MISS"
+        ):
             return search_result
 
-        results = [result.to_dict() for result in market_data.search(query, limit=20)]
+        provider_results = [
+            result.to_dict() for result in market_data.search(query, limit=20)
+        ]
+        local_results = (
+            search_result.get("results", [])
+            if search_result and search_result.get("source") != "MISS"
+            else []
+        )
+        results, seen = [], set()
+        for result in [*provider_results, *local_results]:
+            symbol = str(result.get("symbol") or "").strip().upper()
+            source = str(
+                result.get("data_source") or result.get("source") or ""
+            ).upper()
+            exchange = str(
+                result.get("exchange") or result.get("exchange_code") or ""
+            ).upper()
+            key = (symbol, source, exchange)
+            if not symbol or key in seen:
+                continue
+            seen.add(key)
+            results.append(result)
+            if len(results) >= 20:
+                break
 
         db.execute(
             text(

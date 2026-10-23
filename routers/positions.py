@@ -6,6 +6,7 @@ from auth.security import CurrentUser, get_current_user
 from db import SessionLocal
 
 router = APIRouter()
+PRICE_MAX_AGE_HOURS = 96
 
 
 @router.get("/portfolio/{portfolio_id}")
@@ -13,36 +14,25 @@ def get_positions(
     portfolio_id: str,
     current_user: CurrentUser = Depends(get_current_user),
 ):
-    user_id = current_user["user_id"]
     db = SessionLocal()
     try:
         rows = db.execute(
             text(
                 """
-                SELECT
-                    p.*,
-                    COALESCE(
-                        q.status,
-                        CASE
-                            WHEN p.last_price IS NOT NULL THEN 'COMPLETED'
-                            ELSE 'UNAVAILABLE'
-                        END
-                    ) AS price_refresh_status,
-                    q.attempt_count AS price_refresh_attempt_count,
-                    q.max_attempts AS price_refresh_max_attempts,
-                    q.next_attempt_at AS price_refresh_next_attempt_at,
-                    q.last_error AS price_refresh_error
-                FROM sp_get_positions(
-                    :portfolio_id,
-                    :user_id
-                ) p
-                LEFT JOIN market_price_refresh_queue q
-                    ON q.instrument_id = p.instrument_id
+                SELECT public.sp_get_positions_with_pricing(
+                    CAST(:portfolio_id AS uuid),
+                    CAST(:user_id AS uuid),
+                    CAST(:max_age_hours AS numeric)
+                ) AS payload
                 """
             ),
-            {"portfolio_id": portfolio_id, "user_id": user_id},
+            {
+                "portfolio_id": portfolio_id,
+                "user_id": current_user["user_id"],
+                "max_age_hours": PRICE_MAX_AGE_HOURS,
+            },
         )
-        return [dict(row._mapping) for row in rows]
+        return [row.payload for row in rows]
     finally:
         db.close()
 
@@ -111,12 +101,11 @@ def delete_position(
     position_id: str,
     current_user: CurrentUser = Depends(get_current_user),
 ):
-    user_id = current_user["user_id"]
     db = SessionLocal()
     try:
         deleted = db.execute(
             text("SELECT sp_delete_position(:position_id, :user_id)"),
-            {"position_id": position_id, "user_id": user_id},
+            {"position_id": position_id, "user_id": current_user["user_id"]},
         ).scalar()
         db.commit()
         return {"deleted": deleted}

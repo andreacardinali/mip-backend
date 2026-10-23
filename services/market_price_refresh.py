@@ -177,6 +177,22 @@ def _persist_profile_and_complete(job: dict, profile: dict) -> None:
         if not result:
             raise RuntimeError("sp_import_asset_profile returned no row")
 
+        db.execute(
+            text(
+                """
+                SELECT sp_market_data_update_instrument_price(
+                    CAST(:instrument_id AS uuid), CAST(:last_price AS numeric),
+                    CAST(:price_as_of AS timestamptz)
+                )
+                """
+            ),
+            {
+                "instrument_id": str(job["instrument_id"]),
+                "last_price": profile["last_price"],
+                "price_as_of": profile["price_as_of"],
+                "price_source": profile.get("price_source") or profile.get("source"),
+            },
+        ).scalar_one()
         _complete_job(db, job["job_id"])
         db.commit()
     except Exception:
@@ -230,13 +246,27 @@ def process_price_refresh_queue() -> dict:
                 InstrumentReference(
                     symbol=symbol,
                 ),
+                required_fields={
+                    "currency",
+                },
                 include_quote=True,
             )
 
             profile_payload = profile.to_import_payload() if profile else None
 
-            if not profile_payload or profile_payload.get("last_price") is None:
+            if not profile_payload:
+                raise RuntimeError("Provider returned no instrument profile")
+
+            if not profile_payload.get("currency"):
+                raise RuntimeError(
+                    "Provider returned instrument profile without currency"
+                )
+
+            if profile_payload.get("last_price") is None:
                 raise RuntimeError("Provider returned no market price")
+
+            if profile_payload.get("price_as_of") is None:
+                raise RuntimeError("Provider returned market price without price_as_of")
 
             _persist_profile_and_complete(
                 job,
