@@ -11,16 +11,18 @@ def test_yahoo_live_price_parser_keeps_exact_listing_and_currency():
         json={
             "chart": {
                 "error": None,
-                "result": [{
-                    "meta": {
-                        "symbol": "1GOOGL.MI",
-                        "currency": "EUR",
-                        "regularMarketPrice": 303.75,
-                        "regularMarketTime": 1790955302,
-                    },
-                    "timestamp": [],
-                    "indicators": {"quote": [{"close": []}]},
-                }],
+                "result": [
+                    {
+                        "meta": {
+                            "symbol": "1GOOGL.MI",
+                            "currency": "EUR",
+                            "regularMarketPrice": 303.75,
+                            "regularMarketTime": 1790955302,
+                        },
+                        "timestamp": [],
+                        "indicators": {"quote": [{"close": []}]},
+                    }
+                ],
             }
         },
     )

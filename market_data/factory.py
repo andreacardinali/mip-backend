@@ -47,7 +47,6 @@ def create_market_data_service(config=None):
     ghostfolio_token = settings.get("GHOSTFOLIO_SECURITY_TOKEN")
     if ghostfolio_base_url and ghostfolio_token:
         providers.append(
-            YahooProvider(),
             GhostfolioProvider(
                 ghostfolio_base_url,
                 ghostfolio_token,

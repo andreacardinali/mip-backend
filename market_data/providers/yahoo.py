@@ -6,6 +6,7 @@ from urllib.parse import quote
 
 import httpx
 
+from http_client.retry import RetryPolicy, request_with_retry
 from market_data.capabilities import InstrumentType, MarketDataCapability
 from market_data.exceptions import (
     InstrumentNotFoundError,
@@ -27,41 +28,68 @@ class YahooProvider(MarketDataProvider):
     instrument_types = set(InstrumentType)
     supported_instrument_types = instrument_types
 
-    def __init__(self, *, timeout: float = 10.0, client: httpx.Client | None = None):
+    def __init__(
+        self,
+        *,
+        timeout: float = 10.0,
+        retry_policy: RetryPolicy | None = None,
+        client: httpx.Client | None = None,
+    ):
         self.timeout = timeout
+        self.retry_policy = retry_policy or RetryPolicy()
         self._client = client
 
     def supports(self, capability, instrument_type) -> bool:
-        return capability in self.capabilities and instrument_type in self.instrument_types
+        return (
+            capability in self.capabilities and instrument_type in self.instrument_types
+        )
 
     def get_quote(self, instrument) -> MarketQuote:
         if not instrument.symbol:
             raise InstrumentNotFoundError("Yahoo requires symbol")
+
+        symbol = instrument.symbol
         owns_client = self._client is None
         client = self._client or httpx.Client(
             timeout=self.timeout,
             headers={"User-Agent": "Mozilla/5.0"},
         )
+
         try:
-            response = client.get(
-                f"{YAHOO_CHART_BASE_URL}/{quote(instrument.symbol, safe='')}",
+            response = request_with_retry(
+                client,
+                "GET",
+                f"{YAHOO_CHART_BASE_URL}/{quote(symbol, safe='')}",
+                policy=self.retry_policy,
                 params={"range": "5d", "interval": "1d"},
             )
-            return self._parse_response(response, instrument.symbol)
+            return self._parse_response(response, symbol)
+        except httpx.HTTPStatusError as error:
+            raise _normalize_http_error(error, symbol) from error
+        except (
+            httpx.ConnectError,
+            httpx.ConnectTimeout,
+            httpx.ReadTimeout,
+            httpx.WriteTimeout,
+            httpx.PoolTimeout,
+            httpx.RemoteProtocolError,
+        ) as error:
+            raise ProviderTemporaryError(f"Yahoo transport error: {error}") from error
         finally:
             if owns_client:
                 client.close()
 
     @staticmethod
     def _parse_response(response: httpx.Response, symbol: str) -> MarketQuote:
+        # Keep status handling here as well so direct parser tests and callers
+        # that supply a response continue to receive normalized provider errors.
         if response.status_code == 404:
             raise InstrumentNotFoundError(symbol)
         try:
             response.raise_for_status()
         except httpx.HTTPStatusError as error:
-            if response.status_code in {408, 425, 429} or response.status_code >= 500:
-                raise ProviderTemporaryError(f"Yahoo HTTP {response.status_code}") from error
-            raise InstrumentNotFoundError(symbol) from error
+            raise _normalize_http_error(error, symbol) from error
+
         try:
             payload: dict[str, Any] = response.json()
         except ValueError as error:
@@ -76,6 +104,7 @@ class YahooProvider(MarketDataProvider):
             )
         if not isinstance(results, list) or not results:
             raise InstrumentNotFoundError(symbol)
+
         result = results[0]
         meta = result.get("meta") if isinstance(result, dict) else None
         if not isinstance(meta, dict):
@@ -89,12 +118,25 @@ class YahooProvider(MarketDataProvider):
             raise InstrumentNotFoundError(
                 f"Yahoo returned no market price for {symbol}"
             )
+
         return MarketQuote(
             timestamp=int(timestamp or time.time()),
             price=float(price),
             currency=meta.get("currency"),
             source="yahoo",
         )
+
+
+def _normalize_http_error(
+    error: httpx.HTTPStatusError,
+    symbol: str,
+) -> Exception:
+    status_code = error.response.status_code
+    if status_code == 404:
+        return InstrumentNotFoundError(symbol)
+    if status_code in {408, 425, 429} or status_code >= 500:
+        return ProviderTemporaryError(f"Yahoo HTTP {status_code}")
+    return InstrumentNotFoundError(symbol)
 
 
 def _latest_close(result: dict[str, Any]) -> tuple[float | None, int | None]:

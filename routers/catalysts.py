@@ -92,9 +92,6 @@ def get_catalyst_facets(
 
         traceback.print_exc()
 
-        raise HTTPException(
-            status_code=422,
-            detail=str(error)
-        ) from error
+        raise HTTPException(status_code=422, detail=str(error)) from error
     finally:
         db.close()

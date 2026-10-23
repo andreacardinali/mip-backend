@@ -23,6 +23,4 @@ class MarketDataProvider:
         return False
 
     def get_quote(self, instrument):
-        raise CapabilityUnavailableError(
-            f"{self.name} does not support live prices"
-        )
+        raise CapabilityUnavailableError(f"{self.name} does not support live prices")

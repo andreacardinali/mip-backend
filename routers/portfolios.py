@@ -159,9 +159,7 @@ async def get_portfolio_summary(
                 "pending_price_count": pending_price_count,
                 "priced_position_count": priced_position_count,
                 "total_position_count": total_position_count,
-                "partial_portfolio_value_native": result.get(
-                    "portfolio_value_native"
-                ),
+                "partial_portfolio_value_native": result.get("portfolio_value_native"),
                 "partial_portfolio_value_reporting": result.get(
                     "portfolio_value_reporting"
                 ),

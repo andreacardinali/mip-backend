@@ -233,19 +233,10 @@ def process_price_refresh_queue() -> dict:
                 include_quote=True,
             )
 
-            profile_payload = (
-                profile.to_import_payload()
-                if profile
-                else None
-            )
+            profile_payload = profile.to_import_payload() if profile else None
 
-            if (
-                not profile_payload
-                or profile_payload.get("last_price") is None
-            ):
-                raise RuntimeError(
-                    "Provider returned no market price"
-                )
+            if not profile_payload or profile_payload.get("last_price") is None:
+                raise RuntimeError("Provider returned no market price")
 
             _persist_profile_and_complete(
                 job,
