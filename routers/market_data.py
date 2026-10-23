@@ -1,10 +1,16 @@
 from fastapi import APIRouter, Depends, HTTPException
 
 from auth.security import CurrentUser, get_current_user
+from db import SessionLocal
 from market_data.factory import market_data
 from services.currencies import get_currency_catalog
+from services.market_price_refresh import (
+    enqueue_user_price_refreshes,
+    process_price_refresh_queue,
+)
 
 router = APIRouter()
+LIVE_PRICE_MAX_AGE_SECONDS = 30
 
 
 @router.get("/capabilities")
@@ -21,3 +27,30 @@ def currencies(current_user: CurrentUser = Depends(get_current_user)):
             status_code=503,
             detail="Currency catalog is temporarily unavailable",
         ) from error
+
+
+@router.post("/prices/refresh")
+def refresh_user_prices(
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    db = SessionLocal()
+    try:
+        enqueue_result = enqueue_user_price_refreshes(
+            db,
+            user_id=current_user["user_id"],
+            max_age_seconds=LIVE_PRICE_MAX_AGE_SECONDS,
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+    processing_result = process_price_refresh_queue()
+    return {
+        "status": processing_result["status"],
+        "max_age_seconds": LIVE_PRICE_MAX_AGE_SECONDS,
+        **enqueue_result,
+        **processing_result,
+    }

@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict PdIuWuQuqIVnxqKce8Ku2v8LpdqxZMfhS4Ot7ztbwjdTGOI4DvWHpkuhLDdhYv0
+\restrict BS1kesVWOYRgm4nkFnmwu7W1b1hwJFyjeGGFesE1mFeQ9w6ggIOKCqxbM9JrjsC
 
 -- Dumped from database version 18.6 (Debian 18.6-1.pgdg13+2)
 -- Dumped by pg_dump version 18.6 (Debian 18.6-1.pgdg13+2)
@@ -4023,6 +4023,79 @@ BEGIN
     SELECT
         v_candidates_count,
         v_enqueued_count;
+END;
+$$;
+
+
+--
+-- Name: sp_market_data_enqueue_user_prices(uuid, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_market_data_enqueue_user_prices(p_user_id uuid, p_max_age_seconds integer DEFAULT 30) RETURNS TABLE(candidates_count integer, enqueued_count integer)
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_candidates_count integer := 0;
+    v_enqueued_count integer := 0;
+    v_instrument record;
+BEGIN
+    IF p_user_id IS NULL THEN
+        RAISE EXCEPTION 'p_user_id is required';
+    END IF;
+
+    IF p_max_age_seconds < 1 THEN
+        RAISE EXCEPTION 'p_max_age_seconds must be >= 1';
+    END IF;
+
+    FOR v_instrument IN
+        WITH user_instruments AS (
+            SELECT DISTINCT pos.instrument_id
+            FROM public.positions pos
+            JOIN public.portfolios pf
+              ON pf.portfolio_id = pos.portfolio_id
+            WHERE pf.user_id = p_user_id
+
+            UNION
+
+            SELECT DISTINCT i.instrument_id
+            FROM public.watchlist_items wi
+            JOIN public.watchlists w
+              ON w.watchlist_id = wi.watchlist_id
+            JOIN public.instruments i
+              ON i.entity_id = wi.entity_id
+            WHERE w.user_id = p_user_id
+        )
+        SELECT
+            i.instrument_id,
+            i.symbol,
+            COALESCE(
+                NULLIF(UPPER(BTRIM(i.data_source)), ''),
+                'YAHOO'
+            ) AS data_source
+        FROM user_instruments ui
+        JOIN public.instruments i
+          ON i.instrument_id = ui.instrument_id
+        WHERE NULLIF(BTRIM(i.symbol), '') IS NOT NULL
+          AND (
+              i.last_price IS NULL
+              OR i.price_as_of IS NULL
+              OR i.price_as_of < now() - make_interval(secs => p_max_age_seconds)
+          )
+        ORDER BY i.instrument_id
+    LOOP
+        v_candidates_count := v_candidates_count + 1;
+
+        PERFORM public.sp_enqueue_market_price_refresh(
+            v_instrument.instrument_id,
+            v_instrument.symbol,
+            v_instrument.data_source
+        );
+
+        v_enqueued_count := v_enqueued_count + 1;
+    END LOOP;
+
+    RETURN QUERY
+    SELECT v_candidates_count, v_enqueued_count;
 END;
 $$;
 
@@ -9497,5 +9570,5 @@ ALTER TABLE ONLY public.watchlists
 -- PostgreSQL database dump complete
 --
 
-\unrestrict PdIuWuQuqIVnxqKce8Ku2v8LpdqxZMfhS4Ot7ztbwjdTGOI4DvWHpkuhLDdhYv0
+\unrestrict BS1kesVWOYRgm4nkFnmwu7W1b1hwJFyjeGGFesE1mFeQ9w6ggIOKCqxbM9JrjsC
 

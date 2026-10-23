@@ -1,4 +1,3 @@
-import json
 import logging
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
@@ -12,7 +11,7 @@ from market_data.models import InstrumentReference
 
 logger = logging.getLogger(__name__)
 
-BATCH_SIZE = 5
+BATCH_SIZE = 20
 STALE_PROCESSING_MINUTES = 10
 RETRY_DELAYS_SECONDS = (60, 300, 900, 3600, 21600, 86400)
 
@@ -43,6 +42,33 @@ def enqueue_price_refresh(
     return str(job_id)
 
 
+def enqueue_user_price_refreshes(
+    db: Session,
+    *,
+    user_id: str | UUID,
+    max_age_seconds: int,
+) -> dict:
+    row = db.execute(
+        text(
+            """
+            SELECT candidates_count, enqueued_count
+            FROM sp_market_data_enqueue_user_prices(
+                CAST(:user_id AS uuid),
+                :max_age_seconds
+            )
+            """
+        ),
+        {
+            "user_id": str(user_id),
+            "max_age_seconds": max_age_seconds,
+        },
+    ).one()
+    return {
+        "candidates_count": int(row.candidates_count),
+        "enqueued_count": int(row.enqueued_count),
+    }
+
+
 def _claim_due_jobs(db: Session, worker_id: str) -> list[dict]:
     db.execute(
         text(
@@ -52,8 +78,7 @@ def _claim_due_jobs(db: Session, worker_id: str) -> list[dict]:
                 locked_at = NULL,
                 locked_by = NULL,
                 next_attempt_at = now(),
-                last_error = COALESCE(last_error, 'Recovered stale PROCESSING job'),
-                updated_at = now()
+                last_error = COALESCE(last_error, 'Recovered stale PROCESSING job')
             WHERE status = 'PROCESSING'
               AND locked_at < now() - make_interval(mins => :stale_minutes)
             """
@@ -77,8 +102,7 @@ def _claim_due_jobs(db: Session, worker_id: str) -> list[dict]:
             SET status = 'PROCESSING',
                 attempt_count = q.attempt_count + 1,
                 locked_at = now(),
-                locked_by = :worker_id,
-                updated_at = now()
+                locked_by = :worker_id
             FROM due
             WHERE q.job_id = due.job_id
             RETURNING
@@ -104,8 +128,7 @@ def _complete_job(db: Session, job_id: UUID) -> None:
                 completed_at = now(),
                 locked_at = NULL,
                 locked_by = NULL,
-                last_error = NULL,
-                updated_at = now()
+                last_error = NULL
             WHERE job_id = :job_id
             """
         ),
@@ -113,12 +136,7 @@ def _complete_job(db: Session, job_id: UUID) -> None:
     )
 
 
-def _retry_or_fail_job(
-    db: Session,
-    *,
-    job: dict,
-    error_message: str,
-) -> str:
+def _retry_or_fail_job(db: Session, *, job: dict, error_message: str) -> str:
     attempt_count = int(job["attempt_count"])
     max_attempts = int(job["max_attempts"])
 
@@ -143,8 +161,7 @@ def _retry_or_fail_job(
                 completed_at = :completed_at,
                 locked_at = NULL,
                 locked_by = NULL,
-                last_error = :last_error,
-                updated_at = now()
+                last_error = :last_error
             WHERE job_id = :job_id
             """
         ),
@@ -159,40 +176,29 @@ def _retry_or_fail_job(
     return status
 
 
-def _persist_profile_and_complete(job: dict, profile: dict) -> None:
+def _persist_quote_and_complete(job: dict, quote) -> None:
     db = SessionLocal()
     try:
-        result = db.execute(
-            text(
-                """
-                SELECT *
-                FROM sp_import_asset_profile(
-                    CAST(:payload AS jsonb)
-                )
-                """
-            ),
-            {"payload": json.dumps(profile)},
-        ).first()
-
-        if not result:
-            raise RuntimeError("sp_import_asset_profile returned no row")
-
-        db.execute(
+        updated = db.execute(
             text(
                 """
                 SELECT sp_market_data_update_instrument_price(
-                    CAST(:instrument_id AS uuid), CAST(:last_price AS numeric),
+                    CAST(:instrument_id AS uuid),
+                    CAST(:last_price AS numeric),
                     CAST(:price_as_of AS timestamptz)
                 )
                 """
             ),
             {
                 "instrument_id": str(job["instrument_id"]),
-                "last_price": profile["last_price"],
-                "price_as_of": profile["price_as_of"],
-                "price_source": profile.get("price_source") or profile.get("source"),
+                "last_price": quote.price,
+                "price_as_of": datetime.fromtimestamp(quote.timestamp, tz=UTC),
             },
         ).scalar_one()
+
+        if not updated:
+            raise RuntimeError("Quote timestamp is older than the stored price")
+
         _complete_job(db, job["job_id"])
         db.commit()
     except Exception:
@@ -205,11 +211,7 @@ def _persist_profile_and_complete(job: dict, profile: dict) -> None:
 def _record_failure(job: dict, error_message: str) -> str:
     db = SessionLocal()
     try:
-        status = _retry_or_fail_job(
-            db,
-            job=job,
-            error_message=error_message,
-        )
+        status = _retry_or_fail_job(db, job=job, error_message=error_message)
         db.commit()
         return status
     except Exception:
@@ -238,40 +240,17 @@ def process_price_refresh_queue() -> dict:
 
     for job in jobs:
         symbol = str(job["symbol"])
-        data_source = str(job["data_source"])
         started_at = datetime.now(UTC)
 
         try:
-            profile = market_data.get_profile(
-                InstrumentReference(
-                    symbol=symbol,
-                ),
-                required_fields={
-                    "currency",
-                },
-                include_quote=True,
+            quote = market_data.get_quote(
+                InstrumentReference(symbol=symbol),
+                required=True,
             )
+            if quote.price is None or quote.timestamp is None:
+                raise RuntimeError("Provider returned an incomplete market quote")
 
-            profile_payload = profile.to_import_payload() if profile else None
-
-            if not profile_payload:
-                raise RuntimeError("Provider returned no instrument profile")
-
-            if not profile_payload.get("currency"):
-                raise RuntimeError(
-                    "Provider returned instrument profile without currency"
-                )
-
-            if profile_payload.get("last_price") is None:
-                raise RuntimeError("Provider returned no market price")
-
-            if profile_payload.get("price_as_of") is None:
-                raise RuntimeError("Provider returned market price without price_as_of")
-
-            _persist_profile_and_complete(
-                job,
-                profile_payload,
-            )
+            _persist_quote_and_complete(job, quote)
             completed += 1
             result = "COMPLETED"
         except Exception as exc:
@@ -292,22 +271,18 @@ def process_price_refresh_queue() -> dict:
 
         duration_ms = int((datetime.now(UTC) - started_at).total_seconds() * 1000)
         logger.info(
-            "Market price refresh job_id=%s symbol=%s data_source=%s "
+            "Market price refresh job_id=%s symbol=%s configured_source=%s "
             "attempt=%s result=%s duration_ms=%s",
             job["job_id"],
             symbol,
-            data_source,
+            job["data_source"],
             job["attempt_count"],
             result,
             duration_ms,
         )
 
-    status = "SUCCESS"
-    if failed or retried:
-        status = "PARTIAL"
-
     return {
-        "status": status,
+        "status": "PARTIAL" if failed or retried else "SUCCESS",
         "claimed": len(jobs),
         "completed": completed,
         "retried": retried,
