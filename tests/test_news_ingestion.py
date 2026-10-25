@@ -1,4 +1,5 @@
 import unittest
+from contextlib import nullcontext
 from datetime import UTC, datetime
 from unittest.mock import Mock, patch
 
@@ -34,6 +35,7 @@ class Tests(unittest.TestCase):
     def test_ingest(self, s):
         s.get.side_effect = lambda n, d=None: d
         db = Mock()
+        db.begin_nested.return_value = nullcontext()
         db.execute.side_effect = [
             R(
                 [
@@ -64,6 +66,9 @@ class Tests(unittest.TestCase):
             include_all_instruments=False,
         )
         self.assertEqual(result["inserted"], 1)
+        self.assertEqual(result["associations_inserted"], 1)
+        self.assertEqual(result["persistence_failed"], 0)
+        db.begin_nested.assert_called_once_with()
 
 
 if __name__ == "__main__":

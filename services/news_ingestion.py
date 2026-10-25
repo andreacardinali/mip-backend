@@ -91,21 +91,25 @@ def _load_targets(
     include_all: bool,
     limit: int,
 ) -> list[dict[str, Any]]:
-    rows = db.execute(
-        text(
-            """
+    rows = (
+        db.execute(
+            text(
+                """
             SELECT *
             FROM public.sp_news_list_ingestion_targets(
                 :include_all,
                 :limit
             )
             """
-        ),
-        {
-            "include_all": include_all,
-            "limit": limit,
-        },
-    ).mappings().all()
+            ),
+            {
+                "include_all": include_all,
+                "limit": limit,
+            },
+        )
+        .mappings()
+        .all()
+    )
     return [dict(row) for row in rows]
 
 
@@ -140,8 +144,7 @@ def _persist_article(
 
 def _is_empty_news_result(error: AllProvidersFailedError) -> bool:
     return bool(error.failures) and all(
-        isinstance(failure, InstrumentNotFoundError)
-        for _, failure in error.failures
+        isinstance(failure, InstrumentNotFoundError) for _, failure in error.failures
     )
 
 
@@ -208,18 +211,19 @@ def ingest_news(
         reference = InstrumentReference(
             symbol=symbol,
             isin=target.get("isin"),
-            instrument_type=_instrument_type(
-                target.get("instrument_type")
-            ),
+            instrument_type=_instrument_type(target.get("instrument_type")),
             currency=target.get("currency_code"),
             exchange_code=target.get("exchange"),
         )
 
         try:
-            articles = market_data_service.get_news(
-                reference,
-                limit=news_limit,
-            ) or []
+            articles = (
+                market_data_service.get_news(
+                    reference,
+                    limit=news_limit,
+                )
+                or []
+            )
         except AllProvidersFailedError as error:
             if _is_empty_news_result(error):
                 stats["processed"] += 1
@@ -275,8 +279,7 @@ def ingest_news(
                 stats["persistence_failed"] += 1
                 stats["failed"] += 1
                 logger.exception(
-                    "News persistence failed "
-                    "entity_id=%s symbol=%s external_id=%s",
+                    "News persistence failed " "entity_id=%s symbol=%s external_id=%s",
                     entity_id,
                     symbol,
                     article.external_id,

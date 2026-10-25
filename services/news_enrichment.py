@@ -91,15 +91,19 @@ def _clamp(value: Any, minimum: float, maximum: float) -> float:
 
 
 def _load_pending(db: Session, limit: int) -> list[dict[str, Any]]:
-    rows = db.execute(
-        text(
-            """
+    rows = (
+        db.execute(
+            text(
+                """
             SELECT *
             FROM public.sp_news_list_pending_entity_scores(:limit)
             """
-        ),
-        {"limit": limit},
-    ).mappings().all()
+            ),
+            {"limit": limit},
+        )
+        .mappings()
+        .all()
+    )
     return [dict(row) for row in rows]
 
 
@@ -133,9 +137,7 @@ def _prompt(rows: list[dict[str, Any]]) -> str:
     )
     placeholder = "{input_json}"
     if placeholder not in template:
-        raise ValueError(
-            f"Prompt template is missing placeholder: {placeholder}"
-        )
+        raise ValueError(f"Prompt template is missing placeholder: {placeholder}")
     return template.replace(placeholder, input_json)
 
 
@@ -180,9 +182,7 @@ def _parse_scores(
 
     missing = expected_ids - seen
     if missing:
-        raise ValueError(
-            f"Missing news_entity_id values: {sorted(missing)}"
-        )
+        raise ValueError(f"Missing news_entity_id values: {sorted(missing)}")
 
     return scores
 
@@ -228,10 +228,7 @@ def _score_batch(
     if not rows:
         return
 
-    expected_ids = {
-        str(row["news_entity_id"])
-        for row in rows
-    }
+    expected_ids = {str(row["news_entity_id"]) for row in rows}
     stats.llm_calls += 1
 
     try:
@@ -262,8 +259,7 @@ def _score_batch(
         if len(rows) == 1:
             stats.failed_items += 1
             logger.exception(
-                "News enrichment item failed "
-                "news_entity_id=%s error=%s",
+                "News enrichment item failed " "news_entity_id=%s error=%s",
                 next(iter(expected_ids)),
                 error,
             )

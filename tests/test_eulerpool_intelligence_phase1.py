@@ -2,7 +2,7 @@ from datetime import UTC, date
 
 from market_data.capabilities import MarketDataCapability
 from market_data.models import InstrumentReference
-from market_data.providers.eulerpool_intelligence import EulerpoolIntelligenceProvider
+from market_data.providers.eulerpool import EulerpoolProvider
 
 
 class Response:
@@ -32,11 +32,11 @@ class Client:
 
 def provider(payloads):
     client = Client(payloads)
-    return EulerpoolIntelligenceProvider("key", client=client), client
+    return EulerpoolProvider("key", client=client), client
 
 
 def test_provider_declares_phase1_capabilities():
-    supported = EulerpoolIntelligenceProvider.capabilities.supported
+    supported = EulerpoolProvider.capabilities.supported
     assert {
         MarketDataCapability.NEWS,
         MarketDataCapability.ETF_HOLDINGS,

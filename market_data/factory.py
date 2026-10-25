@@ -2,7 +2,7 @@ from config.settings import settings
 from http_client.retry import RetryPolicy
 from market_data.config import MarketDataConfig
 from market_data.providers.ecb import EcbProvider
-from market_data.providers.eulerpool_intelligence import EulerpoolIntelligenceProvider
+from market_data.providers.eulerpool import EulerpoolProvider
 from market_data.providers.fmp import FMPProvider
 from market_data.providers.ghostfolio import GhostfolioProvider
 from market_data.providers.openfigi import OpenFigiProvider
@@ -59,12 +59,12 @@ def create_market_data_service(config=None):
         providers.append(
             FMPProvider(fmp_api_key, timeout=config.http_timeout, retry_policy=retry)
         )
-    euler_key = settings.get("EULERPOOL_API_KEY")
-    if euler_key:
+    eulerpool_api_key = settings.get("EULERPOOL_API_KEY")
+    if eulerpool_api_key:
         providers.insert(
             0,
-            EulerpoolIntelligenceProvider(
-                euler_key, timeout=config.http_timeout, retry_policy=retry
+            EulerpoolProvider(
+                eulerpool_api_key, timeout=config.http_timeout, retry_policy=retry
             ),
         )
     providers.append(
