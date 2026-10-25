@@ -13,6 +13,7 @@ import httpx
 logger = logging.getLogger(__name__)
 
 DEFAULT_RETRYABLE_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
+NEVER_RETRY_STATUS_CODES = frozenset({403})
 RETRYABLE_EXCEPTIONS = (
     httpx.ConnectError,
     httpx.ConnectTimeout,
@@ -25,22 +26,16 @@ IDEMPOTENT_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE", "PUT", "DELET
 MAX_ERROR_BODY_CHARACTERS = 2000
 
 
-def _response_error_message(
-    response: httpx.Response,
-) -> str:
+def _response_error_message(response: httpx.Response) -> str:
     try:
         body = response.text.strip()
     except Exception as exc:
         return f"<unable to read response body: {type(exc).__name__}: {exc}>"
-
     if not body:
         return "<empty response body>"
-
     body = " ".join(body.split())
-
     if len(body) > MAX_ERROR_BODY_CHARACTERS:
         return body[:MAX_ERROR_BODY_CHARACTERS] + "... [truncated]"
-
     return body
 
 
@@ -110,9 +105,8 @@ def request_with_retry(
                 random_uniform=random_uniform,
             )
             logger.warning(
-                "HTTP request retry after exception "
-                "method=%s attempt=%s/%s delay=%.3f "
-                "error_type=%s error=%s",
+                "HTTP request retry after exception method=%s attempt=%s/%s "
+                "delay=%.3f error_type=%s error=%s",
                 normalized_method,
                 attempt + 1,
                 policy.max_retries + 1,
@@ -123,16 +117,18 @@ def request_with_retry(
             sleep(delay)
             continue
 
+        if response.status_code in NEVER_RETRY_STATUS_CODES:
+            response.raise_for_status()
+            return response
+
         if response.status_code not in policy.retryable_status_codes:
             response.raise_for_status()
             return response
 
         if not may_retry or attempt >= policy.max_retries:
             error_message = _response_error_message(response)
-
             logger.error(
-                "HTTP request failed permanently "
-                "status=%s method=%s attempt=%s/%s "
+                "HTTP request failed permanently status=%s method=%s attempt=%s/%s "
                 "error=%s",
                 response.status_code,
                 normalized_method,
@@ -175,14 +171,12 @@ def _response_retry_delay(
         delay = _parse_retry_after(response.headers.get("Retry-After"))
         if delay is not None:
             return delay
-
     if (
         policy.delay_strategy
         in {RetryDelayStrategy.RESPONSE_HINT, RetryDelayStrategy.HYBRID}
         and policy.response_delay_resolver is not None
     ):
         return policy.response_delay_resolver(response)
-
     return None
 
 
@@ -212,7 +206,6 @@ def _parse_retry_after(value: str | None) -> float | None:
         return max(0.0, float(value))
     except ValueError:
         pass
-
     try:
         retry_at = parsedate_to_datetime(value)
     except (TypeError, ValueError, OverflowError):

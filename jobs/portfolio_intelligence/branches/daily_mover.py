@@ -32,7 +32,7 @@ class DailyMoverBranch:
 
         for entity in entities:
             try:
-                bars = context.market_data.get_price_history(
+                bars = context.market_data.get_ohlcv(
                     HistoryRequest(
                         instrument=instrument_reference(entity),
                         period=context.config.history_range,

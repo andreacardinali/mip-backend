@@ -1,6 +1,6 @@
 import logging
 from collections.abc import Callable
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import text
@@ -18,16 +18,31 @@ from jobs.fmp.normalizers import (
 
 logger = logging.getLogger(__name__)
 
+
+def as_utc_datetime(value: date | datetime) -> datetime:
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)
+
+    return datetime.combine(
+        value,
+        datetime.min.time(),
+        tzinfo=UTC,
+    )
+
+
 CATALYST_SQL = text(
     """
-    SELECT sp_upsert_catalyst(
-        p_symbol => :symbol,
-        p_entity_subtype => :entity_subtype,
-        p_entity_date => :entity_date,
-        p_entity_status => :status,
-        p_importance => :importance,
-        p_title => :title,
-        p_source => :source,
+    SELECT public.sp_upsert_catalyst(
+        p_entity_id => CAST(:entity_id AS uuid),
+        p_symbol => CAST(:symbol AS text),
+        p_entity_subtype => CAST(:entity_subtype AS text),
+        p_entity_date => CAST(:entity_date AS timestamptz),
+        p_entity_status => CAST(:status AS text),
+        p_importance => CAST(:importance AS text),
+        p_title => CAST(:title AS text),
+        p_source => CAST(:source AS text),
         p_payload => CAST(:payload AS jsonb)
     )
     """
@@ -62,7 +77,12 @@ def _upsert_catalysts(
             CATALYST_SQL,
             {
                 **row,
-                "payload": json.dumps(row["payload"]),
+                "entity_id": row.get("entity_id"),
+                "entity_date": as_utc_datetime(row["entity_date"]),
+                "payload": json.dumps(
+                    row["payload"],
+                    default=str,
+                ),
             },
         )
 

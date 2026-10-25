@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict oTZZvYuWaEEzbRxhKVCe4eewvSFQ9rS3VUBT0u9loxqoFEKtfuXhiR02ykV6zWc
+\restrict wDwzSyzu43fewJp8B5YoiPc0je5XrdGTbTldaJ68LAA4SyRNLIz856RNTPpBXSG
 
 -- Dumped from database version 18.6 (Debian 18.6-1.pgdg13+2)
 -- Dumped by pg_dump version 18.6 (Debian 18.6-1.pgdg13+2)
@@ -3266,6 +3266,43 @@ CREATE FUNCTION public.sp_get_recent_catalysts(p_entity_ids uuid[], p_days integ
 $$;
 
 
+SET default_tablespace = '';
+
+SET default_table_access_method = heap;
+
+--
+-- Name: scheduler_jobs; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.scheduler_jobs (
+    job_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    job_name character varying(100) NOT NULL,
+    python_module character varying(255) NOT NULL,
+    trigger_type character varying(20) NOT NULL,
+    cron_expression character varying(100),
+    interval_minutes integer,
+    enabled boolean DEFAULT true NOT NULL,
+    created_at timestamp with time zone DEFAULT now(),
+    updated_at timestamp with time zone DEFAULT now(),
+    last_run_at timestamp with time zone,
+    next_run_at timestamp with time zone,
+    job_key character varying(100) NOT NULL
+);
+
+
+--
+-- Name: sp_get_scheduler_job(character varying); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_get_scheduler_job(p_job_key character varying) RETURNS SETOF public.scheduler_jobs
+    LANGUAGE sql STABLE
+    AS $$
+    SELECT sj.*
+    FROM scheduler_jobs sj
+    WHERE sj.job_key = p_job_key;
+$$;
+
+
 --
 -- Name: sp_get_symbol(character varying, integer); Type: FUNCTION; Schema: public; Owner: -
 --
@@ -3543,6 +3580,15 @@ $$;
 
 
 --
+-- Name: sp_get_user_context(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_get_user_context(p_user_id uuid) RETURNS TABLE(user_id uuid, username character varying, email character varying, display_name character varying, is_active boolean, reporting_currency character, roles jsonb)
+    LANGUAGE sql STABLE
+    AS $$ SELECT u.user_id,u.username,u.email,u.display_name,u.is_active,u.reporting_currency,coalesce((SELECT jsonb_agg(r.role_key ORDER BY r.role_key) FROM user_roles ur JOIN roles r USING(role_id) WHERE ur.user_id=u.user_id),'[]') FROM users u WHERE u.user_id=p_user_id $$;
+
+
+--
 -- Name: sp_get_user_for_login(character varying); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -3796,6 +3842,77 @@ $$;
 
 
 --
+-- Name: sp_list_scheduler_job_runs(character varying, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_list_scheduler_job_runs(p_job_key character varying, p_limit integer DEFAULT 20) RETURNS TABLE(job_run_id uuid, job_id uuid, status character varying, started_at timestamp with time zone, completed_at timestamp with time zone, duration_seconds numeric, error_message text, result jsonb)
+    LANGUAGE sql STABLE
+    AS $$
+    SELECT
+        sjr.job_run_id,
+        sjr.job_id,
+        sjr.status,
+        sjr.started_at,
+        sjr.completed_at,
+        CASE
+            WHEN sjr.completed_at IS NULL THEN
+                EXTRACT(EPOCH FROM (now() - sjr.started_at))::numeric
+            ELSE
+                EXTRACT(EPOCH FROM (
+                    sjr.completed_at - sjr.started_at
+                ))::numeric
+        END AS duration_seconds,
+        sjr.error_message,
+        sjr.result
+    FROM public.scheduler_job_runs sjr
+    JOIN public.scheduler_jobs sj
+      ON sj.job_id = sjr.job_id
+    WHERE sj.job_key = p_job_key
+    ORDER BY sjr.started_at DESC
+    LIMIT LEAST(GREATEST(p_limit, 1), 100);
+$$;
+
+
+--
+-- Name: sp_list_scheduler_jobs(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_list_scheduler_jobs() RETURNS TABLE(job_id uuid, job_key character varying, job_name character varying, python_module character varying, trigger_type character varying, cron_expression character varying, interval_minutes integer, enabled boolean, last_run_at timestamp with time zone, next_run_at timestamp with time zone, last_status character varying, last_error text, updated_at timestamp with time zone)
+    LANGUAGE sql STABLE
+    AS $$
+    SELECT
+        sj.job_id,
+        sj.job_key,
+        sj.job_name,
+        sj.python_module,
+        sj.trigger_type,
+        sj.cron_expression,
+        sj.interval_minutes,
+        sj.enabled,
+        latest_run.started_at AS last_run_at,
+        CASE
+            WHEN sj.enabled THEN sj.next_run_at
+            ELSE NULL
+        END AS next_run_at,
+        latest_run.status AS last_status,
+        latest_run.error_message AS last_error,
+        sj.updated_at
+    FROM public.scheduler_jobs sj
+    LEFT JOIN LATERAL (
+        SELECT
+            sjr.started_at,
+            sjr.status,
+            sjr.error_message
+        FROM public.scheduler_job_runs sjr
+        WHERE sjr.job_id = sj.job_id
+        ORDER BY sjr.started_at DESC
+        LIMIT 1
+    ) latest_run ON TRUE
+    ORDER BY sj.job_name;
+$$;
+
+
+--
 -- Name: sp_maintain_llm_queue(integer, integer, integer); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -3971,6 +4088,462 @@ BEGIN
             'PROCESSING notification not found: %',
             p_notification_id;
     END IF;
+END;
+$$;
+
+
+--
+-- Name: sp_market_analysis_finish_scan_run(uuid, character varying, jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_market_analysis_finish_scan_run(p_run_id uuid, p_status character varying, p_summary jsonb DEFAULT '{}'::jsonb) RETURNS boolean
+    LANGUAGE plpgsql
+    AS $$
+DECLARE v_status varchar;
+BEGIN
+    v_status := UPPER(BTRIM(p_status));
+    IF v_status NOT IN ('COMPLETED', 'FAILED') THEN
+        RAISE EXCEPTION 'Unsupported final scan status: %', p_status;
+    END IF;
+    UPDATE public.market_analysis_scan_runs
+    SET status = v_status,
+        summary = COALESCE(p_summary, '{}'::jsonb),
+        finished_at = now()
+    WHERE run_id = p_run_id AND status = 'RUNNING';
+    RETURN FOUND;
+END;
+$$;
+
+
+--
+-- Name: sp_market_analysis_get_universe(character varying); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_market_analysis_get_universe(p_code character varying) RETURNS TABLE(universe_id uuid, code character varying, name character varying, universe_type character varying, config jsonb)
+    LANGUAGE sql STABLE
+    AS $$
+    SELECT mu.universe_id, mu.code, mu.name, mu.universe_type, mu.config
+    FROM public.market_universes mu
+    WHERE UPPER(mu.code) = UPPER(BTRIM(p_code))
+      AND mu.active = true
+    LIMIT 1;
+$$;
+
+
+--
+-- Name: sp_market_analysis_list_universe_members(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_market_analysis_list_universe_members(p_universe_id uuid) RETURNS TABLE(universe_id uuid, instrument_id uuid, entity_id uuid, symbol character varying, exchange character varying, currency_code character, isin character varying)
+    LANGUAGE sql STABLE
+    AS $$
+    SELECT
+        mum.universe_id,
+        i.instrument_id,
+        i.entity_id,
+        i.symbol,
+        i.exchange,
+        i.currency_code,
+        (
+            SELECT id.identity_value
+            FROM public.instrument_identities ii
+            JOIN public.identities id
+              ON id.identity_id = ii.identity_id
+            JOIN public.identity_types it
+              ON it.identity_type_id = id.identity_type_id
+            WHERE ii.instrument_id = i.instrument_id
+              AND it.target_kind = 'INSTRUMENT'
+              AND UPPER(it.code) = 'ISIN'
+            ORDER BY
+                ii.is_primary DESC,
+                ii.verified_at DESC NULLS LAST,
+                ii.created_at DESC,
+                id.identity_id
+            LIMIT 1
+        ) AS isin
+    FROM public.market_universe_members mum
+    JOIN public.instruments i ON i.instrument_id = mum.instrument_id
+    WHERE mum.universe_id = p_universe_id
+      AND mum.valid_to IS NULL
+    ORDER BY i.symbol, i.exchange NULLS LAST, i.instrument_id;
+$$;
+
+
+--
+-- Name: sp_market_analysis_record_scan_failure(uuid, uuid, character varying, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_market_analysis_record_scan_failure(p_run_id uuid, p_instrument_id uuid, p_symbol character varying, p_reason text) RETURNS uuid
+    LANGUAGE plpgsql
+    AS $$
+DECLARE v_failure_id uuid;
+BEGIN
+    INSERT INTO public.market_analysis_scan_failures
+        (run_id, instrument_id, symbol, reason)
+    VALUES
+        (p_run_id, p_instrument_id, BTRIM(p_symbol), BTRIM(p_reason))
+    RETURNING failure_id INTO v_failure_id;
+    RETURN v_failure_id;
+END;
+$$;
+
+
+--
+-- Name: sp_market_analysis_replace_universe_members(uuid, jsonb, timestamp with time zone); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_market_analysis_replace_universe_members(p_universe_id uuid, p_members jsonb, p_effective_at timestamp with time zone) RETURNS jsonb
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_added integer := 0;
+    v_removed integer := 0;
+    v_requested_count integer := 0;
+BEGIN
+    IF p_universe_id IS NULL OR NOT EXISTS (
+        SELECT 1
+        FROM public.market_universes mu
+        WHERE mu.universe_id = p_universe_id
+    ) THEN
+        RAISE EXCEPTION 'Universe not found: %', p_universe_id;
+    END IF;
+    IF p_effective_at IS NULL THEN
+        RAISE EXCEPTION 'p_effective_at is required';
+    END IF;
+    IF p_members IS NULL OR jsonb_typeof(p_members) <> 'array' THEN
+        RAISE EXCEPTION 'p_members must be a JSON array';
+    END IF;
+
+    SELECT COUNT(*)
+    INTO v_requested_count
+    FROM jsonb_array_elements(p_members);
+
+    IF v_requested_count = 0 THEN
+        RAISE EXCEPTION 'Refusing to replace an universe with an empty member set';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM jsonb_array_elements(p_members) item
+        LEFT JOIN public.instruments i
+          ON i.instrument_id = NULLIF(item->>'instrument_id', '')::uuid
+        WHERE i.instrument_id IS NULL
+    ) THEN
+        RAISE EXCEPTION 'p_members contains unknown or missing instrument_id values';
+    END IF;
+
+    UPDATE public.market_universe_members mum
+    SET valid_to = p_effective_at
+    WHERE mum.universe_id = p_universe_id
+      AND mum.valid_to IS NULL
+      AND NOT EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements(p_members) item
+          WHERE (item->>'instrument_id')::uuid = mum.instrument_id
+      );
+    GET DIAGNOSTICS v_removed = ROW_COUNT;
+
+    INSERT INTO public.market_universe_members
+    (
+        universe_id,
+        instrument_id,
+        valid_from,
+        source_reference,
+        raw_payload
+    )
+    SELECT
+        p_universe_id,
+        (item->>'instrument_id')::uuid,
+        p_effective_at,
+        NULLIF(BTRIM(item->>'source_reference'), ''),
+        COALESCE(item->'raw_payload', '{}'::jsonb)
+    FROM jsonb_array_elements(p_members) item
+    WHERE NOT EXISTS (
+        SELECT 1
+        FROM public.market_universe_members existing
+        WHERE existing.universe_id = p_universe_id
+          AND existing.instrument_id = (item->>'instrument_id')::uuid
+          AND existing.valid_to IS NULL
+    );
+    GET DIAGNOSTICS v_added = ROW_COUNT;
+
+    RETURN jsonb_build_object(
+        'requested', v_requested_count,
+        'added', v_added,
+        'removed', v_removed
+    );
+END;
+$$;
+
+
+--
+-- Name: sp_market_analysis_resolve_universe_symbols(jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_market_analysis_resolve_universe_symbols(p_symbols jsonb) RETURNS TABLE(requested_symbol character varying, instrument_id uuid, entity_id uuid, symbol character varying, exchange character varying)
+    LANGUAGE plpgsql STABLE
+    AS $$
+BEGIN
+    IF p_symbols IS NULL OR jsonb_typeof(p_symbols) <> 'array' THEN
+        RAISE EXCEPTION 'p_symbols must be a JSON array';
+    END IF;
+
+    RETURN QUERY
+    WITH requested AS
+    (
+        SELECT DISTINCT
+            UPPER(REPLACE(BTRIM(value #>> '{}'), '.', '-'))::varchar AS requested_symbol
+        FROM jsonb_array_elements(p_symbols)
+        WHERE NULLIF(BTRIM(value #>> '{}'), '') IS NOT NULL
+    ),
+    ranked AS
+    (
+        SELECT
+            r.requested_symbol,
+            i.instrument_id,
+            i.entity_id,
+            i.symbol,
+            i.exchange,
+            ROW_NUMBER() OVER
+            (
+                PARTITION BY r.requested_symbol
+                ORDER BY
+                    CASE WHEN UPPER(i.symbol) = r.requested_symbol THEN 0 ELSE 1 END,
+                    CASE WHEN i.exchange IN ('XNAS', 'XNYS') THEN 0 ELSE 1 END,
+                    i.instrument_id
+            ) AS position
+        FROM requested r
+        JOIN public.instruments i
+          ON UPPER(REPLACE(i.symbol, '.', '-')) = r.requested_symbol
+    )
+    SELECT
+        ranked.requested_symbol,
+        ranked.instrument_id,
+        ranked.entity_id,
+        ranked.symbol,
+        ranked.exchange
+    FROM ranked
+    WHERE ranked.position = 1
+    ORDER BY ranked.requested_symbol;
+END;
+$$;
+
+
+--
+-- Name: sp_market_analysis_start_scan_run(uuid, character varying, jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_market_analysis_start_scan_run(p_universe_id uuid, p_algorithm_version character varying, p_config jsonb DEFAULT '{}'::jsonb) RETURNS uuid
+    LANGUAGE plpgsql
+    AS $$
+DECLARE v_run_id uuid;
+BEGIN
+    INSERT INTO public.market_analysis_scan_runs
+        (universe_id, algorithm_version, config)
+    VALUES
+        (p_universe_id, BTRIM(p_algorithm_version), COALESCE(p_config, '{}'::jsonb))
+    RETURNING run_id INTO v_run_id;
+    RETURN v_run_id;
+END;
+$$;
+
+
+--
+-- Name: sp_market_analysis_update_signal_status(uuid, character varying, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_market_analysis_update_signal_status(p_signal_id uuid, p_status character varying, p_close_reason text DEFAULT NULL::text) RETURNS boolean
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_status varchar;
+BEGIN
+    v_status := UPPER(BTRIM(p_status));
+    IF v_status NOT IN ('CANDIDATE', 'CONFIRMED', 'INVALIDATED', 'EXPIRED', 'CLOSED') THEN
+        RAISE EXCEPTION 'Unsupported signal status: %', p_status;
+    END IF;
+
+    UPDATE public.trading_signals
+    SET
+        status = v_status,
+        confirmed_at = CASE
+            WHEN v_status = 'CONFIRMED' AND confirmed_at IS NULL THEN now()
+            ELSE confirmed_at
+        END,
+        closed_at = CASE
+            WHEN v_status IN ('INVALIDATED', 'EXPIRED', 'CLOSED') THEN now()
+            ELSE NULL
+        END,
+        close_reason = CASE
+            WHEN v_status IN ('INVALIDATED', 'EXPIRED', 'CLOSED') THEN p_close_reason
+            ELSE NULL
+        END
+    WHERE signal_id = p_signal_id;
+
+    RETURN FOUND;
+END;
+$$;
+
+
+--
+-- Name: sp_market_analysis_upsert_signal(jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_market_analysis_upsert_signal(p_payload jsonb) RETURNS uuid
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_signal_id uuid;
+BEGIN
+    IF p_payload IS NULL OR jsonb_typeof(p_payload) <> 'object' THEN
+        RAISE EXCEPTION 'p_payload must be a JSON object';
+    END IF;
+
+    INSERT INTO public.trading_signals
+    (
+        instrument_id,
+        universe_id,
+        strategy_code,
+        timeframe,
+        direction,
+        signal_type,
+        trend,
+        status,
+        confidence,
+        technical_score,
+        financial_score,
+        catalyst_score,
+        llm_score,
+        composite_score,
+        reference_price,
+        invalidation_price,
+        target_price,
+        observed_at,
+        evidence,
+        llm_analysis,
+        algorithm_version,
+        prompt_version
+    )
+    VALUES
+    (
+        (p_payload->>'instrument_id')::uuid,
+        NULLIF(p_payload->>'universe_id', '')::uuid,
+        UPPER(BTRIM(p_payload->>'strategy_code')),
+        UPPER(BTRIM(p_payload->>'timeframe')),
+        UPPER(BTRIM(p_payload->>'direction')),
+        UPPER(BTRIM(p_payload->>'signal_type')),
+        UPPER(BTRIM(p_payload->>'trend')),
+        'CANDIDATE',
+        (p_payload->>'confidence')::numeric,
+        NULLIF(p_payload->'scores'->>'technical', '')::numeric,
+        NULLIF(p_payload->'scores'->>'financial', '')::numeric,
+        NULLIF(p_payload->'scores'->>'catalyst', '')::numeric,
+        NULLIF(p_payload->'scores'->>'llm', '')::numeric,
+        NULLIF(p_payload->'scores'->>'composite', '')::numeric,
+        (p_payload->>'reference_price')::numeric,
+        NULLIF(p_payload->>'invalidation_price', '')::numeric,
+        NULLIF(p_payload->>'target_price', '')::numeric,
+        (p_payload->>'observed_at')::timestamptz,
+        COALESCE(p_payload->'evidence', '{}'::jsonb)
+            || jsonb_build_object('reasons', COALESCE(p_payload->'reasons', '[]'::jsonb)),
+        p_payload->'llm_analysis',
+        BTRIM(p_payload->>'algorithm_version'),
+        NULLIF(BTRIM(p_payload->>'prompt_version'), '')
+    )
+    ON CONFLICT
+    (
+        instrument_id,
+        strategy_code,
+        timeframe,
+        direction,
+        algorithm_version
+    )
+    WHERE status IN ('CANDIDATE', 'CONFIRMED')
+    DO UPDATE SET
+        universe_id = EXCLUDED.universe_id,
+        signal_type = EXCLUDED.signal_type,
+        trend = EXCLUDED.trend,
+        confidence = EXCLUDED.confidence,
+        technical_score = EXCLUDED.technical_score,
+        financial_score = EXCLUDED.financial_score,
+        catalyst_score = EXCLUDED.catalyst_score,
+        llm_score = EXCLUDED.llm_score,
+        composite_score = EXCLUDED.composite_score,
+        reference_price = EXCLUDED.reference_price,
+        invalidation_price = EXCLUDED.invalidation_price,
+        target_price = EXCLUDED.target_price,
+        observed_at = EXCLUDED.observed_at,
+        evidence = EXCLUDED.evidence,
+        llm_analysis = EXCLUDED.llm_analysis,
+        prompt_version = EXCLUDED.prompt_version
+    RETURNING signal_id INTO v_signal_id;
+
+    RETURN v_signal_id;
+END;
+$$;
+
+
+--
+-- Name: sp_market_analysis_upsert_universe(character varying, character varying, character varying, character varying, boolean, jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_market_analysis_upsert_universe(p_code character varying, p_name character varying, p_universe_type character varying, p_source_system_code character varying DEFAULT NULL::character varying, p_active boolean DEFAULT true, p_config jsonb DEFAULT '{}'::jsonb) RETURNS uuid
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_universe_id uuid;
+    v_source_system_id uuid;
+BEGIN
+    IF NULLIF(BTRIM(p_code), '') IS NULL THEN
+        RAISE EXCEPTION 'p_code cannot be empty';
+    END IF;
+    IF NULLIF(BTRIM(p_name), '') IS NULL THEN
+        RAISE EXCEPTION 'p_name cannot be empty';
+    END IF;
+    IF NULLIF(BTRIM(p_universe_type), '') IS NULL THEN
+        RAISE EXCEPTION 'p_universe_type cannot be empty';
+    END IF;
+
+    IF NULLIF(BTRIM(p_source_system_code), '') IS NOT NULL THEN
+        SELECT es.system_id
+        INTO v_source_system_id
+        FROM public.external_systems es
+        WHERE UPPER(es.code) = UPPER(BTRIM(p_source_system_code))
+          AND es.active = true;
+
+        IF v_source_system_id IS NULL THEN
+            RAISE EXCEPTION 'Active external system not found: %', p_source_system_code;
+        END IF;
+    END IF;
+
+    INSERT INTO public.market_universes
+    (
+        code,
+        name,
+        universe_type,
+        source_system_id,
+        active,
+        config
+    )
+    VALUES
+    (
+        UPPER(BTRIM(p_code)),
+        BTRIM(p_name),
+        UPPER(BTRIM(p_universe_type)),
+        v_source_system_id,
+        p_active,
+        COALESCE(p_config, '{}'::jsonb)
+    )
+    ON CONFLICT (UPPER(BTRIM(code)))
+    DO UPDATE SET
+        name = EXCLUDED.name,
+        universe_type = EXCLUDED.universe_type,
+        source_system_id = EXCLUDED.source_system_id,
+        active = EXCLUDED.active,
+        config = EXCLUDED.config
+    RETURNING universe_id INTO v_universe_id;
+
+    RETURN v_universe_id;
 END;
 $$;
 
@@ -4876,6 +5449,38 @@ $$;
 
 
 --
+-- Name: sp_record_system_audit(uuid, character varying, character varying, character varying, jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_record_system_audit(p_actor_user_id uuid, p_action character varying, p_resource_type character varying, p_resource_id character varying, p_new_value jsonb) RETURNS uuid
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_audit_id uuid;
+BEGIN
+    INSERT INTO system_audit_log (
+        actor_user_id,
+        action,
+        resource_type,
+        resource_id,
+        new_value
+    )
+    VALUES (
+        p_actor_user_id,
+        upper(trim(p_action)),
+        upper(trim(p_resource_type)),
+        p_resource_id,
+        p_new_value
+    )
+    RETURNING audit_id
+    INTO v_audit_id;
+
+    RETURN v_audit_id;
+END;
+$$;
+
+
+--
 -- Name: sp_refresh_entity_from_profile(uuid, uuid, jsonb); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -5329,6 +5934,52 @@ $$;
 
 
 --
+-- Name: sp_scheduler_fail_stale_runs(interval); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_scheduler_fail_stale_runs(p_stale_after interval DEFAULT '00:30:00'::interval) RETURNS integer
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_updated integer;
+BEGIN
+    UPDATE public.scheduler_job_runs
+    SET
+        status = 'FAILED',
+        completed_at = now(),
+        error_message = COALESCE(
+            error_message,
+            'Run interrotto o processo non più disponibile'
+        )
+    WHERE status = 'RUNNING'
+      AND completed_at IS NULL
+      AND started_at < now() - p_stale_after;
+
+    GET DIAGNOSTICS v_updated = ROW_COUNT;
+
+    RETURN v_updated;
+END;
+$$;
+
+
+--
+-- Name: sp_scheduler_update_next_run(uuid, timestamp with time zone); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_scheduler_update_next_run(p_job_id uuid, p_next_run_at timestamp with time zone) RETURNS boolean
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    UPDATE public.scheduler_jobs
+    SET next_run_at = p_next_run_at
+    WHERE job_id = p_job_id;
+
+    RETURN FOUND;
+END;
+$$;
+
+
+--
 -- Name: sp_search_assets(character varying, integer, integer); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -5513,6 +6164,15 @@ $$;
 
 
 --
+-- Name: sp_set_scheduler_job_enabled(uuid, character varying, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_set_scheduler_job_enabled(p_actor uuid, p_key character varying, p_enabled boolean) RETURNS SETOF public.scheduler_jobs
+    LANGUAGE plpgsql
+    AS $$ BEGIN RETURN QUERY UPDATE scheduler_jobs SET enabled=p_enabled WHERE job_key=p_key RETURNING *; IF NOT FOUND THEN RAISE EXCEPTION 'Job not found: %',p_key; END IF; INSERT INTO system_audit_log(actor_user_id,action,resource_type,resource_id,new_value) VALUES(p_actor,CASE WHEN p_enabled THEN 'SCHEDULER_JOB_ENABLED' ELSE 'SCHEDULER_JOB_DISABLED' END,'SCHEDULER_JOB',p_key,jsonb_build_object('enabled',p_enabled)); END $$;
+
+
+--
 -- Name: sp_set_user_notification_source_enabled(uuid, uuid, boolean); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -5577,6 +6237,15 @@ BEGIN
     END IF;
 END;
 $$;
+
+
+--
+-- Name: sp_update_scheduler_job(uuid, character varying, character varying, character varying, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_update_scheduler_job(p_actor uuid, p_key character varying, p_type character varying, p_cron character varying, p_minutes integer) RETURNS SETOF public.scheduler_jobs
+    LANGUAGE plpgsql
+    AS $$ DECLARE v varchar:=lower(trim(p_type)); BEGIN IF v NOT IN('cron','interval') OR (v='cron' AND nullif(trim(p_cron),'') IS NULL) OR (v='interval' AND coalesce(p_minutes,0)<=0) THEN RAISE EXCEPTION 'Invalid schedule'; END IF; RETURN QUERY UPDATE scheduler_jobs SET trigger_type=v,cron_expression=CASE WHEN v='cron' THEN p_cron END,interval_minutes=CASE WHEN v='interval' THEN p_minutes END WHERE job_key=p_key RETURNING *; INSERT INTO system_audit_log(actor_user_id,action,resource_type,resource_id,new_value) VALUES(p_actor,'SCHEDULER_JOB_SCHEDULE_CHANGED','SCHEDULER_JOB',p_key,jsonb_build_object('trigger_type',v,'cron_expression',p_cron,'interval_minutes',p_minutes)); END $$;
 
 
 --
@@ -6932,10 +7601,6 @@ END;
 $$;
 
 
-SET default_tablespace = '';
-
-SET default_table_access_method = heap;
-
 --
 -- Name: api_sources; Type: TABLE; Schema: public; Owner: -
 --
@@ -7450,6 +8115,40 @@ CREATE TABLE public.llm_request_queue (
 
 
 --
+-- Name: market_analysis_scan_failures; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.market_analysis_scan_failures (
+    failure_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    run_id uuid NOT NULL,
+    instrument_id uuid NOT NULL,
+    symbol character varying(50) NOT NULL,
+    reason text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: market_analysis_scan_runs; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.market_analysis_scan_runs (
+    run_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    universe_id uuid NOT NULL,
+    status character varying(20) DEFAULT 'RUNNING'::character varying NOT NULL,
+    algorithm_version character varying(100) NOT NULL,
+    config jsonb DEFAULT '{}'::jsonb NOT NULL,
+    summary jsonb DEFAULT '{}'::jsonb NOT NULL,
+    started_at timestamp with time zone DEFAULT now() NOT NULL,
+    finished_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ck_market_analysis_scan_runs_status CHECK (((status)::text = ANY ((ARRAY['RUNNING'::character varying, 'COMPLETED'::character varying, 'FAILED'::character varying])::text[])))
+);
+
+
+--
 -- Name: market_price_refresh_queue; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -7481,6 +8180,43 @@ CREATE TABLE public.market_search_cache (
     cache_key character varying(255) NOT NULL,
     payload jsonb NOT NULL,
     cached_at timestamp with time zone DEFAULT now() CONSTRAINT market_search_cache_created_at_not_null NOT NULL
+);
+
+
+--
+-- Name: market_universe_members; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.market_universe_members (
+    universe_member_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    universe_id uuid NOT NULL,
+    instrument_id uuid NOT NULL,
+    valid_from timestamp with time zone NOT NULL,
+    valid_to timestamp with time zone,
+    source_reference character varying(255),
+    raw_payload jsonb DEFAULT '{}'::jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ck_market_universe_members_validity CHECK (((valid_to IS NULL) OR (valid_to > valid_from)))
+);
+
+
+--
+-- Name: market_universes; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.market_universes (
+    universe_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    code character varying(100) NOT NULL,
+    name character varying(255) NOT NULL,
+    universe_type character varying(50) NOT NULL,
+    source_system_id uuid,
+    active boolean DEFAULT true NOT NULL,
+    config jsonb DEFAULT '{}'::jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ck_market_universes_code CHECK ((NULLIF(btrim((code)::text), ''::text) IS NOT NULL)),
+    CONSTRAINT ck_market_universes_name CHECK ((NULLIF(btrim((name)::text), ''::text) IS NOT NULL))
 );
 
 
@@ -7730,6 +8466,19 @@ CREATE TABLE public.price_history (
 
 
 --
+-- Name: roles; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.roles (
+    role_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    role_key character varying(50) NOT NULL,
+    role_name character varying(100) NOT NULL,
+    created_at timestamp with time zone DEFAULT now(),
+    updated_at timestamp with time zone DEFAULT now()
+);
+
+
+--
 -- Name: scheduler_job_runs; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -7741,26 +8490,6 @@ CREATE TABLE public.scheduler_job_runs (
     status character varying(20) NOT NULL,
     error_message text,
     result jsonb
-);
-
-
---
--- Name: scheduler_jobs; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.scheduler_jobs (
-    job_id uuid DEFAULT gen_random_uuid() NOT NULL,
-    job_name character varying(100) NOT NULL,
-    python_module character varying(255) NOT NULL,
-    trigger_type character varying(20) NOT NULL,
-    cron_expression character varying(100),
-    interval_minutes integer,
-    enabled boolean DEFAULT true NOT NULL,
-    created_at timestamp with time zone DEFAULT now(),
-    updated_at timestamp with time zone DEFAULT now(),
-    last_run_at timestamp with time zone,
-    next_run_at timestamp with time zone,
-    job_key character varying(100) NOT NULL
 );
 
 
@@ -7893,6 +8622,22 @@ CREATE TABLE public.sync_mapping (
 
 
 --
+-- Name: system_audit_log; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.system_audit_log (
+    audit_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    actor_user_id uuid,
+    action character varying(100) NOT NULL,
+    resource_type character varying(100) NOT NULL,
+    resource_id character varying(255),
+    old_value jsonb,
+    new_value jsonb,
+    created_at timestamp with time zone DEFAULT now()
+);
+
+
+--
 -- Name: system_jobs; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -7922,6 +8667,58 @@ CREATE TABLE public.tags (
     tag_id uuid DEFAULT gen_random_uuid() NOT NULL,
     name character varying(100) NOT NULL,
     category character varying(50)
+);
+
+
+--
+-- Name: trading_signals; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.trading_signals (
+    signal_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    instrument_id uuid NOT NULL,
+    universe_id uuid,
+    strategy_code character varying(100) NOT NULL,
+    timeframe character varying(20) NOT NULL,
+    direction character varying(10) NOT NULL,
+    signal_type character varying(20) NOT NULL,
+    trend character varying(30) NOT NULL,
+    status character varying(20) DEFAULT 'CANDIDATE'::character varying NOT NULL,
+    confidence numeric(7,6) NOT NULL,
+    technical_score numeric(7,3),
+    financial_score numeric(7,3),
+    catalyst_score numeric(7,3),
+    llm_score numeric(7,3),
+    composite_score numeric(7,3),
+    reference_price numeric(20,8) NOT NULL,
+    invalidation_price numeric(20,8),
+    target_price numeric(20,8),
+    observed_at timestamp with time zone NOT NULL,
+    confirmed_at timestamp with time zone,
+    expires_at timestamp with time zone,
+    closed_at timestamp with time zone,
+    close_reason text,
+    evidence jsonb DEFAULT '{}'::jsonb NOT NULL,
+    llm_analysis jsonb,
+    algorithm_version character varying(100) NOT NULL,
+    prompt_version character varying(100),
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ck_trading_signals_confidence CHECK (((confidence >= (0)::numeric) AND (confidence <= (1)::numeric))),
+    CONSTRAINT ck_trading_signals_direction CHECK (((direction)::text = ANY ((ARRAY['LONG'::character varying, 'SHORT'::character varying])::text[]))),
+    CONSTRAINT ck_trading_signals_scores CHECK ((((technical_score IS NULL) OR ((technical_score >= (0)::numeric) AND (technical_score <= (100)::numeric))) AND ((financial_score IS NULL) OR ((financial_score >= (0)::numeric) AND (financial_score <= (100)::numeric))) AND ((catalyst_score IS NULL) OR ((catalyst_score >= (0)::numeric) AND (catalyst_score <= (100)::numeric))) AND ((llm_score IS NULL) OR ((llm_score >= (0)::numeric) AND (llm_score <= (100)::numeric))) AND ((composite_score IS NULL) OR ((composite_score >= (0)::numeric) AND (composite_score <= (100)::numeric))))),
+    CONSTRAINT ck_trading_signals_status CHECK (((status)::text = ANY ((ARRAY['CANDIDATE'::character varying, 'CONFIRMED'::character varying, 'INVALIDATED'::character varying, 'EXPIRED'::character varying, 'CLOSED'::character varying])::text[])))
+);
+
+
+--
+-- Name: user_roles; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.user_roles (
+    user_id uuid NOT NULL,
+    role_id uuid NOT NULL,
+    created_at timestamp with time zone DEFAULT now()
 );
 
 
@@ -8362,6 +9159,22 @@ ALTER TABLE ONLY public.llm_request_queue
 
 
 --
+-- Name: market_analysis_scan_failures market_analysis_scan_failures_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.market_analysis_scan_failures
+    ADD CONSTRAINT market_analysis_scan_failures_pkey PRIMARY KEY (failure_id);
+
+
+--
+-- Name: market_analysis_scan_runs market_analysis_scan_runs_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.market_analysis_scan_runs
+    ADD CONSTRAINT market_analysis_scan_runs_pkey PRIMARY KEY (run_id);
+
+
+--
 -- Name: market_price_refresh_queue market_price_refresh_queue_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -8375,6 +9188,22 @@ ALTER TABLE ONLY public.market_price_refresh_queue
 
 ALTER TABLE ONLY public.market_search_cache
     ADD CONSTRAINT market_search_cache_pkey PRIMARY KEY (cache_key);
+
+
+--
+-- Name: market_universe_members market_universe_members_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.market_universe_members
+    ADD CONSTRAINT market_universe_members_pkey PRIMARY KEY (universe_member_id);
+
+
+--
+-- Name: market_universes market_universes_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.market_universes
+    ADD CONSTRAINT market_universes_pkey PRIMARY KEY (universe_id);
 
 
 --
@@ -8546,6 +9375,22 @@ ALTER TABLE ONLY public.price_history
 
 
 --
+-- Name: roles roles_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.roles
+    ADD CONSTRAINT roles_pkey PRIMARY KEY (role_id);
+
+
+--
+-- Name: roles roles_role_key_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.roles
+    ADD CONSTRAINT roles_role_key_key UNIQUE (role_key);
+
+
+--
 -- Name: scheduler_job_runs scheduler_job_runs_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -8658,6 +9503,14 @@ ALTER TABLE ONLY public.sync_mapping
 
 
 --
+-- Name: system_audit_log system_audit_log_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.system_audit_log
+    ADD CONSTRAINT system_audit_log_pkey PRIMARY KEY (audit_id);
+
+
+--
 -- Name: system_jobs system_jobs_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -8690,6 +9543,14 @@ ALTER TABLE ONLY public.tags
 
 
 --
+-- Name: trading_signals trading_signals_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.trading_signals
+    ADD CONSTRAINT trading_signals_pkey PRIMARY KEY (signal_id);
+
+
+--
 -- Name: identities uq_identities_type_value; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -8719,6 +9580,14 @@ ALTER TABLE ONLY public.users
 
 ALTER TABLE ONLY public.users
     ADD CONSTRAINT uq_users_username UNIQUE (username);
+
+
+--
+-- Name: user_roles user_roles_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_roles
+    ADD CONSTRAINT user_roles_pkey PRIMARY KEY (user_id, role_id);
 
 
 --
@@ -8964,10 +9833,24 @@ CREATE INDEX ix_llm_request_queue_cleanup ON public.llm_request_queue USING btre
 
 
 --
+-- Name: ix_market_analysis_scan_runs_universe_started; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_market_analysis_scan_runs_universe_started ON public.market_analysis_scan_runs USING btree (universe_id, started_at DESC);
+
+
+--
 -- Name: ix_market_price_refresh_due; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE INDEX ix_market_price_refresh_due ON public.market_price_refresh_queue USING btree (status, next_attempt_at) WHERE ((status)::text = ANY ((ARRAY['PENDING'::character varying, 'RETRY'::character varying])::text[]));
+
+
+--
+-- Name: ix_market_universe_members_history; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_market_universe_members_history ON public.market_universe_members USING btree (universe_id, valid_from DESC, valid_to);
 
 
 --
@@ -9080,6 +9963,13 @@ CREATE INDEX ix_sync_mapping_external_lookup ON public.sync_mapping USING btree 
 --
 
 CREATE INDEX ix_sync_mapping_internal_lookup ON public.sync_mapping USING btree (internal_type, internal_id) WHERE (internal_id IS NOT NULL);
+
+
+--
+-- Name: ix_trading_signals_status_observed; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_trading_signals_status_observed ON public.trading_signals USING btree (status, observed_at DESC);
 
 
 --
@@ -9237,6 +10127,20 @@ COMMENT ON INDEX public.uq_instruments_normalized_listing IS 'Prevents duplicate
 
 
 --
+-- Name: uq_market_universe_members_active; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_market_universe_members_active ON public.market_universe_members USING btree (universe_id, instrument_id) WHERE (valid_to IS NULL);
+
+
+--
+-- Name: uq_market_universes_code; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_market_universes_code ON public.market_universes USING btree (upper(btrim((code)::text)));
+
+
+--
 -- Name: uq_news_entity; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -9283,6 +10187,13 @@ CREATE UNIQUE INDEX uq_portfolio_snapshot ON public.portfolio_snapshots USING bt
 --
 
 CREATE UNIQUE INDEX uq_position ON public.positions USING btree (portfolio_id, instrument_id);
+
+
+--
+-- Name: uq_trading_signals_active; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_trading_signals_active ON public.trading_signals USING btree (instrument_id, strategy_code, timeframe, direction, algorithm_version) WHERE ((status)::text = ANY ((ARRAY['CANDIDATE'::character varying, 'CONFIRMED'::character varying])::text[]));
 
 
 --
@@ -9405,6 +10316,62 @@ CREATE TRIGGER trg_llm_request_queue_updated_at BEFORE INSERT OR UPDATE ON publi
 
 
 --
+-- Name: market_analysis_scan_failures trg_market_analysis_scan_failures_created_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_market_analysis_scan_failures_created_at BEFORE INSERT ON public.market_analysis_scan_failures FOR EACH ROW EXECUTE FUNCTION public.trg_set_created_at();
+
+
+--
+-- Name: market_analysis_scan_failures trg_market_analysis_scan_failures_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_market_analysis_scan_failures_updated_at BEFORE INSERT OR UPDATE ON public.market_analysis_scan_failures FOR EACH ROW EXECUTE FUNCTION public.trg_set_updated_at();
+
+
+--
+-- Name: market_analysis_scan_runs trg_market_analysis_scan_runs_created_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_market_analysis_scan_runs_created_at BEFORE INSERT ON public.market_analysis_scan_runs FOR EACH ROW EXECUTE FUNCTION public.trg_set_created_at();
+
+
+--
+-- Name: market_analysis_scan_runs trg_market_analysis_scan_runs_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_market_analysis_scan_runs_updated_at BEFORE INSERT OR UPDATE ON public.market_analysis_scan_runs FOR EACH ROW EXECUTE FUNCTION public.trg_set_updated_at();
+
+
+--
+-- Name: market_universe_members trg_market_universe_members_created_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_market_universe_members_created_at BEFORE INSERT ON public.market_universe_members FOR EACH ROW EXECUTE FUNCTION public.trg_set_created_at();
+
+
+--
+-- Name: market_universe_members trg_market_universe_members_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_market_universe_members_updated_at BEFORE INSERT OR UPDATE ON public.market_universe_members FOR EACH ROW EXECUTE FUNCTION public.trg_set_updated_at();
+
+
+--
+-- Name: market_universes trg_market_universes_created_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_market_universes_created_at BEFORE INSERT ON public.market_universes FOR EACH ROW EXECUTE FUNCTION public.trg_set_created_at();
+
+
+--
+-- Name: market_universes trg_market_universes_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_market_universes_updated_at BEFORE INSERT OR UPDATE ON public.market_universes FOR EACH ROW EXECUTE FUNCTION public.trg_set_updated_at();
+
+
+--
 -- Name: news_clusters trg_news_clusters_created_at; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -9486,6 +10453,20 @@ CREATE TRIGGER trg_scheduler_jobs_updated_at BEFORE INSERT OR UPDATE ON public.s
 --
 
 CREATE TRIGGER trg_signal_history_created_at BEFORE INSERT ON public.signal_history FOR EACH ROW EXECUTE FUNCTION public.trg_set_created_at();
+
+
+--
+-- Name: trading_signals trg_trading_signals_created_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_trading_signals_created_at BEFORE INSERT ON public.trading_signals FOR EACH ROW EXECUTE FUNCTION public.trg_set_created_at();
+
+
+--
+-- Name: trading_signals trg_trading_signals_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_trading_signals_updated_at BEFORE INSERT OR UPDATE ON public.trading_signals FOR EACH ROW EXECUTE FUNCTION public.trg_set_updated_at();
 
 
 --
@@ -9812,11 +10793,59 @@ ALTER TABLE ONLY public.instruments
 
 
 --
+-- Name: market_analysis_scan_failures market_analysis_scan_failures_instrument_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.market_analysis_scan_failures
+    ADD CONSTRAINT market_analysis_scan_failures_instrument_id_fkey FOREIGN KEY (instrument_id) REFERENCES public.instruments(instrument_id);
+
+
+--
+-- Name: market_analysis_scan_failures market_analysis_scan_failures_run_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.market_analysis_scan_failures
+    ADD CONSTRAINT market_analysis_scan_failures_run_id_fkey FOREIGN KEY (run_id) REFERENCES public.market_analysis_scan_runs(run_id) ON DELETE CASCADE;
+
+
+--
+-- Name: market_analysis_scan_runs market_analysis_scan_runs_universe_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.market_analysis_scan_runs
+    ADD CONSTRAINT market_analysis_scan_runs_universe_id_fkey FOREIGN KEY (universe_id) REFERENCES public.market_universes(universe_id);
+
+
+--
 -- Name: market_price_refresh_queue market_price_refresh_queue_instrument_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.market_price_refresh_queue
     ADD CONSTRAINT market_price_refresh_queue_instrument_id_fkey FOREIGN KEY (instrument_id) REFERENCES public.instruments(instrument_id) ON DELETE CASCADE;
+
+
+--
+-- Name: market_universe_members market_universe_members_instrument_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.market_universe_members
+    ADD CONSTRAINT market_universe_members_instrument_id_fkey FOREIGN KEY (instrument_id) REFERENCES public.instruments(instrument_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: market_universe_members market_universe_members_universe_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.market_universe_members
+    ADD CONSTRAINT market_universe_members_universe_id_fkey FOREIGN KEY (universe_id) REFERENCES public.market_universes(universe_id) ON DELETE CASCADE;
+
+
+--
+-- Name: market_universes market_universes_source_system_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.market_universes
+    ADD CONSTRAINT market_universes_source_system_id_fkey FOREIGN KEY (source_system_id) REFERENCES public.external_systems(system_id);
 
 
 --
@@ -10060,6 +11089,46 @@ ALTER TABLE ONLY public.sync_mapping
 
 
 --
+-- Name: system_audit_log system_audit_log_actor_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.system_audit_log
+    ADD CONSTRAINT system_audit_log_actor_user_id_fkey FOREIGN KEY (actor_user_id) REFERENCES public.users(user_id) ON DELETE SET NULL;
+
+
+--
+-- Name: trading_signals trading_signals_instrument_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.trading_signals
+    ADD CONSTRAINT trading_signals_instrument_id_fkey FOREIGN KEY (instrument_id) REFERENCES public.instruments(instrument_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: trading_signals trading_signals_universe_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.trading_signals
+    ADD CONSTRAINT trading_signals_universe_id_fkey FOREIGN KEY (universe_id) REFERENCES public.market_universes(universe_id) ON DELETE SET NULL;
+
+
+--
+-- Name: user_roles user_roles_role_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_roles
+    ADD CONSTRAINT user_roles_role_id_fkey FOREIGN KEY (role_id) REFERENCES public.roles(role_id) ON DELETE CASCADE;
+
+
+--
+-- Name: user_roles user_roles_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_roles
+    ADD CONSTRAINT user_roles_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(user_id) ON DELETE CASCADE;
+
+
+--
 -- Name: user_sources user_sources_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -10095,5 +11164,5 @@ ALTER TABLE ONLY public.watchlists
 -- PostgreSQL database dump complete
 --
 
-\unrestrict oTZZvYuWaEEzbRxhKVCe4eewvSFQ9rS3VUBT0u9loxqoFEKtfuXhiR02ykV6zWc
+\unrestrict wDwzSyzu43fewJp8B5YoiPc0je5XrdGTbTldaJ68LAA4SyRNLIz856RNTPpBXSG
 

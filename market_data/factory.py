@@ -6,6 +6,7 @@ from market_data.providers.eulerpool import EulerpoolProvider
 from market_data.providers.fmp import FMPProvider
 from market_data.providers.ghostfolio import GhostfolioProvider
 from market_data.providers.openfigi import OpenFigiProvider
+from market_data.providers.wikipedia import WikipediaProvider
 from market_data.providers.yahoo import YahooProvider
 from market_data.registry import ProviderRegistry
 from market_data.service import MarketDataService
@@ -35,6 +36,15 @@ def create_market_data_service(config=None):
     config = config or MarketDataConfig.from_settings(settings)
     retry = _retry_policy(config)
     providers = [
+        WikipediaProvider(
+            user_agent=str(
+                settings.get(
+                    "WIKIPEDIA_USER_AGENT",
+                    "MIP/1.0 (https://github.com/andreacardinali/mip-backend)",
+                )
+            ),
+            timeout=float(settings.get("WIKIPEDIA_HTTP_TIMEOUT", config.http_timeout)),
+        ),
         YahooProvider(timeout=config.http_timeout, retry_policy=retry),
         EcbProvider(
             timeout=float(

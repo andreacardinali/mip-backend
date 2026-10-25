@@ -1,3 +1,6 @@
+import logging
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
@@ -15,10 +18,52 @@ from routers.notification_preferences import router as notification_preferences_
 from routers.portfolios import router as portfolios_router
 from routers.positions import router as positions_router
 from routers.search import router as search_router
+from routers.system_admin import router as system_admin_router
 from routers.watchlist_items import router as watchlist_items_router
 from routers.watchlists import router as watchlists_router
 
-app = FastAPI(title="Market Intelligence Platform")
+logger = logging.getLogger(__name__)
+
+
+def recover_stale_scheduler_runs() -> int:
+    with engine.begin() as connection:
+        recovered = connection.execute(
+            text(
+                """
+                SELECT public.sp_scheduler_fail_stale_runs(
+                    CAST(:stale_after AS interval)
+                )
+                """
+            ),
+            {
+                "stale_after": "30 minutes",
+            },
+        ).scalar_one()
+
+    logger.info(
+        "Recovered stale scheduler runs count=%s",
+        recovered,
+    )
+
+    return int(recovered)
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    try:
+        recover_stale_scheduler_runs()
+    except Exception:
+        logger.exception(
+            "Unable to recover stale scheduler runs " "during backend startup"
+        )
+
+    yield
+
+
+app = FastAPI(
+    title="Market Intelligence Platform",
+    lifespan=lifespan,
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -53,6 +98,11 @@ app.include_router(
 )
 app.include_router(watchlists_router, prefix="/api/watchlists", tags=["watchlists"])
 app.include_router(catalysts_router, prefix="/api/catalysts", tags=["catalysts"])
+app.include_router(
+    system_admin_router,
+    prefix="/api/admin/system",
+    tags=["system-admin"],
+)
 
 
 @app.get("/health")

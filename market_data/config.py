@@ -19,6 +19,7 @@ DEFAULT_ORDERS = {
     MarketDataCapability.EXCHANGE_RATES: ("ecb",),
     MarketDataCapability.NEWS: ("eulerpool",),
     MarketDataCapability.ETF_HOLDINGS: ("eulerpool",),
+    MarketDataCapability.INDEX_CONSTITUENTS: ("wikipedia",),
     MarketDataCapability.EARNINGS_CALENDAR: ("eulerpool",),
     MarketDataCapability.ECONOMIC_CALENDAR: ("eulerpool",),
 }

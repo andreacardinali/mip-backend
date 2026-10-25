@@ -182,6 +182,13 @@ class MarketDataService:
             required=False,
         )
 
+    def get_index_constituents(self, index_code: str):
+        return self._first(
+            MarketDataCapability.INDEX_CONSTITUENTS,
+            InstrumentType.INDEX,
+            lambda provider: provider.get_index_constituents(index_code),
+        )
+
     def get_earnings_calendar(self, event_date, *, symbol=None):
         return self._first(
             MarketDataCapability.EARNINGS_CALENDAR,

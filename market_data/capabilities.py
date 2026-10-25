@@ -13,6 +13,7 @@ class MarketDataCapability(StrEnum):
     EXCHANGE_RATES = "exchange_rates"
     NEWS = "news"
     ETF_HOLDINGS = "etf_holdings"
+    INDEX_CONSTITUENTS = "index_constituents"
     EARNINGS_CALENDAR = "earnings_calendar"
     ECONOMIC_CALENDAR = "economic_calendar"
 

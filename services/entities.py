@@ -49,14 +49,19 @@ def _reference_from_row(row) -> InstrumentReference:
     )
 
 
-def _profile_payload(reference: InstrumentReference, *, full_refresh: bool):
+def _profile_payload(
+    reference: InstrumentReference,
+    *,
+    full_refresh: bool,
+    include_quote: bool = True,
+):
     required_fields = {"name"}
     if full_refresh:
         required_fields.update({"currency", "exchange_code"})
     profile = market_data.get_profile(
         reference,
         required_fields=required_fields,
-        include_quote=True,
+        include_quote=include_quote,
     )
     return profile.to_import_payload() if profile else None
 
@@ -79,6 +84,8 @@ def refresh_entities(
     symbol: str | None = None,
     create_if_missing: bool = False,
     full_refresh: bool = False,
+    instrument_type: InstrumentType = InstrumentType.UNKNOWN,
+    include_quote: bool = True,
     progress: ProgressCallback | None = None,
 ) -> dict[str, Any]:
     normalized_mode = _normalize_mode(mode)
@@ -112,6 +119,8 @@ def refresh_entities(
             db,
             symbol=normalized_symbol,
             full_refresh=full_refresh,
+            instrument_type=instrument_type,
+            include_quote=include_quote,
             progress=progress,
         )
 
@@ -139,7 +148,11 @@ def refresh_entities(
                 symbol=row_symbol,
             )
             reference = _reference_from_row(row)
-            profile = _profile_payload(reference, full_refresh=full_refresh)
+            profile = _profile_payload(
+                reference,
+                full_refresh=full_refresh,
+                include_quote=include_quote,
+            )
             if not profile:
                 skipped += 1
                 error = "Market-data provider returned no profile"
@@ -249,11 +262,26 @@ def refresh_entities(
     return result
 
 
-def _create_missing_entity(db, *, symbol, full_refresh, progress=None):
+def _create_missing_entity(
+    db,
+    *,
+    symbol,
+    full_refresh,
+    instrument_type=InstrumentType.UNKNOWN,
+    include_quote=True,
+    progress=None,
+):
     started_at = time.monotonic()
     _emit(progress, "create_started", symbol=symbol)
-    reference = InstrumentReference(symbol=symbol)
-    profile = _profile_payload(reference, full_refresh=full_refresh)
+    reference = InstrumentReference(
+        symbol=symbol,
+        instrument_type=instrument_type,
+    )
+    profile = _profile_payload(
+        reference,
+        full_refresh=full_refresh,
+        include_quote=include_quote,
+    )
     if not profile:
         result = {
             "status": "FAILED",

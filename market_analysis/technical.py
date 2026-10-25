@@ -11,10 +11,7 @@ def mean(values: Sequence[float]) -> float | None:
     return sum(values) / len(values)
 
 
-def sma(
-    values: Sequence[float],
-    period: int,
-) -> float | None:
+def sma(values: Sequence[float], period: int) -> float | None:
     if period < 1:
         raise ValueError("SMA period must be >= 1")
     if len(values) < period:
@@ -22,10 +19,7 @@ def sma(
     return mean(values[-period:])
 
 
-def rsi(
-    closes: Sequence[float],
-    period: int = 14,
-) -> float | None:
+def rsi(closes: Sequence[float], period: int = 14) -> float | None:
     if period < 1:
         raise ValueError("RSI period must be >= 1")
     if len(closes) <= period:
@@ -47,10 +41,7 @@ def rsi(
 
 
 def bollinger_band_width(
-    closes: Sequence[float],
-    *,
-    period: int = 20,
-    standard_deviations: float = 2.0,
+    closes: Sequence[float], *, period: int = 20, standard_deviations: float = 2.0
 ) -> float | None:
     if period < 2:
         raise ValueError("Bollinger period must be >= 2")
@@ -74,9 +65,7 @@ def bollinger_band_width(
     return ((upper_band - lower_band) / average) * 100.0
 
 
-def analyze_price_bars(
-    bars: Sequence[PriceBar],
-) -> TechnicalSnapshot | None:
+def analyze_price_bars(bars: Sequence[PriceBar]) -> TechnicalSnapshot | None:
     if len(bars) < 2:
         return None
 
