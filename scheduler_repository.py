@@ -15,6 +15,41 @@ class SchedulerRepository:
         rows = self.db.execute(text("SELECT * FROM sp_get_enabled_scheduler_jobs()"))
         return [dict(row) for row in rows.mappings().all()]
 
+    def claim_manual_runs(self, limit: int = 5) -> list[dict[str, Any]]:
+        rows = self.db.execute(
+            text("SELECT * FROM public.sp_scheduler_claim_job_runs(:limit)"),
+            {"limit": limit},
+        )
+        return [dict(row) for row in rows.mappings().all()]
+
+    def complete_manual_request(self, job_run_id: UUID) -> None:
+        self.db.execute(
+            text(
+                """
+                SELECT public.sp_scheduler_complete_job_run_request(
+                    CAST(:job_run_id AS uuid)
+                )
+                """
+            ),
+            {"job_run_id": str(job_run_id)},
+        )
+
+    def fail_manual_request(self, job_run_id: UUID, error_message: str) -> None:
+        self.db.execute(
+            text(
+                """
+                SELECT public.sp_scheduler_fail_job_run_request(
+                    CAST(:job_run_id AS uuid),
+                    :error_message
+                )
+                """
+            ),
+            {
+                "job_run_id": str(job_run_id),
+                "error_message": error_message,
+            },
+        )
+
     def update_next_run(
         self,
         *,
@@ -130,17 +165,17 @@ class SchedulerRepository:
             self.db.execute(
                 text(
                     """
-                SELECT *
-                FROM sp_register_scheduler_job(
-                    :job_key,
-                    :job_name,
-                    :python_module,
-                    :trigger_type,
-                    :cron_expression,
-                    :interval_minutes,
-                    :enabled_by_default
-                )
-                """
+                    SELECT *
+                    FROM sp_register_scheduler_job(
+                        :job_key,
+                        :job_name,
+                        :python_module,
+                        :trigger_type,
+                        :cron_expression,
+                        :interval_minutes,
+                        :enabled_by_default
+                    )
+                    """
                 ),
                 {
                     "job_key": job_key,
@@ -155,5 +190,4 @@ class SchedulerRepository:
             .mappings()
             .one()
         )
-
         return dict(row)

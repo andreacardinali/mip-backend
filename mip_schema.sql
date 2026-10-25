@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict wDwzSyzu43fewJp8B5YoiPc0je5XrdGTbTldaJ68LAA4SyRNLIz856RNTPpBXSG
+\restrict HGK7amaHlv6oEciSrI2WL6GHxryhOc3u3gqjgwcfOPgROTXyt5dF3tgcwdLrnLM
 
 -- Dumped from database version 18.6 (Debian 18.6-1.pgdg13+2)
 -- Dumped by pg_dump version 18.6 (Debian 18.6-1.pgdg13+2)
@@ -5934,6 +5934,115 @@ $$;
 
 
 --
+-- Name: sp_scheduler_append_run_log(uuid, character varying, character varying, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_scheduler_append_run_log(p_job_run_id uuid, p_level character varying, p_logger_name character varying, p_message text) RETURNS bigint
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_log_id bigint;
+BEGIN
+    INSERT INTO public.scheduler_job_run_logs(
+        job_run_id,
+        level,
+        logger_name,
+        message
+    )
+    VALUES (
+        p_job_run_id,
+        upper(coalesce(nullif(trim(p_level), ''), 'INFO')),
+        coalesce(nullif(trim(p_logger_name), ''), 'root'),
+        p_message
+    )
+    RETURNING log_id
+    INTO v_log_id;
+
+    RETURN v_log_id;
+END;
+$$;
+
+
+--
+-- Name: sp_scheduler_claim_job_runs(integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_scheduler_claim_job_runs(p_limit integer DEFAULT 5) RETURNS TABLE(request_id uuid, job_run_id uuid, job_id uuid, job_key character varying, job_name character varying, python_module character varying)
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    RETURN QUERY
+    WITH candidates AS (
+        SELECT request.request_id
+        FROM public.scheduler_manual_run_requests request
+        WHERE request.status = 'PENDING'
+        ORDER BY request.requested_at
+        FOR UPDATE SKIP LOCKED
+        LIMIT LEAST(GREATEST(p_limit, 1), 20)
+    ), claimed AS (
+        UPDATE public.scheduler_manual_run_requests request
+        SET
+            status = 'PROCESSING',
+            claimed_at = now()
+        FROM candidates candidate
+        WHERE request.request_id = candidate.request_id
+        RETURNING request.request_id, request.job_run_id, request.job_id
+    )
+    SELECT
+        claimed.request_id,
+        claimed.job_run_id,
+        claimed.job_id,
+        job.job_key,
+        job.job_name,
+        job.python_module
+    FROM claimed
+    JOIN public.scheduler_jobs job
+      ON job.job_id = claimed.job_id;
+END;
+$$;
+
+
+--
+-- Name: sp_scheduler_complete_job_run_request(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_scheduler_complete_job_run_request(p_job_run_id uuid) RETURNS boolean
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    UPDATE public.scheduler_manual_run_requests
+    SET
+        status = 'COMPLETED',
+        completed_at = now(),
+        error_message = NULL
+    WHERE job_run_id = p_job_run_id;
+
+    RETURN FOUND;
+END;
+$$;
+
+
+--
+-- Name: sp_scheduler_fail_job_run_request(uuid, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_scheduler_fail_job_run_request(p_job_run_id uuid, p_error_message text) RETURNS boolean
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    UPDATE public.scheduler_manual_run_requests
+    SET
+        status = 'FAILED',
+        completed_at = now(),
+        error_message = p_error_message
+    WHERE job_run_id = p_job_run_id;
+
+    RETURN FOUND;
+END;
+$$;
+
+
+--
 -- Name: sp_scheduler_fail_stale_runs(interval); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -5941,7 +6050,8 @@ CREATE FUNCTION public.sp_scheduler_fail_stale_runs(p_stale_after interval DEFAU
     LANGUAGE plpgsql
     AS $$
 DECLARE
-    v_updated integer;
+    v_runs_updated integer := 0;
+    v_requests_updated integer := 0;
 BEGIN
     UPDATE public.scheduler_job_runs
     SET
@@ -5955,9 +6065,85 @@ BEGIN
       AND completed_at IS NULL
       AND started_at < now() - p_stale_after;
 
-    GET DIAGNOSTICS v_updated = ROW_COUNT;
+    GET DIAGNOSTICS v_runs_updated = ROW_COUNT;
 
-    RETURN v_updated;
+    UPDATE public.scheduler_manual_run_requests request
+    SET
+        status = 'FAILED',
+        completed_at = now(),
+        error_message = COALESCE(
+            request.error_message,
+            'Richiesta manuale interrotta o scheduler non più disponibile'
+        )
+    WHERE request.status = 'PROCESSING'
+      AND request.completed_at IS NULL
+      AND request.claimed_at < now() - p_stale_after
+      AND NOT EXISTS (
+          SELECT 1
+          FROM public.scheduler_job_runs run
+          WHERE run.job_run_id = request.job_run_id
+            AND run.status = 'RUNNING'
+            AND run.completed_at IS NULL
+      );
+
+    GET DIAGNOSTICS v_requests_updated = ROW_COUNT;
+
+    RETURN v_runs_updated + v_requests_updated;
+END;
+$$;
+
+
+--
+-- Name: sp_scheduler_get_run_logs(uuid, bigint, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_scheduler_get_run_logs(p_job_run_id uuid, p_after_log_id bigint DEFAULT 0, p_limit integer DEFAULT 500) RETURNS TABLE(log_id bigint, job_run_id uuid, logged_at timestamp with time zone, level character varying, logger_name character varying, message text)
+    LANGUAGE sql STABLE
+    AS $$
+    SELECT
+        log.log_id,
+        log.job_run_id,
+        log.logged_at,
+        log.level,
+        log.logger_name,
+        log.message
+    FROM public.scheduler_job_run_logs log
+    WHERE log.job_run_id = p_job_run_id
+      AND log.log_id > greatest(p_after_log_id, 0)
+    ORDER BY log.log_id
+    LIMIT least(greatest(p_limit, 1), 2000);
+$$;
+
+
+--
+-- Name: sp_scheduler_request_job_run(character varying, uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_scheduler_request_job_run(p_job_key character varying, p_requested_by uuid) RETURNS TABLE(request_id uuid, job_run_id uuid, status character varying)
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    RETURN QUERY
+    INSERT INTO public.scheduler_manual_run_requests(job_id, requested_by)
+    SELECT sj.job_id, p_requested_by
+    FROM public.scheduler_jobs sj
+    WHERE sj.job_key = p_job_key
+    RETURNING
+        scheduler_manual_run_requests.request_id,
+        scheduler_manual_run_requests.job_run_id,
+        scheduler_manual_run_requests.status;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Scheduler job not found: %', p_job_key;
+    END IF;
+
+    PERFORM public.sp_record_system_audit(
+        p_requested_by,
+        'SCHEDULER_JOB_RUN_REQUESTED',
+        'SCHEDULER_JOB',
+        p_job_key,
+        jsonb_build_object('source', 'ADMIN_UI')
+    );
 END;
 $$;
 
@@ -8479,6 +8665,34 @@ CREATE TABLE public.roles (
 
 
 --
+-- Name: scheduler_job_run_logs; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.scheduler_job_run_logs (
+    log_id bigint NOT NULL,
+    job_run_id uuid NOT NULL,
+    logged_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    level character varying(20) NOT NULL,
+    logger_name character varying(255) NOT NULL,
+    message text NOT NULL
+);
+
+
+--
+-- Name: scheduler_job_run_logs_log_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.scheduler_job_run_logs ALTER COLUMN log_id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.scheduler_job_run_logs_log_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
 -- Name: scheduler_job_runs; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -8490,6 +8704,24 @@ CREATE TABLE public.scheduler_job_runs (
     status character varying(20) NOT NULL,
     error_message text,
     result jsonb
+);
+
+
+--
+-- Name: scheduler_manual_run_requests; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.scheduler_manual_run_requests (
+    request_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    job_id uuid NOT NULL,
+    requested_by uuid,
+    job_run_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    status character varying(20) DEFAULT 'PENDING'::character varying NOT NULL,
+    requested_at timestamp with time zone DEFAULT now() NOT NULL,
+    claimed_at timestamp with time zone,
+    completed_at timestamp with time zone,
+    error_message text,
+    CONSTRAINT ck_scheduler_manual_run_status CHECK (((status)::text = ANY ((ARRAY['PENDING'::character varying, 'PROCESSING'::character varying, 'COMPLETED'::character varying, 'FAILED'::character varying])::text[])))
 );
 
 
@@ -9391,6 +9623,14 @@ ALTER TABLE ONLY public.roles
 
 
 --
+-- Name: scheduler_job_run_logs scheduler_job_run_logs_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.scheduler_job_run_logs
+    ADD CONSTRAINT scheduler_job_run_logs_pkey PRIMARY KEY (log_id);
+
+
+--
 -- Name: scheduler_job_runs scheduler_job_runs_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -9404,6 +9644,14 @@ ALTER TABLE ONLY public.scheduler_job_runs
 
 ALTER TABLE ONLY public.scheduler_jobs
     ADD CONSTRAINT scheduler_jobs_pkey PRIMARY KEY (job_id);
+
+
+--
+-- Name: scheduler_manual_run_requests scheduler_manual_run_requests_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.scheduler_manual_run_requests
+    ADD CONSTRAINT scheduler_manual_run_requests_pkey PRIMARY KEY (request_id);
 
 
 --
@@ -9564,6 +9812,14 @@ ALTER TABLE ONLY public.identities
 
 ALTER TABLE ONLY public.market_price_refresh_queue
     ADD CONSTRAINT uq_market_price_refresh_instrument UNIQUE (instrument_id);
+
+
+--
+-- Name: scheduler_manual_run_requests uq_scheduler_manual_run_job_run; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.scheduler_manual_run_requests
+    ADD CONSTRAINT uq_scheduler_manual_run_job_run UNIQUE (job_run_id);
 
 
 --
@@ -9949,6 +10205,20 @@ CREATE INDEX ix_positions_instrument ON public.positions USING btree (instrument
 --
 
 CREATE INDEX ix_positions_portfolio ON public.positions USING btree (portfolio_id);
+
+
+--
+-- Name: ix_scheduler_job_run_logs_run; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_scheduler_job_run_logs_run ON public.scheduler_job_run_logs USING btree (job_run_id, log_id);
+
+
+--
+-- Name: ix_scheduler_manual_run_pending; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_scheduler_manual_run_pending ON public.scheduler_manual_run_requests USING btree (status, requested_at);
 
 
 --
@@ -11033,6 +11303,30 @@ ALTER TABLE ONLY public.price_history
 
 
 --
+-- Name: scheduler_job_run_logs scheduler_job_run_logs_job_run_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.scheduler_job_run_logs
+    ADD CONSTRAINT scheduler_job_run_logs_job_run_id_fkey FOREIGN KEY (job_run_id) REFERENCES public.scheduler_job_runs(job_run_id) ON DELETE CASCADE;
+
+
+--
+-- Name: scheduler_manual_run_requests scheduler_manual_run_requests_job_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.scheduler_manual_run_requests
+    ADD CONSTRAINT scheduler_manual_run_requests_job_id_fkey FOREIGN KEY (job_id) REFERENCES public.scheduler_jobs(job_id) ON DELETE CASCADE;
+
+
+--
+-- Name: scheduler_manual_run_requests scheduler_manual_run_requests_requested_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.scheduler_manual_run_requests
+    ADD CONSTRAINT scheduler_manual_run_requests_requested_by_fkey FOREIGN KEY (requested_by) REFERENCES public.users(user_id) ON DELETE SET NULL;
+
+
+--
 -- Name: sector_sentiment sector_sentiment_sector_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -11164,5 +11458,5 @@ ALTER TABLE ONLY public.watchlists
 -- PostgreSQL database dump complete
 --
 
-\unrestrict wDwzSyzu43fewJp8B5YoiPc0je5XrdGTbTldaJ68LAA4SyRNLIz856RNTPpBXSG
+\unrestrict HGK7amaHlv6oEciSrI2WL6GHxryhOc3u3gqjgwcfOPgROTXyt5dF3tgcwdLrnLM
 

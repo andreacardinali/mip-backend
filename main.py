@@ -24,41 +24,9 @@ from routers.watchlists import router as watchlists_router
 
 logger = logging.getLogger(__name__)
 
-
-def recover_stale_scheduler_runs() -> int:
-    with engine.begin() as connection:
-        recovered = connection.execute(
-            text(
-                """
-                SELECT public.sp_scheduler_fail_stale_runs(
-                    CAST(:stale_after AS interval)
-                )
-                """
-            ),
-            {
-                "stale_after": "30 minutes",
-            },
-        ).scalar_one()
-
-    logger.info(
-        "Recovered stale scheduler runs count=%s",
-        recovered,
-    )
-
-    return int(recovered)
-
-
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    try:
-        recover_stale_scheduler_runs()
-    except Exception:
-        logger.exception(
-            "Unable to recover stale scheduler runs " "during backend startup"
-        )
-
     yield
-
 
 app = FastAPI(
     title="Market Intelligence Platform",

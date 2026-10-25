@@ -1,10 +1,9 @@
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy import text
 
 from auth.security import CurrentUser, require_admin
 from db import SessionLocal
-from scheduler import execute_job
 
 router = APIRouter()
 
@@ -17,9 +16,7 @@ class JobUpdate(BaseModel):
 
 
 @router.get("/scheduler/jobs")
-def list_jobs(
-    _: CurrentUser = Depends(require_admin),
-):
+def list_jobs(_: CurrentUser = Depends(require_admin)):
     db = SessionLocal()
     try:
         rows = db.execute(text("SELECT * FROM sp_list_scheduler_jobs()")).mappings()
@@ -85,10 +82,7 @@ def update_job(
             )
 
         db.commit()
-        return {
-            "status": "SUCCESS",
-            "job_key": job_key,
-        }
+        return {"status": "SUCCESS", "job_key": job_key}
     except HTTPException:
         db.rollback()
         raise
@@ -108,54 +102,31 @@ def update_job(
 )
 def run_job_now(
     job_key: str,
-    background_tasks: BackgroundTasks,
     current_user: CurrentUser = Depends(require_admin),
 ):
     db = SessionLocal()
     try:
-        row = (
+        request = (
             db.execute(
                 text(
                     """
-                SELECT *
-                FROM sp_get_scheduler_job(:job_key)
-                """
+                    SELECT *
+                    FROM public.sp_scheduler_request_job_run(
+                        :job_key,
+                        CAST(:requested_by AS uuid)
+                    )
+                    """
                 ),
-                {"job_key": job_key},
+                {
+                    "job_key": job_key,
+                    "requested_by": current_user["user_id"],
+                },
             )
             .mappings()
-            .one_or_none()
-        )
-
-        if row is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Scheduler job not found: {job_key}",
-            )
-
-        job = dict(row)
-        db.execute(
-            text(
-                """
-                SELECT sp_record_system_audit(
-                    CAST(:actor_user_id AS uuid),
-                    'SCHEDULER_JOB_RUN_REQUESTED',
-                    'SCHEDULER_JOB',
-                    :resource_id,
-                    CAST(:new_value AS jsonb)
-                )
-                """
-            ),
-            {
-                "actor_user_id": current_user["user_id"],
-                "resource_id": job_key,
-                "new_value": '{"source":"ADMIN_UI"}',
-            },
+            .one()
         )
         db.commit()
-    except HTTPException:
-        db.rollback()
-        raise
+        return dict(request)
     except Exception as error:
         db.rollback()
         raise HTTPException(
@@ -164,18 +135,6 @@ def run_job_now(
         ) from error
     finally:
         db.close()
-
-    background_tasks.add_task(
-        execute_job,
-        str(job["job_id"]),
-        str(job["python_module"]),
-    )
-
-    return {
-        "status": "ACCEPTED",
-        "job_key": job_key,
-        "message": "Manual execution requested",
-    }
 
 
 @router.get("/scheduler/jobs/{job_key}/runs")
@@ -190,14 +149,39 @@ def list_job_runs(
             text(
                 """
                 SELECT *
-                FROM sp_list_scheduler_job_runs(
-                    :job_key,
+                FROM sp_list_scheduler_job_runs(:job_key, :limit)
+                """
+            ),
+            {"job_key": job_key, "limit": limit},
+        ).mappings()
+        return [dict(row) for row in rows]
+    finally:
+        db.close()
+
+
+@router.get("/scheduler/runs/{job_run_id}/logs")
+def list_run_logs(
+    job_run_id: str,
+    after_log_id: int = 0,
+    limit: int = 500,
+    _: CurrentUser = Depends(require_admin),
+):
+    db = SessionLocal()
+    try:
+        rows = db.execute(
+            text(
+                """
+                SELECT *
+                FROM public.sp_scheduler_get_run_logs(
+                    CAST(:job_run_id AS uuid),
+                    :after_log_id,
                     :limit
                 )
                 """
             ),
             {
-                "job_key": job_key,
+                "job_run_id": job_run_id,
+                "after_log_id": after_log_id,
                 "limit": limit,
             },
         ).mappings()
