@@ -16,9 +16,10 @@ def list_screener_opportunities(
     direction: str | None = None,
     verdict: str | None = None,
     portfolio_match: bool | None = None,
-    minimum_score: float = Query(default=0.0, ge=0, le=100),
+    consensus_direction: str | None = None,
+    minimum_score: float = Query(0.0, ge=0, le=100),
     query: str | None = None,
-    limit: int = Query(default=100, ge=1, le=1000),
+    limit: int = Query(100, ge=1, le=1000),
     current_user: CurrentUser = Depends(get_current_user),
 ):
     db = SessionLocal()
@@ -30,6 +31,7 @@ def list_screener_opportunities(
             direction=direction,
             verdict=verdict,
             portfolio_match=portfolio_match,
+            consensus_direction=consensus_direction,
             minimum_score=minimum_score,
             query=query,
             limit=limit,
@@ -40,7 +42,7 @@ def list_screener_opportunities(
 
 @router.get("/runs")
 def list_screener_runs(
-    limit: int = Query(default=50, ge=1, le=500),
+    limit: int = Query(50, ge=1, le=500),
     current_user: CurrentUser = Depends(get_current_user),
 ):
     db = SessionLocal()
@@ -52,7 +54,7 @@ def list_screener_runs(
 
 @router.get("/snapshots")
 def list_screener_snapshots(
-    limit: int = Query(default=50, ge=1, le=500),
+    limit: int = Query(50, ge=1, le=500),
     current_user: CurrentUser = Depends(get_current_user),
 ):
     db = SessionLocal()
@@ -83,7 +85,7 @@ def get_screener_opportunity(
             user_id=current_user["user_id"], opportunity_id=opportunity_id
         )
         if payload is None:
-            raise HTTPException(status_code=404, detail="Opportunity not found")
+            raise HTTPException(404, "Opportunity not found")
         return payload
     finally:
         db.close()

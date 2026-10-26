@@ -4,17 +4,20 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 from market_screener.config import ScreenerRankingConfig
+from market_screener.consensus import build_strategy_consensus
 from market_screener.models import RankedOpportunity
 
 
 def _score(value: object) -> float | None:
     if value is None:
         return None
-    number = float(value)
-    return max(0.0, min(100.0, number))
+    return max(0.0, min(100.0, float(value)))
 
 
-def _weighted_score(row: Mapping[str, Any], config: ScreenerRankingConfig) -> float:
+def _weighted_score(
+    row: Mapping[str, Any],
+    config: ScreenerRankingConfig,
+) -> float:
     components = (
         (_score(row.get("attention_score")), config.attention_weight),
         (_score(row.get("technical_score")), config.technical_weight),
@@ -28,8 +31,27 @@ def _weighted_score(row: Mapping[str, Any], config: ScreenerRankingConfig) -> fl
     ]
     if not available:
         return 0.0
+
     weight_total = sum(weight for _, weight in available)
-    return round(sum(value * weight for value, weight in available) / weight_total, 4)
+    base_score = sum(value * weight for value, weight in available) / weight_total
+
+    # Consensus is meaningful only when at least two strategies independently
+    # evaluated the same instrument and timeframe. A single signal preserves
+    # the legacy weighted score and receives neither bonus nor penalty.
+    strategy_count = int(row.get("strategy_count") or 1)
+    if strategy_count < 2:
+        return round(base_score, 4)
+
+    consensus_bonus = config.consensus_bonus * (
+        float(row.get("consensus_score") or 0.0) / 100.0
+    )
+    conflict_penalty = config.conflict_penalty * (
+        float(row.get("conflict_score") or 0.0) / 100.0
+    )
+    return round(
+        max(0.0, min(100.0, base_score + consensus_bonus - conflict_penalty)),
+        4,
+    )
 
 
 def rank_opportunities(
@@ -38,10 +60,11 @@ def rank_opportunities(
     config: ScreenerRankingConfig,
 ) -> tuple[RankedOpportunity, ...]:
     prepared: list[tuple[Mapping[str, Any], float]] = []
-    for row in rows:
+    for row in build_strategy_consensus(rows):
         score = _weighted_score(row, config)
         if score >= config.minimum_score:
             prepared.append((row, score))
+
     prepared.sort(key=lambda item: (-item[1], str(item[0].get("symbol") or "")))
     results: list[RankedOpportunity] = []
     for position, (row, score) in enumerate(prepared[: config.limit], start=1):
@@ -61,6 +84,15 @@ def rank_opportunities(
                 verdict=(str(row["verdict"]) if row.get("verdict") else None),
                 summary=(str(row["summary"]) if row.get("summary") else None),
                 evidence=dict(row.get("evidence") or {}),
+                strategy_count=int(row["strategy_count"]),
+                bullish_strategy_count=int(row["bullish_strategy_count"]),
+                bearish_strategy_count=int(row["bearish_strategy_count"]),
+                consensus_direction=str(row["consensus_direction"]),
+                consensus_score=float(row["consensus_score"]),
+                conflict_score=float(row["conflict_score"]),
+                supporting_strategies=tuple(row["supporting_strategies"]),
+                opposing_strategies=tuple(row["opposing_strategies"]),
+                supporting_signal_ids=tuple(row["supporting_signal_ids"]),
             )
         )
     return tuple(results)

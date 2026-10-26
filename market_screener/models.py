@@ -20,3 +20,12 @@ class RankedOpportunity:
     verdict: str | None = None
     summary: str | None = None
     evidence: dict[str, Any] = field(default_factory=dict)
+    strategy_count: int = 1
+    bullish_strategy_count: int = 0
+    bearish_strategy_count: int = 0
+    consensus_direction: str = "NEUTRAL"
+    consensus_score: float = 0.0
+    conflict_score: float = 0.0
+    supporting_strategies: tuple[str, ...] = ()
+    opposing_strategies: tuple[str, ...] = ()
+    supporting_signal_ids: tuple[str, ...] = ()

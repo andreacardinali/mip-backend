@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict R7thQifuhhyQK0xAhmXjLqcVeNOh1v0UbrxY07SpNzSKD27YExhzEcZ6djcJfi4
+\restrict EmmIcxt1ZsgMGgdNrUPvnlAbOSGooITrk3dq82HQOZWO4wHwvGeewrFCikMJKfT
 
 -- Dumped from database version 18.6 (Debian 18.6-1.pgdg13+2)
 -- Dumped by pg_dump version 18.6 (Debian 18.6-1.pgdg13+2)
@@ -5868,6 +5868,15 @@ $$;
 
 
 --
+-- Name: sp_market_screener_apply_consensus(character varying, jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_market_screener_apply_consensus(p_algorithm_version character varying, p_opportunities jsonb) RETURNS jsonb
+    LANGUAGE plpgsql
+    AS $$ DECLARE v_count integer; BEGIN UPDATE public.market_screener_opportunities o SET strategy_count=COALESCE((x.item->>'strategy_count')::integer,1),bullish_strategy_count=COALESCE((x.item->>'bullish_strategy_count')::integer,0),bearish_strategy_count=COALESCE((x.item->>'bearish_strategy_count')::integer,0),consensus_direction=COALESCE(x.item->>'consensus_direction','NEUTRAL'),consensus_score=COALESCE((x.item->>'consensus_score')::numeric,0),conflict_score=COALESCE((x.item->>'conflict_score')::numeric,0),supporting_strategies=COALESCE(x.item->'supporting_strategies','[]'::jsonb),opposing_strategies=COALESCE(x.item->'opposing_strategies','[]'::jsonb),supporting_signal_ids=COALESCE(x.item->'supporting_signal_ids','[]'::jsonb) FROM jsonb_array_elements(COALESCE(p_opportunities,'[]'::jsonb)) x(item) WHERE o.algorithm_version=p_algorithm_version AND o.signal_id=(x.item->>'signal_id')::uuid; GET DIAGNOSTICS v_count=ROW_COUNT; RETURN jsonb_build_object('updated',v_count,'algorithm_version',p_algorithm_version); END $$;
+
+
+--
 -- Name: sp_market_screener_complete_run(uuid, character varying, uuid, uuid, jsonb, text); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -5951,6 +5960,15 @@ $$;
 
 
 --
+-- Name: sp_market_screener_enrich_consensus_payload(jsonb, uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_market_screener_enrich_consensus_payload(p_payload jsonb, p_opportunity_id uuid) RETURNS jsonb
+    LANGUAGE sql STABLE
+    AS $$ SELECT CASE WHEN p_payload IS NULL THEN NULL ELSE p_payload || jsonb_build_object('strategy_count',o.strategy_count,'bullish_strategy_count',o.bullish_strategy_count,'bearish_strategy_count',o.bearish_strategy_count,'consensus_direction',o.consensus_direction,'consensus_score',o.consensus_score,'conflict_score',o.conflict_score,'supporting_strategies',o.supporting_strategies,'opposing_strategies',o.opposing_strategies,'supporting_signal_ids',o.supporting_signal_ids) END FROM public.market_screener_opportunities o WHERE o.opportunity_id=p_opportunity_id $$;
+
+
+--
 -- Name: sp_market_screener_enrich_opportunity_payload(jsonb, uuid); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -5972,6 +5990,15 @@ CREATE FUNCTION public.sp_market_screener_enrich_opportunity_payload(p_payload j
     FROM public.market_screener_opportunities opportunity
     WHERE opportunity.opportunity_id = p_opportunity_id;
 $$;
+
+
+--
+-- Name: sp_market_screener_enrich_snapshot_consensus_payload(jsonb, uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_market_screener_enrich_snapshot_consensus_payload(p_payload jsonb, p_item_id uuid) RETURNS jsonb
+    LANGUAGE sql STABLE
+    AS $$ SELECT CASE WHEN p_payload IS NULL THEN NULL ELSE p_payload || jsonb_build_object('strategy_count',i.strategy_count,'bullish_strategy_count',i.bullish_strategy_count,'bearish_strategy_count',i.bearish_strategy_count,'consensus_direction',i.consensus_direction,'consensus_score',i.consensus_score,'conflict_score',i.conflict_score,'supporting_strategies',i.supporting_strategies,'opposing_strategies',i.opposing_strategies) END FROM public.market_screener_ranking_snapshot_items i WHERE i.ranking_snapshot_item_id=p_item_id $$;
 
 
 --
@@ -9702,6 +9729,15 @@ $$;
 
 
 --
+-- Name: trg_market_screener_snapshot_consensus(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.trg_market_screener_snapshot_consensus() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$ BEGIN SELECT o.strategy_count,o.bullish_strategy_count,o.bearish_strategy_count,o.consensus_direction,o.consensus_score,o.conflict_score,o.supporting_strategies,o.opposing_strategies INTO NEW.strategy_count,NEW.bullish_strategy_count,NEW.bearish_strategy_count,NEW.consensus_direction,NEW.consensus_score,NEW.conflict_score,NEW.supporting_strategies,NEW.opposing_strategies FROM public.market_screener_opportunities o WHERE o.opportunity_id=NEW.opportunity_id; RETURN NEW; END $$;
+
+
+--
 -- Name: trg_set_created_at(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -10515,7 +10551,16 @@ CREATE TABLE public.market_screener_opportunities (
     invalidation_price numeric,
     target_price numeric,
     signal_reasons jsonb DEFAULT '[]'::jsonb NOT NULL,
-    technical_evidence jsonb DEFAULT '{}'::jsonb NOT NULL
+    technical_evidence jsonb DEFAULT '{}'::jsonb NOT NULL,
+    strategy_count integer DEFAULT 1 NOT NULL,
+    bullish_strategy_count integer DEFAULT 0 NOT NULL,
+    bearish_strategy_count integer DEFAULT 0 NOT NULL,
+    consensus_direction character varying DEFAULT 'NEUTRAL'::character varying NOT NULL,
+    consensus_score numeric DEFAULT 0 NOT NULL,
+    conflict_score numeric DEFAULT 0 NOT NULL,
+    supporting_strategies jsonb DEFAULT '[]'::jsonb NOT NULL,
+    opposing_strategies jsonb DEFAULT '[]'::jsonb NOT NULL,
+    supporting_signal_ids jsonb DEFAULT '[]'::jsonb NOT NULL
 );
 
 
@@ -10556,6 +10601,14 @@ CREATE TABLE public.market_screener_ranking_snapshot_items (
     target_price numeric,
     signal_reasons jsonb DEFAULT '[]'::jsonb NOT NULL,
     technical_evidence jsonb DEFAULT '{}'::jsonb CONSTRAINT market_screener_ranking_snapshot_it_technical_evidence_not_null NOT NULL,
+    strategy_count integer DEFAULT 1 NOT NULL,
+    bullish_strategy_count integer DEFAULT 0 CONSTRAINT market_screener_ranking_snapsho_bullish_strategy_count_not_null NOT NULL,
+    bearish_strategy_count integer DEFAULT 0 CONSTRAINT market_screener_ranking_snapsho_bearish_strategy_count_not_null NOT NULL,
+    consensus_direction character varying DEFAULT 'NEUTRAL'::character varying CONSTRAINT market_screener_ranking_snapshot_i_consensus_direction_not_null NOT NULL,
+    consensus_score numeric DEFAULT 0 NOT NULL,
+    conflict_score numeric DEFAULT 0 NOT NULL,
+    supporting_strategies jsonb DEFAULT '[]'::jsonb CONSTRAINT market_screener_ranking_snapshot_supporting_strategies_not_null NOT NULL,
+    opposing_strategies jsonb DEFAULT '[]'::jsonb CONSTRAINT market_screener_ranking_snapshot_i_opposing_strategies_not_null NOT NULL,
     CONSTRAINT ck_market_screener_snapshot_rank CHECK ((ranking_position > 0))
 );
 
@@ -13228,6 +13281,13 @@ CREATE TRIGGER trg_market_screener_set_entity_id BEFORE INSERT OR UPDATE OF inst
 
 
 --
+-- Name: market_screener_ranking_snapshot_items trg_market_screener_snapshot_consensus; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_market_screener_snapshot_consensus BEFORE INSERT OR UPDATE OF opportunity_id ON public.market_screener_ranking_snapshot_items FOR EACH ROW EXECUTE FUNCTION public.trg_market_screener_snapshot_consensus();
+
+
+--
 -- Name: market_screener_ranking_snapshot_items trg_market_screener_snapshot_items_created_at; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -14196,5 +14256,5 @@ ALTER TABLE ONLY public.watchlists
 -- PostgreSQL database dump complete
 --
 
-\unrestrict R7thQifuhhyQK0xAhmXjLqcVeNOh1v0UbrxY07SpNzSKD27YExhzEcZ6djcJfi4
+\unrestrict EmmIcxt1ZsgMGgdNrUPvnlAbOSGooITrk3dq82HQOZWO4wHwvGeewrFCikMJKfT
 
