@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict nVNgbDCR6l5DF0JxdIvyueBWhg9NWq7UWXhduqgZgEnMa5taeyASj232gPeUeWJ
+\restrict XlnKxVJ1P44qTgMtDQhqidziVYLhcjafcUsf8bM7lLZR6rIya5Q7uFH6m4deWeD
 
 -- Dumped from database version 18.6 (Debian 18.6-1.pgdg13+2)
 -- Dumped by pg_dump version 18.6 (Debian 18.6-1.pgdg13+2)
@@ -3683,55 +3683,25 @@ $$;
 CREATE FUNCTION public.sp_get_user_catalysts(p_user_id uuid, p_scope character varying DEFAULT 'MY_ASSETS'::character varying, p_date_from timestamp with time zone DEFAULT NULL::timestamp with time zone, p_date_to timestamp with time zone DEFAULT NULL::timestamp with time zone, p_catalyst_type character varying DEFAULT NULL::character varying, p_status character varying DEFAULT NULL::character varying, p_importance_min numeric DEFAULT NULL::numeric, p_query character varying DEFAULT NULL::character varying, p_limit integer DEFAULT 500) RETURNS TABLE(catalyst_id uuid, entity_id uuid, entity_name character varying, symbol character varying, exchange character varying, catalyst_type character varying, catalyst_date timestamp with time zone, status character varying, importance numeric, title text, source character varying, raw_payload jsonb, in_portfolio boolean, in_watchlist boolean, asset_scope character varying)
     LANGUAGE plpgsql STABLE
     AS $$
-
 DECLARE
     v_scope varchar;
     v_query varchar;
 BEGIN
-    v_scope := UPPER(COALESCE(NULLIF(BTRIM(p_scope), ''), 'MY_ASSETS'));
-    v_query := NULLIF(BTRIM(p_query), '');
+    v_scope := upper(coalesce(nullif(btrim(p_scope), ''), 'MY_ASSETS'));
+    v_query := nullif(btrim(p_query), '');
 
     IF v_scope NOT IN ('MY_ASSETS', 'PORTFOLIO', 'WATCHLIST', 'ALL') THEN
         RAISE EXCEPTION 'Unsupported catalyst scope: %', p_scope;
     END IF;
-
     IF p_limit < 1 OR p_limit > 2000 THEN
         RAISE EXCEPTION 'p_limit must be between 1 and 2000';
     END IF;
 
     RETURN QUERY
-    WITH user_entities AS (
-        SELECT
-            scoped_entities.entity_id,
-            BOOL_OR(scoped_entities.in_portfolio) AS in_portfolio,
-            BOOL_OR(scoped_entities.in_watchlist) AS in_watchlist
-        FROM (
-            SELECT
-                i.entity_id,
-                true AS in_portfolio,
-                false AS in_watchlist
-            FROM public.positions pos
-            JOIN public.portfolios pf
-              ON pf.portfolio_id = pos.portfolio_id
-            JOIN public.instruments i
-              ON i.instrument_id = pos.instrument_id
-            WHERE pf.user_id = p_user_id
-
-            UNION ALL
-
-            SELECT
-                wi.entity_id,
-                false AS in_portfolio,
-                true AS in_watchlist
-            FROM public.watchlist_items wi
-            JOIN public.watchlists w
-              ON w.watchlist_id = wi.watchlist_id
-            WHERE w.user_id = p_user_id
-        ) scoped_entities
-        GROUP BY scoped_entities.entity_id
-    ), preferred_instrument AS (
+    WITH preferred_instrument AS (
         SELECT DISTINCT ON (i.entity_id)
             i.entity_id,
+            i.instrument_id,
             i.symbol,
             i.exchange
         FROM public.instruments i
@@ -3742,65 +3712,88 @@ BEGIN
             i.updated_at DESC NULLS LAST,
             i.created_at DESC NULLS LAST,
             i.instrument_id
+    ), enriched AS (
+        SELECT
+            c.catalyst_id,
+            c.entity_id,
+            e.name AS entity_name,
+            pi.symbol,
+            pi.exchange,
+            c.catalyst_type,
+            c.catalyst_date,
+            c.status,
+            c.importance,
+            c.title,
+            c.source,
+            coalesce(c.raw_payload, '{}'::jsonb) || jsonb_build_object(
+                'asset_match', asset_match.payload
+            ) AS raw_payload,
+            (asset_match.payload ->> 'in_portfolio')::boolean AS in_portfolio,
+            (asset_match.payload ->> 'in_watchlist')::boolean AS in_watchlist,
+            (asset_match.payload ->> 'asset_scope')::varchar AS asset_scope
+        FROM public.catalysts c
+        JOIN public.entities e
+          ON e.entity_id = c.entity_id
+        LEFT JOIN preferred_instrument pi
+          ON pi.entity_id = c.entity_id
+        CROSS JOIN LATERAL (
+            SELECT public.sp_get_user_entity_asset_match(
+                p_user_id,
+                c.entity_id,
+                pi.instrument_id
+            ) AS payload
+        ) asset_match
     )
     SELECT
-        c.catalyst_id,
-        c.entity_id,
-        e.name AS entity_name,
-        pi.symbol,
-        pi.exchange,
-        c.catalyst_type,
-        c.catalyst_date,
-        c.status,
-        c.importance,
-        c.title,
-        c.source,
-        c.raw_payload,
-        COALESCE(ue.in_portfolio, false),
-        COALESCE(ue.in_watchlist, false),
-        CASE
-            WHEN COALESCE(ue.in_portfolio, false)
-             AND COALESCE(ue.in_watchlist, false) THEN 'BOTH'
-            WHEN COALESCE(ue.in_portfolio, false) THEN 'PORTFOLIO'
-            WHEN COALESCE(ue.in_watchlist, false) THEN 'WATCHLIST'
-            ELSE 'GLOBAL'
-        END::varchar AS asset_scope
-    FROM public.catalysts c
-    JOIN public.entities e
-      ON e.entity_id = c.entity_id
-    LEFT JOIN user_entities ue
-      ON ue.entity_id = c.entity_id
-    LEFT JOIN preferred_instrument pi
-      ON pi.entity_id = c.entity_id
-    WHERE (p_date_from IS NULL OR c.catalyst_date >= p_date_from)
-      AND (p_date_to IS NULL OR c.catalyst_date <= p_date_to)
+        row.catalyst_id,
+        row.entity_id,
+        row.entity_name,
+        row.symbol,
+        row.exchange,
+        row.catalyst_type,
+        row.catalyst_date,
+        row.status,
+        row.importance,
+        row.title,
+        row.source,
+        row.raw_payload,
+        row.in_portfolio,
+        row.in_watchlist,
+        row.asset_scope
+    FROM enriched row
+    WHERE (p_date_from IS NULL OR row.catalyst_date >= p_date_from)
+      AND (p_date_to IS NULL OR row.catalyst_date <= p_date_to)
       AND (
-          NULLIF(BTRIM(p_catalyst_type), '') IS NULL
-          OR UPPER(c.catalyst_type) = UPPER(BTRIM(p_catalyst_type))
+          nullif(btrim(p_catalyst_type), '') IS NULL
+          OR upper(row.catalyst_type) = upper(btrim(p_catalyst_type))
       )
       AND (
-          NULLIF(BTRIM(p_status), '') IS NULL
-          OR UPPER(c.status) = UPPER(BTRIM(p_status))
+          nullif(btrim(p_status), '') IS NULL
+          OR upper(row.status) = upper(btrim(p_status))
       )
-      AND (p_importance_min IS NULL OR c.importance >= p_importance_min)
+      AND (p_importance_min IS NULL OR row.importance >= p_importance_min)
       AND (
           v_query IS NULL
-          OR e.name ILIKE '%' || v_query || '%'
-          OR pi.symbol ILIKE '%' || v_query || '%'
-          OR c.title ILIKE '%' || v_query || '%'
-          OR c.source ILIKE '%' || v_query || '%'
+          OR row.entity_name ILIKE '%' || v_query || '%'
+          OR row.symbol ILIKE '%' || v_query || '%'
+          OR row.title ILIKE '%' || v_query || '%'
+          OR row.source ILIKE '%' || v_query || '%'
+          OR row.raw_payload -> 'asset_match' -> 'portfolio_symbols'
+              @> to_jsonb(ARRAY[v_query]::text[])
+          OR (row.raw_payload -> 'asset_match' -> 'portfolio_symbols')::text
+              ILIKE '%' || v_query || '%'
       )
       AND CASE v_scope
-          WHEN 'MY_ASSETS' THEN ue.entity_id IS NOT NULL
-          WHEN 'PORTFOLIO' THEN COALESCE(ue.in_portfolio, false)
-          WHEN 'WATCHLIST' THEN COALESCE(ue.in_watchlist, false)
+          WHEN 'MY_ASSETS' THEN row.in_portfolio OR row.in_watchlist
+          WHEN 'PORTFOLIO' THEN row.in_portfolio
+          WHEN 'WATCHLIST' THEN row.in_watchlist
           ELSE true
       END
     ORDER BY
-        c.catalyst_date ASC NULLS LAST,
-        c.importance DESC NULLS LAST,
-        e.name,
-        c.catalyst_id
+        row.catalyst_date ASC NULLS LAST,
+        row.importance DESC NULLS LAST,
+        row.entity_name,
+        row.catalyst_id
     LIMIT p_limit;
 END;
 $$;
@@ -3813,6 +3806,134 @@ $$;
 CREATE FUNCTION public.sp_get_user_context(p_user_id uuid) RETURNS TABLE(user_id uuid, username character varying, email character varying, display_name character varying, is_active boolean, reporting_currency character, roles jsonb)
     LANGUAGE sql STABLE
     AS $$ SELECT u.user_id,u.username,u.email,u.display_name,u.is_active,u.reporting_currency,coalesce((SELECT jsonb_agg(r.role_key ORDER BY r.role_key) FROM user_roles ur JOIN roles r USING(role_id) WHERE ur.user_id=u.user_id),'[]') FROM users u WHERE u.user_id=p_user_id $$;
+
+
+--
+-- Name: sp_get_user_entity_asset_match(uuid, uuid, uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_get_user_entity_asset_match(p_user_id uuid, p_entity_id uuid, p_instrument_id uuid DEFAULT NULL::uuid) RETURNS jsonb
+    LANGUAGE sql STABLE
+    AS $$
+WITH portfolio_rows AS (
+    SELECT
+        pos.position_id,
+        pf.portfolio_id,
+        pf.name AS portfolio_name,
+        i.instrument_id,
+        i.symbol,
+        i.exchange,
+        i.currency_code,
+        i.entity_id,
+        pos.quantity,
+        CASE
+            WHEN p_instrument_id IS NOT NULL
+             AND i.instrument_id = p_instrument_id
+                THEN 'EXACT_INSTRUMENT'
+            ELSE 'SAME_ENTITY'
+        END AS match_type
+    FROM public.positions pos
+    JOIN public.portfolios pf
+      ON pf.portfolio_id = pos.portfolio_id
+     AND pf.user_id = p_user_id
+    JOIN public.instruments i
+      ON i.instrument_id = pos.instrument_id
+    WHERE p_entity_id IS NOT NULL
+      AND i.entity_id = p_entity_id
+), watchlist_rows AS (
+    SELECT
+        wi.watchlist_item_id,
+        w.watchlist_id,
+        w.name AS watchlist_name,
+        wi.entity_id
+    FROM public.watchlist_items wi
+    JOIN public.watchlists w
+      ON w.watchlist_id = wi.watchlist_id
+     AND w.user_id = p_user_id
+    WHERE p_entity_id IS NOT NULL
+      AND wi.entity_id = p_entity_id
+), portfolio_summary AS (
+    SELECT
+        count(*)::integer AS position_count,
+        CASE
+            WHEN bool_or(match_type = 'EXACT_INSTRUMENT')
+                THEN 'EXACT_INSTRUMENT'
+            WHEN count(*) > 0
+                THEN 'SAME_ENTITY'
+            ELSE 'NO_MATCH'
+        END AS match_type,
+        coalesce(
+            jsonb_agg(DISTINCT symbol)
+                FILTER (WHERE symbol IS NOT NULL),
+            '[]'::jsonb
+        ) AS symbols,
+        coalesce(
+            jsonb_agg(DISTINCT portfolio_name)
+                FILTER (WHERE portfolio_name IS NOT NULL),
+            '[]'::jsonb
+        ) AS portfolio_names,
+        coalesce(
+            jsonb_agg(
+                jsonb_build_object(
+                    'position_id', position_id,
+                    'portfolio_id', portfolio_id,
+                    'portfolio_name', portfolio_name,
+                    'instrument_id', instrument_id,
+                    'symbol', symbol,
+                    'exchange', exchange,
+                    'currency_code', currency_code,
+                    'quantity', quantity,
+                    'match_type', match_type
+                )
+                ORDER BY portfolio_name, symbol, position_id
+            ),
+            '[]'::jsonb
+        ) AS positions
+    FROM portfolio_rows
+), watchlist_summary AS (
+    SELECT
+        count(*)::integer AS item_count,
+        coalesce(
+            jsonb_agg(DISTINCT watchlist_name)
+                FILTER (WHERE watchlist_name IS NOT NULL),
+            '[]'::jsonb
+        ) AS watchlist_names,
+        coalesce(
+            jsonb_agg(
+                jsonb_build_object(
+                    'watchlist_item_id', watchlist_item_id,
+                    'watchlist_id', watchlist_id,
+                    'watchlist_name', watchlist_name,
+                    'entity_id', entity_id
+                )
+                ORDER BY watchlist_name, watchlist_item_id
+            ),
+            '[]'::jsonb
+        ) AS items
+    FROM watchlist_rows
+)
+SELECT jsonb_build_object(
+    'in_portfolio', portfolio_summary.position_count > 0,
+    'in_watchlist', watchlist_summary.item_count > 0,
+    'asset_scope', CASE
+        WHEN portfolio_summary.position_count > 0
+         AND watchlist_summary.item_count > 0 THEN 'BOTH'
+        WHEN portfolio_summary.position_count > 0 THEN 'PORTFOLIO'
+        WHEN watchlist_summary.item_count > 0 THEN 'WATCHLIST'
+        ELSE 'GLOBAL'
+    END,
+    'portfolio_match_type', portfolio_summary.match_type,
+    'portfolio_position_count', portfolio_summary.position_count,
+    'portfolio_symbols', portfolio_summary.symbols,
+    'portfolio_names', portfolio_summary.portfolio_names,
+    'portfolio_positions', portfolio_summary.positions,
+    'watchlist_item_count', watchlist_summary.item_count,
+    'watchlist_names', watchlist_summary.watchlist_names,
+    'watchlist_items', watchlist_summary.items
+)
+FROM portfolio_summary
+CROSS JOIN watchlist_summary;
+$$;
 
 
 --
@@ -5994,16 +6115,106 @@ $$;
 CREATE FUNCTION public.sp_market_screener_create_ranking_snapshot(p_run_id uuid) RETURNS uuid
     LANGUAGE plpgsql
     AS $$
-DECLARE v_snapshot_id uuid;
+DECLARE
+    v_snapshot_id uuid;
+    v_opportunity_count integer;
 BEGIN
-  INSERT INTO public.market_screener_ranking_snapshots(screener_run_id)
-  VALUES (p_run_id) RETURNING ranking_snapshot_id INTO v_snapshot_id;
-  INSERT INTO public.market_screener_ranking_snapshot_items(
-    ranking_snapshot_id,opportunity_id,ranking_position,composite_score,payload)
-  SELECT v_snapshot_id,o.opportunity_id,o.ranking_position,o.composite_score,to_jsonb(o)
-  FROM public.market_screener_opportunities o;
-  RETURN v_snapshot_id;
-END $$;
+    SELECT count(*)::integer
+      INTO v_opportunity_count
+      FROM public.market_screener_opportunities o
+     WHERE o.active = true;
+
+    INSERT INTO public.market_screener_ranking_snapshots (
+        screener_run_id,
+        opportunity_count
+    )
+    VALUES (
+        p_run_id,
+        coalesce(v_opportunity_count, 0)
+    )
+    RETURNING ranking_snapshot_id
+         INTO v_snapshot_id;
+
+    INSERT INTO public.market_screener_ranking_snapshot_items (
+        ranking_snapshot_id,
+        opportunity_id,
+        signal_id,
+        entity_id,
+        instrument_id,
+        symbol,
+        direction,
+        origin,
+        ranking_position,
+        attention_score,
+        technical_score,
+        quant_score,
+        llm_score,
+        composite_score,
+        verdict,
+        summary,
+        evidence,
+        strategy_code,
+        signal_type,
+        signal_timeframe,
+        signal_trend,
+        signal_confidence,
+        reference_price,
+        invalidation_price,
+        target_price,
+        signal_reasons,
+        technical_evidence,
+        strategy_count,
+        bullish_strategy_count,
+        bearish_strategy_count,
+        consensus_direction,
+        consensus_score,
+        conflict_score,
+        supporting_strategies,
+        opposing_strategies
+    )
+    SELECT
+        v_snapshot_id,
+        o.opportunity_id,
+        o.signal_id,
+        o.entity_id,
+        o.instrument_id,
+        o.symbol,
+        o.direction,
+        coalesce(o.origin, 'MARKET_ANALYSIS'),
+        o.ranking_position,
+        o.attention_score,
+        o.technical_score,
+        o.quant_score,
+        o.llm_score,
+        o.composite_score,
+        o.verdict,
+        o.summary,
+        coalesce(o.evidence, '{}'::jsonb),
+        o.strategy_code,
+        o.signal_type,
+        o.signal_timeframe,
+        o.signal_trend,
+        o.signal_confidence,
+        o.reference_price,
+        o.invalidation_price,
+        o.target_price,
+        coalesce(o.signal_reasons, '[]'::jsonb),
+        coalesce(o.technical_evidence, '{}'::jsonb),
+        coalesce(o.strategy_count, 1),
+        coalesce(o.bullish_strategy_count, 0),
+        coalesce(o.bearish_strategy_count, 0),
+        coalesce(o.consensus_direction, 'NEUTRAL'),
+        coalesce(o.consensus_score, 0),
+        coalesce(o.conflict_score, 0),
+        coalesce(o.supporting_strategies, '[]'::jsonb),
+        coalesce(o.opposing_strategies, '[]'::jsonb)
+    FROM public.market_screener_opportunities o
+    WHERE o.active = true
+    ORDER BY o.ranking_position, o.opportunity_id;
+
+    RETURN v_snapshot_id;
+END;
+$$;
 
 
 --
@@ -6022,19 +6233,82 @@ CREATE FUNCTION public.sp_market_screener_enrich_consensus_payload(p_payload jso
 CREATE FUNCTION public.sp_market_screener_enrich_opportunity_payload(p_payload jsonb, p_opportunity_id uuid) RETURNS jsonb
     LANGUAGE sql STABLE
     AS $$
-    SELECT p_payload || jsonb_build_object(
-        'strategy_code', opportunity.strategy_code,
-        'signal_type', opportunity.signal_type,
-        'signal_timeframe', opportunity.signal_timeframe,
-        'signal_trend', opportunity.signal_trend,
-        'signal_confidence', opportunity.signal_confidence,
-        'reference_price', opportunity.reference_price,
-        'invalidation_price', opportunity.invalidation_price,
-        'target_price', opportunity.target_price,
-        'signal_reasons', opportunity.signal_reasons,
-        'technical_evidence', opportunity.technical_evidence
-    )
+    SELECT CASE
+        WHEN p_payload IS NULL THEN NULL
+        ELSE p_payload || jsonb_build_object(
+            'entity_id', entity.entity_id,
+            'entity_name', entity.name,
+            'entity_type', entity.entity_type,
+            'entity_country_code', entity.country_code,
+            'source_instrument_id', instrument.instrument_id,
+            'source_symbol', instrument.symbol,
+            'source_exchange', instrument.exchange,
+            'source_currency_code', instrument.currency_code,
+            'source_isin', NULL,
+            'strategy_code', opportunity.strategy_code,
+            'signal_type', opportunity.signal_type,
+            'signal_timeframe', opportunity.signal_timeframe,
+            'signal_trend', opportunity.signal_trend,
+            'signal_confidence', opportunity.signal_confidence,
+            'reference_price', opportunity.reference_price,
+            'invalidation_price', opportunity.invalidation_price,
+            'target_price', opportunity.target_price,
+            'signal_reasons', coalesce(opportunity.signal_reasons, '[]'::jsonb),
+            'technical_evidence', coalesce(opportunity.technical_evidence, '{}'::jsonb),
+            'portfolio_match', coalesce((p_payload ->> 'portfolio_match')::boolean, false),
+            'portfolio_match_type', coalesce(
+                p_payload ->> 'portfolio_match_type',
+                'NO_MATCH'
+            ),
+            'portfolio_position_count', coalesce(
+                (p_payload ->> 'portfolio_position_count')::integer,
+                0
+            ),
+            'portfolio_symbols', coalesce(
+                p_payload -> 'portfolio_symbols',
+                '[]'::jsonb
+            ),
+            'portfolio_names', coalesce(
+                p_payload -> 'portfolio_names',
+                '[]'::jsonb
+            ),
+            'portfolio_positions', coalesce(
+                p_payload -> 'portfolio_positions',
+                '[]'::jsonb
+            ),
+            'alternative_instruments', coalesce(
+                alternatives.items,
+                '[]'::jsonb
+            )
+        )
+    END
     FROM public.market_screener_opportunities opportunity
+    JOIN public.instruments instrument
+      ON instrument.instrument_id = opportunity.instrument_id
+    JOIN public.entities entity
+      ON entity.entity_id = coalesce(
+          opportunity.entity_id,
+          instrument.entity_id
+      )
+    LEFT JOIN LATERAL (
+        SELECT jsonb_agg(
+            jsonb_build_object(
+                'instrument_id', related.instrument_id,
+                'symbol', related.symbol,
+                'exchange', related.exchange,
+                'currency_code', related.currency_code,
+                'isin', NULL,
+                'is_source', related.instrument_id = instrument.instrument_id,
+                'same_isin', false
+            )
+            ORDER BY
+                (related.instrument_id = instrument.instrument_id) DESC,
+                related.symbol,
+                related.exchange
+        ) AS items
+        FROM public.instruments related
+        WHERE related.entity_id = entity.entity_id
+    ) alternatives ON true
     WHERE opportunity.opportunity_id = p_opportunity_id;
 $$;
 
@@ -6094,20 +6368,19 @@ BEGIN
     END IF;
 
     SELECT item
-    INTO v_payload
-    FROM public.sp_market_screener_list_user_opportunities(
-        p_user_id,
-        NULL,
-        NULL,
-        NULL,
-        NULL,
-        NULL,
-        0,
-        NULL,
-        1000
-    ) item
-    WHERE (item->>'opportunity_id')::uuid = p_opportunity_id
-    LIMIT 1;
+      INTO v_payload
+      FROM public.sp_market_screener_list_user_opportunities(
+          p_user_id,
+          NULL::character varying,
+          NULL::character varying,
+          NULL::character varying,
+          NULL::boolean,
+          0::numeric,
+          NULL::text,
+          1000::integer
+      ) item
+     WHERE (item ->> 'opportunity_id')::uuid = p_opportunity_id
+     LIMIT 1;
 
     RETURN v_payload;
 END;
@@ -6161,14 +6434,51 @@ $$;
 -- Name: sp_market_screener_list_ranking_inputs(integer); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.sp_market_screener_list_ranking_inputs(p_limit integer) RETURNS SETOF record
-    LANGUAGE plpgsql
+CREATE FUNCTION public.sp_market_screener_list_ranking_inputs(p_limit integer) RETURNS TABLE(signal_id uuid, instrument_id uuid, symbol character varying, direction character varying, origin character varying, attention_score numeric, technical_score numeric, quant_score numeric, llm_score numeric, verdict character varying, summary text, evidence jsonb, strategy_code character varying, timeframe character varying)
+    LANGUAGE sql STABLE
     AS $$
-BEGIN
-  RETURN QUERY EXECUTE format(
-    'SELECT s.*, i.symbol FROM public.market_analysis_signals s JOIN public.instruments i ON i.instrument_id=s.instrument_id ORDER BY s.generated_at DESC NULLS LAST LIMIT %s',
-    greatest(coalesce(p_limit,200),1));
-END $$;
+    SELECT
+        s.signal_id,
+        s.instrument_id,
+        i.symbol,
+        s.direction,
+        coalesce(
+            nullif(s.evidence #>> '{market_discovery,origin}', ''),
+            CASE
+                WHEN d.attention_score IS NOT NULL THEN 'DISCOVERY'
+                ELSE 'MARKET_ANALYSIS'
+            END
+        )::character varying AS origin,
+        coalesce(
+            CASE
+                WHEN jsonb_typeof(s.evidence #> '{market_discovery,attention_score}') = 'number'
+                THEN (s.evidence #>> '{market_discovery,attention_score}')::numeric
+            END,
+            d.attention_score
+        ) AS attention_score,
+        s.technical_score,
+        CASE
+            WHEN jsonb_typeof(s.evidence #> '{market_discovery,quant_score}') = 'number'
+            THEN (s.evidence #>> '{market_discovery,quant_score}')::numeric
+        END AS quant_score,
+        s.llm_score,
+        nullif(s.llm_analysis ->> 'verdict', '')::character varying AS verdict,
+        nullif(s.llm_analysis ->> 'summary', '')::text AS summary,
+        coalesce(s.evidence, '{}'::jsonb) AS evidence,
+        s.strategy_code,
+        s.timeframe
+    FROM public.trading_signals s
+    JOIN public.instruments i
+      ON i.instrument_id = s.instrument_id
+    LEFT JOIN LATERAL (
+        SELECT max(c.attention_score) AS attention_score
+        FROM public.market_discovery_candidates c
+        WHERE c.instrument_id = s.instrument_id
+    ) d ON true
+    WHERE s.status IN ('CANDIDATE', 'CONFIRMED')
+    ORDER BY s.observed_at DESC, s.signal_id
+    LIMIT greatest(coalesce(p_limit, 200), 1);
+$$;
 
 
 --
@@ -6259,20 +6569,104 @@ $$;
 CREATE FUNCTION public.sp_market_screener_list_user_opportunities(p_user_id uuid, p_origin character varying, p_direction character varying, p_verdict character varying, p_portfolio_match boolean, p_minimum_score numeric, p_query text, p_limit integer) RETURNS SETOF jsonb
     LANGUAGE sql STABLE
     AS $$
-  SELECT to_jsonb(o) || jsonb_build_object('symbol',i.symbol)
-  FROM public.market_screener_opportunities o
-  JOIN public.instruments i ON i.instrument_id=o.instrument_id
-  WHERE (p_origin IS NULL OR o.origin=p_origin)
-    AND (p_direction IS NULL OR o.direction=p_direction)
-    AND (p_verdict IS NULL OR o.verdict=p_verdict)
-    AND o.composite_score >= coalesce(p_minimum_score,0)
-    AND (p_query IS NULL OR i.symbol ILIKE '%'||p_query||'%' OR coalesce(o.summary,'') ILIKE '%'||p_query||'%')
-    AND (p_portfolio_match IS NULL OR EXISTS (
-      SELECT 1 FROM public.positions p JOIN public.portfolios pf ON pf.portfolio_id=p.portfolio_id
-      WHERE pf.user_id=p_user_id AND p.instrument_id=o.instrument_id
-    )=p_portfolio_match)
-  ORDER BY o.ranking_position NULLS LAST,o.composite_score DESC
-  LIMIT greatest(coalesce(p_limit,100),1)
+    SELECT
+        to_jsonb(opportunity)
+        || jsonb_build_object(
+            'symbol', source_instrument.symbol,
+            'portfolio_match', portfolio_match.position_count > 0,
+            'portfolio_match_type', coalesce(portfolio_match.match_type, 'NO_MATCH'),
+            'portfolio_position_count', portfolio_match.position_count,
+            'portfolio_symbols', portfolio_match.symbols,
+            'portfolio_names', portfolio_match.portfolio_names,
+            'portfolio_positions', portfolio_match.positions
+        )
+    FROM public.market_screener_opportunities opportunity
+    JOIN public.instruments source_instrument
+      ON source_instrument.instrument_id = opportunity.instrument_id
+    LEFT JOIN public.entities source_entity
+      ON source_entity.entity_id = coalesce(
+          opportunity.entity_id,
+          source_instrument.entity_id
+      )
+    LEFT JOIN LATERAL (
+        SELECT
+            count(*)::integer AS position_count,
+            CASE
+                WHEN bool_or(position.instrument_id = opportunity.instrument_id)
+                    THEN 'EXACT_INSTRUMENT'
+                WHEN count(*) > 0
+                    THEN 'SAME_ENTITY'
+                ELSE NULL
+            END AS match_type,
+            coalesce(
+                jsonb_agg(DISTINCT portfolio_instrument.symbol)
+                    FILTER (WHERE portfolio_instrument.symbol IS NOT NULL),
+                '[]'::jsonb
+            ) AS symbols,
+            coalesce(
+                jsonb_agg(DISTINCT portfolio.name)
+                    FILTER (WHERE portfolio.name IS NOT NULL),
+                '[]'::jsonb
+            ) AS portfolio_names,
+            coalesce(
+                jsonb_agg(
+                    jsonb_build_object(
+                        'position_id', position.position_id,
+                        'portfolio_id', portfolio.portfolio_id,
+                        'portfolio_name', portfolio.name,
+                        'instrument_id', portfolio_instrument.instrument_id,
+                        'symbol', portfolio_instrument.symbol,
+                        'exchange', portfolio_instrument.exchange,
+                        'currency_code', portfolio_instrument.currency_code,
+                        'isin', NULL,
+                        'quantity', position.quantity,
+                        'match_type', CASE
+                            WHEN position.instrument_id = opportunity.instrument_id
+                                THEN 'EXACT_INSTRUMENT'
+                            ELSE 'SAME_ENTITY'
+                        END
+                    )
+                    ORDER BY portfolio.name, portfolio_instrument.symbol, position.position_id
+                ),
+                '[]'::jsonb
+            ) AS positions
+        FROM public.positions position
+        JOIN public.portfolios portfolio
+          ON portfolio.portfolio_id = position.portfolio_id
+         AND portfolio.user_id = p_user_id
+        JOIN public.instruments portfolio_instrument
+          ON portfolio_instrument.instrument_id = position.instrument_id
+        WHERE
+            position.instrument_id = opportunity.instrument_id
+            OR portfolio_instrument.entity_id = coalesce(
+                opportunity.entity_id,
+                source_instrument.entity_id
+            )
+    ) portfolio_match ON true
+    WHERE (p_origin IS NULL OR opportunity.origin = p_origin)
+      AND (p_direction IS NULL OR opportunity.direction = p_direction)
+      AND (p_verdict IS NULL OR opportunity.verdict = p_verdict)
+      AND opportunity.composite_score >= coalesce(p_minimum_score, 0)
+      AND (
+          p_query IS NULL
+          OR source_instrument.symbol ILIKE '%' || p_query || '%'
+          OR coalesce(source_entity.name, '') ILIKE '%' || p_query || '%'
+          OR coalesce(opportunity.summary, '') ILIKE '%' || p_query || '%'
+          OR EXISTS (
+              SELECT 1
+              FROM jsonb_array_elements_text(portfolio_match.symbols)
+                  AS owned_symbol(symbol_value)
+              WHERE owned_symbol.symbol_value ILIKE '%' || p_query || '%'
+          )
+      )
+      AND (
+          p_portfolio_match IS NULL
+          OR (portfolio_match.position_count > 0) = p_portfolio_match
+      )
+    ORDER BY
+        opportunity.ranking_position NULLS LAST,
+        opportunity.composite_score DESC
+    LIMIT greatest(coalesce(p_limit, 100), 1);
 $$;
 
 
@@ -6319,21 +6713,49 @@ $$;
 CREATE FUNCTION public.sp_market_screener_replace_ranking(p_opportunities jsonb) RETURNS jsonb
     LANGUAGE plpgsql
     AS $$
-DECLARE v_count integer := 0;
+DECLARE
+    v_count integer := 0;
 BEGIN
-  DELETE FROM public.market_screener_opportunities;
-  INSERT INTO public.market_screener_opportunities(
-    signal_id,instrument_id,direction,origin,attention_score,technical_score,quant_score,llm_score,
-    composite_score,ranking_position,verdict,summary,evidence)
-  SELECT (x->>'signal_id')::uuid,(x->>'instrument_id')::uuid,x->>'direction',x->>'origin',
-    nullif(x->>'attention_score','')::numeric,nullif(x->>'technical_score','')::numeric,
-    nullif(x->>'quant_score','')::numeric,nullif(x->>'llm_score','')::numeric,
-    nullif(x->>'composite_score','')::numeric,nullif(x->>'ranking_position','')::integer,
-    x->>'verdict',x->>'summary',coalesce(x->'evidence','{}'::jsonb)
-  FROM jsonb_array_elements(coalesce(p_opportunities,'[]'::jsonb)) x;
-  GET DIAGNOSTICS v_count = ROW_COUNT;
-  RETURN jsonb_build_object('replaced',v_count);
-END $$;
+    DELETE FROM public.market_screener_opportunities;
+
+    INSERT INTO public.market_screener_opportunities (
+        signal_id,
+        instrument_id,
+        symbol,
+        direction,
+        origin,
+        attention_score,
+        technical_score,
+        quant_score,
+        llm_score,
+        composite_score,
+        ranking_position,
+        verdict,
+        summary,
+        evidence
+    )
+    SELECT
+        (x ->> 'signal_id')::uuid,
+        (x ->> 'instrument_id')::uuid,
+        x ->> 'symbol',
+        x ->> 'direction',
+        x ->> 'origin',
+        nullif(x ->> 'attention_score', '')::numeric,
+        nullif(x ->> 'technical_score', '')::numeric,
+        nullif(x ->> 'quant_score', '')::numeric,
+        nullif(x ->> 'llm_score', '')::numeric,
+        nullif(x ->> 'composite_score', '')::numeric,
+        nullif(x ->> 'ranking_position', '')::integer,
+        x ->> 'verdict',
+        x ->> 'summary',
+        coalesce(x -> 'evidence', '{}'::jsonb)
+    FROM jsonb_array_elements(coalesce(p_opportunities, '[]'::jsonb)) x;
+
+    GET DIAGNOSTICS v_count = ROW_COUNT;
+
+    RETURN jsonb_build_object('replaced', v_count);
+END;
+$$;
 
 
 --
@@ -6371,30 +6793,14 @@ BEGIN
     IF p_limit < 1 OR p_limit > 2000 THEN
         RAISE EXCEPTION 'p_limit must be between 1 and 2000';
     END IF;
-    IF p_sentiment_min IS NOT NULL AND p_sentiment_max IS NOT NULL
+    IF p_sentiment_min IS NOT NULL
+       AND p_sentiment_max IS NOT NULL
        AND p_sentiment_min > p_sentiment_max THEN
         RAISE EXCEPTION 'sentiment_min cannot exceed sentiment_max';
     END IF;
 
     RETURN QUERY
-    WITH user_entities AS (
-        SELECT x.entity_id,
-               bool_or(x.in_portfolio) AS in_portfolio,
-               bool_or(x.in_watchlist) AS in_watchlist
-        FROM (
-            SELECT i.entity_id, true AS in_portfolio, false AS in_watchlist
-            FROM public.positions pos
-            JOIN public.portfolios pf ON pf.portfolio_id = pos.portfolio_id
-            JOIN public.instruments i ON i.instrument_id = pos.instrument_id
-            WHERE pf.user_id = p_user_id
-            UNION ALL
-            SELECT wi.entity_id, false, true
-            FROM public.watchlist_items wi
-            JOIN public.watchlists w ON w.watchlist_id = wi.watchlist_id
-            WHERE w.user_id = p_user_id
-        ) x
-        GROUP BY x.entity_id
-    ), news_rollup AS (
+    WITH news_entity_rows AS (
         SELECT
             n.news_id,
             n.cluster_id,
@@ -6404,67 +6810,150 @@ BEGIN
             n.published_at,
             ns.name::varchar AS source,
             n.raw_json,
-            coalesce(jsonb_agg(DISTINCT jsonb_build_object(
-                'entity_id', e.entity_id,
-                'name', e.name,
-                'relevance', ne.relevance,
-                'sentiment', ne.sentiment,
-                'impact', ne.impact
-            )) FILTER (WHERE e.entity_id IS NOT NULL), '[]'::jsonb) AS entities,
-            coalesce(jsonb_agg(DISTINCT jsonb_build_object(
-                'symbol', i.symbol,
-                'exchange', i.exchange
-            )) FILTER (WHERE i.instrument_id IS NOT NULL), '[]'::jsonb) AS symbols,
-            max(ne.relevance) AS relevance,
-            CASE WHEN count(ne.sentiment) > 0 THEN avg(ne.sentiment) END AS sentiment,
-            max(ne.impact) AS impact,
-            max(ni.direct_impact) AS direct_impact,
-            max(ni.propagated_impact) AS propagated_impact,
-            max(ni.confidence) AS confidence,
-            bool_or(coalesce(ue.in_portfolio, false)) AS in_portfolio,
-            bool_or(coalesce(ue.in_watchlist, false)) AS in_watchlist
+            e.entity_id,
+            e.name AS entity_name,
+            ne.relevance,
+            ne.sentiment,
+            ne.impact,
+            ni.direct_impact,
+            ni.propagated_impact,
+            ni.confidence,
+            public.sp_get_user_entity_asset_match(
+                p_user_id,
+                e.entity_id,
+                NULL
+            ) AS asset_match
         FROM public.news n
-        LEFT JOIN public.news_sources ns ON ns.source_id = n.source_id
-        LEFT JOIN public.news_entities ne ON ne.news_id = n.news_id
-        LEFT JOIN public.entities e ON e.entity_id = ne.entity_id
-        LEFT JOIN public.instruments i ON i.entity_id = e.entity_id
+        LEFT JOIN public.news_sources ns
+          ON ns.source_id = n.source_id
+        LEFT JOIN public.news_entities ne
+          ON ne.news_id = n.news_id
+        LEFT JOIN public.entities e
+          ON e.entity_id = ne.entity_id
         LEFT JOIN public.news_impacts ni
-          ON ni.news_id = n.news_id AND ni.entity_id = ne.entity_id
-        LEFT JOIN user_entities ue ON ue.entity_id = ne.entity_id
-        GROUP BY n.news_id, n.cluster_id, n.title, n.summary, n.url,
-                 n.published_at, ns.name, n.raw_json
+          ON ni.news_id = n.news_id
+         AND ni.entity_id = ne.entity_id
+    ), news_rollup AS (
+        SELECT
+            row.news_id,
+            row.cluster_id,
+            row.title,
+            row.summary,
+            row.url,
+            row.published_at,
+            row.source,
+            coalesce(
+                jsonb_agg(DISTINCT jsonb_build_object(
+                    'entity_id', row.entity_id,
+                    'name', row.entity_name,
+                    'relevance', row.relevance,
+                    'sentiment', row.sentiment,
+                    'impact', row.impact
+                )) FILTER (WHERE row.entity_id IS NOT NULL),
+                '[]'::jsonb
+            ) AS entities,
+            coalesce((
+                SELECT jsonb_agg(DISTINCT jsonb_build_object(
+                    'symbol', instrument.symbol,
+                    'exchange', instrument.exchange
+                ))
+                FROM public.instruments instrument
+                WHERE instrument.entity_id IN (
+                    SELECT entity_row.entity_id
+                    FROM news_entity_rows entity_row
+                    WHERE entity_row.news_id = row.news_id
+                      AND entity_row.entity_id IS NOT NULL
+                )
+            ), '[]'::jsonb) AS symbols,
+            max(row.relevance) AS relevance,
+            CASE
+                WHEN count(row.sentiment) > 0 THEN avg(row.sentiment)
+            END AS sentiment,
+            max(row.impact) AS impact,
+            max(row.direct_impact) AS direct_impact,
+            max(row.propagated_impact) AS propagated_impact,
+            max(row.confidence) AS confidence,
+            bool_or(coalesce((row.asset_match ->> 'in_portfolio')::boolean, false))
+                AS in_portfolio,
+            bool_or(coalesce((row.asset_match ->> 'in_watchlist')::boolean, false))
+                AS in_watchlist,
+            coalesce(
+                jsonb_agg(DISTINCT row.asset_match)
+                    FILTER (WHERE row.entity_id IS NOT NULL),
+                '[]'::jsonb
+            ) AS asset_matches,
+            row.raw_json
+        FROM news_entity_rows row
+        GROUP BY
+            row.news_id,
+            row.cluster_id,
+            row.title,
+            row.summary,
+            row.url,
+            row.published_at,
+            row.source,
+            row.raw_json
     )
     SELECT
-        r.news_id, r.cluster_id, r.title, r.summary, r.url, r.published_at,
-        r.source, r.entities, r.symbols, r.relevance, r.sentiment, r.impact,
-        r.direct_impact, r.propagated_impact, r.confidence,
-        r.in_portfolio, r.in_watchlist,
+        rollup.news_id,
+        rollup.cluster_id,
+        rollup.title,
+        rollup.summary,
+        rollup.url,
+        rollup.published_at,
+        rollup.source,
+        rollup.entities,
+        rollup.symbols,
+        rollup.relevance,
+        rollup.sentiment,
+        rollup.impact,
+        rollup.direct_impact,
+        rollup.propagated_impact,
+        rollup.confidence,
+        rollup.in_portfolio,
+        rollup.in_watchlist,
         CASE
-            WHEN r.in_portfolio AND r.in_watchlist THEN 'BOTH'
-            WHEN r.in_portfolio THEN 'PORTFOLIO'
-            WHEN r.in_watchlist THEN 'WATCHLIST'
+            WHEN rollup.in_portfolio AND rollup.in_watchlist THEN 'BOTH'
+            WHEN rollup.in_portfolio THEN 'PORTFOLIO'
+            WHEN rollup.in_watchlist THEN 'WATCHLIST'
             ELSE 'GLOBAL'
-        END::varchar,
-        r.raw_json
-    FROM news_rollup r
-    WHERE (p_date_from IS NULL OR r.published_at >= p_date_from)
-      AND (p_date_to IS NULL OR r.published_at <= p_date_to)
-      AND (nullif(btrim(p_source), '') IS NULL OR upper(r.source) = upper(btrim(p_source)))
-      AND (p_sentiment_min IS NULL OR r.sentiment >= p_sentiment_min)
-      AND (p_sentiment_max IS NULL OR r.sentiment <= p_sentiment_max)
-      AND (p_impact_min IS NULL OR greatest(coalesce(r.impact, 0), coalesce(r.direct_impact, 0), coalesce(r.propagated_impact, 0)) >= p_impact_min)
-      AND (v_query IS NULL OR r.title ILIKE '%' || v_query || '%'
-           OR r.summary ILIKE '%' || v_query || '%'
-           OR r.source ILIKE '%' || v_query || '%'
-           OR r.entities::text ILIKE '%' || v_query || '%'
-           OR r.symbols::text ILIKE '%' || v_query || '%')
+        END::varchar AS asset_scope,
+        coalesce(rollup.raw_json, '{}'::jsonb) || jsonb_build_object(
+            'asset_matches', rollup.asset_matches
+        ) AS raw_json
+    FROM news_rollup rollup
+    WHERE (p_date_from IS NULL OR rollup.published_at >= p_date_from)
+      AND (p_date_to IS NULL OR rollup.published_at <= p_date_to)
+      AND (
+          nullif(btrim(p_source), '') IS NULL
+          OR upper(rollup.source) = upper(btrim(p_source))
+      )
+      AND (p_sentiment_min IS NULL OR rollup.sentiment >= p_sentiment_min)
+      AND (p_sentiment_max IS NULL OR rollup.sentiment <= p_sentiment_max)
+      AND (
+          p_impact_min IS NULL
+          OR greatest(
+              coalesce(rollup.impact, 0),
+              coalesce(rollup.direct_impact, 0),
+              coalesce(rollup.propagated_impact, 0)
+          ) >= p_impact_min
+      )
+      AND (
+          v_query IS NULL
+          OR rollup.title ILIKE '%' || v_query || '%'
+          OR rollup.summary ILIKE '%' || v_query || '%'
+          OR rollup.source ILIKE '%' || v_query || '%'
+          OR rollup.entities::text ILIKE '%' || v_query || '%'
+          OR rollup.symbols::text ILIKE '%' || v_query || '%'
+          OR rollup.asset_matches::text ILIKE '%' || v_query || '%'
+      )
       AND CASE v_scope
-          WHEN 'MY_ASSETS' THEN r.in_portfolio OR r.in_watchlist
-          WHEN 'PORTFOLIO' THEN r.in_portfolio
-          WHEN 'WATCHLIST' THEN r.in_watchlist
+          WHEN 'MY_ASSETS' THEN rollup.in_portfolio OR rollup.in_watchlist
+          WHEN 'PORTFOLIO' THEN rollup.in_portfolio
+          WHEN 'WATCHLIST' THEN rollup.in_watchlist
           ELSE true
       END
-    ORDER BY r.published_at DESC NULLS LAST, r.news_id
+    ORDER BY rollup.published_at DESC NULLS LAST, rollup.news_id
     LIMIT p_limit;
 END;
 $$;
@@ -10461,7 +10950,7 @@ CREATE TABLE public.market_screener_ranking_snapshots (
     ranking_snapshot_id uuid DEFAULT gen_random_uuid() NOT NULL,
     screener_run_id uuid NOT NULL,
     observed_at timestamp with time zone DEFAULT now() NOT NULL,
-    opportunity_count integer NOT NULL,
+    opportunity_count integer DEFAULT 0 NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT ck_market_screener_snapshot_count CHECK ((opportunity_count >= 0))
@@ -14138,5 +14627,5 @@ ALTER TABLE ONLY public.watchlists
 -- PostgreSQL database dump complete
 --
 
-\unrestrict nVNgbDCR6l5DF0JxdIvyueBWhg9NWq7UWXhduqgZgEnMa5taeyASj232gPeUeWJ
+\unrestrict XlnKxVJ1P44qTgMtDQhqidziVYLhcjafcUsf8bM7lLZR6rIya5Q7uFH6m4deWeD
 

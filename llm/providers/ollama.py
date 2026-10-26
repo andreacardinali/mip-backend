@@ -14,12 +14,14 @@ class OllamaProvider(LLMProvider):
         model: str,
         timeout: float = 120,
         max_retries: int = 4,
+        think: bool = False,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.timeout = timeout
         self.retry_policy = RetryPolicy(max_retries=max_retries)
         self.max_retries = max_retries
+        self.think = bool(think)
 
     def generate_json(self, request: LLMRequest) -> LLMResponse:
         response_format = request.response_schema or "json"
@@ -42,7 +44,7 @@ class OllamaProvider(LLMProvider):
                 json={
                     "model": self.model,
                     "stream": False,
-                    "think": False,
+                    "think": self.think,
                     "format": response_format,
                     "prompt": prompt,
                     "options": {

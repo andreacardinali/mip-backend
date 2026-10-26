@@ -60,6 +60,7 @@ class LLMConfig:
     daily_reset_timezone: str = "America/Los_Angeles"
     rate_limit_safety_factor: float = 0.90
     retry_max_delay: float = 120.0
+    think: bool = False
     json_config: dict[str, Any] = field(default_factory=dict)
     persistent_queue_enabled: bool = False
     queue_poll_seconds: float = 2.0
@@ -109,6 +110,7 @@ class LLMConfig:
                 settings.get(f"{p}_RATE_LIMIT_SAFETY_FACTOR", 0.90)
             ),
             retry_max_delay=float(settings.get(f"{p}_RETRY_MAX_DELAY", 120.0)),
+            think=_get_bool(settings, f"{p}_THINK", False),
             json_config=_get_json_object(settings, f"{p}_JSON_CONFIG"),
             persistent_queue_enabled=_get_bool(
                 settings, f"{p}_PERSISTENT_QUEUE_ENABLED", False

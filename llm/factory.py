@@ -23,6 +23,7 @@ def create_provider(config: LLMConfig) -> LLMProvider:
             model=config.model,
             timeout=config.timeout,
             max_retries=config.max_retries,
+            think=config.think,
         )
     elif config.provider == "openai_compatible":
         provider = OpenAICompatibleProvider(
