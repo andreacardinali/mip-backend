@@ -38,16 +38,49 @@ def list_screener_opportunities(
         db.close()
 
 
-@router.get("/{opportunity_id}")
-def get_screener_opportunity(
-    opportunity_id: str,
+@router.get("/runs")
+def list_screener_runs(
+    limit: int = Query(default=50, ge=1, le=500),
     current_user: CurrentUser = Depends(get_current_user),
 ):
     db = SessionLocal()
     try:
+        return MarketScreenerApiRepository(db).list_runs(limit)
+    finally:
+        db.close()
+
+
+@router.get("/snapshots")
+def list_screener_snapshots(
+    limit: int = Query(default=50, ge=1, le=500),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    db = SessionLocal()
+    try:
+        return MarketScreenerApiRepository(db).list_snapshots(limit)
+    finally:
+        db.close()
+
+
+@router.get("/snapshots/{snapshot_id}/items")
+def list_screener_snapshot_items(
+    snapshot_id: str, current_user: CurrentUser = Depends(get_current_user)
+):
+    db = SessionLocal()
+    try:
+        return MarketScreenerApiRepository(db).list_snapshot_items(snapshot_id)
+    finally:
+        db.close()
+
+
+@router.get("/{opportunity_id}")
+def get_screener_opportunity(
+    opportunity_id: str, current_user: CurrentUser = Depends(get_current_user)
+):
+    db = SessionLocal()
+    try:
         payload = MarketScreenerApiRepository(db).get_opportunity(
-            user_id=current_user["user_id"],
-            opportunity_id=opportunity_id,
+            user_id=current_user["user_id"], opportunity_id=opportunity_id
         )
         if payload is None:
             raise HTTPException(status_code=404, detail="Opportunity not found")

@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "job_key": "market_screener_pipeline",
+  "job_name": "Market Screener Pipeline",
+  "python_module": "jobs.market_screener_pipeline.worker",
+  "trigger": {
+    "type": "interval",
+    "interval_minutes": 60
+  },
+  "enabled_by_default": false
+}

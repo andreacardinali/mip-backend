@@ -2,12 +2,34 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
+from datetime import date, datetime
+from decimal import Decimal
+from enum import Enum
 from typing import Any
+from uuid import UUID
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from market_analysis.models import SignalCandidate, SignalStatus
+
+
+def _json_default(value: Any) -> Any:
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, Enum):
+        return value.value
+    raise TypeError(
+        f"Object of type {value.__class__.__name__} is not JSON serializable"
+    )
+
+
+def _json_dumps(value: Any) -> str:
+    return json.dumps(value, default=_json_default)
 
 
 class MarketAnalysisRepository:
@@ -41,7 +63,7 @@ class MarketAnalysisRepository:
                     "universe_type": universe_type,
                     "source_system_code": source_system_code,
                     "active": active,
-                    "config": json.dumps(config or {}),
+                    "config": _json_dumps(config or {}),
                 },
             ).scalar_one()
         )
@@ -69,7 +91,7 @@ class MarketAnalysisRepository:
                 CAST(:symbols AS jsonb))
         """
             ),
-            {"symbols": json.dumps(list(symbols))},
+            {"symbols": _json_dumps(list(symbols))},
         ).mappings()
         return {str(row["requested_symbol"]): str(row["instrument_id"]) for row in rows}
 
@@ -86,7 +108,7 @@ class MarketAnalysisRepository:
             ),
             {
                 "universe_id": universe_id,
-                "members": json.dumps(list(members)),
+                "members": _json_dumps(list(members)),
                 "effective_at": effective_at,
             },
         ).scalar_one()
@@ -119,7 +141,7 @@ class MarketAnalysisRepository:
                 {
                     "universe_id": universe_id,
                     "algorithm_version": algorithm_version,
-                    "config": json.dumps(config),
+                    "config": _json_dumps(config),
                 },
             ).scalar_one()
         )
@@ -135,7 +157,11 @@ class MarketAnalysisRepository:
                 CAST(:run_id AS uuid), :status, CAST(:summary AS jsonb))
         """
                 ),
-                {"run_id": run_id, "status": status, "summary": json.dumps(summary)},
+                {
+                    "run_id": run_id,
+                    "status": status,
+                    "summary": _json_dumps(summary),
+                },
             ).scalar_one()
         )
 
@@ -187,7 +213,7 @@ class MarketAnalysisRepository:
                 text(
                     "SELECT public.sp_market_analysis_upsert_signal(CAST(:payload AS jsonb))"
                 ),
-                {"payload": json.dumps(payload)},
+                {"payload": _json_dumps(payload)},
             ).scalar_one()
         )
 

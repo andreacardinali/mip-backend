@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict bfMECDgkrJJd10yjaz8sjx2IBfb5eUGLx6j5FQxWpmGEzQytmcJdRMb4qaIaQ35
+\restrict 2urO0JXq9nnfUeEfEfJb2npfXeAVYjz8TuKXbet0UxpKsaceIzAMXpnKWJBMx0d
 
 -- Dumped from database version 18.6 (Debian 18.6-1.pgdg13+2)
 -- Dumped by pg_dump version 18.6 (Debian 18.6-1.pgdg13+2)
@@ -5703,6 +5703,113 @@ $$;
 
 
 --
+-- Name: sp_market_screener_complete_run(uuid, character varying, uuid, uuid, jsonb, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_market_screener_complete_run(p_screener_run_id uuid, p_status character varying, p_discovery_snapshot_id uuid, p_scan_run_id uuid, p_phase_results jsonb, p_error_message text DEFAULT NULL::text) RETURNS void
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF p_status NOT IN ('SUCCESS', 'PARTIAL', 'FAILED') THEN
+        RAISE EXCEPTION 'Invalid terminal status: %', p_status;
+    END IF;
+    UPDATE public.market_screener_runs
+    SET status = p_status,
+        discovery_snapshot_id = p_discovery_snapshot_id,
+        scan_run_id = p_scan_run_id,
+        phase_results = COALESCE(p_phase_results, '{}'::jsonb),
+        error_message = p_error_message,
+        completed_at = now()
+    WHERE screener_run_id = p_screener_run_id;
+    IF NOT FOUND THEN RAISE EXCEPTION 'Screener run not found: %', p_screener_run_id; END IF;
+END;
+$$;
+
+
+--
+-- Name: sp_market_screener_create_ranking_snapshot(uuid, character varying); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_market_screener_create_ranking_snapshot(p_screener_run_id uuid, p_algorithm_version character varying) RETURNS uuid
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_snapshot_id uuid;
+    v_count integer;
+BEGIN
+    SELECT count(*)::integer INTO v_count
+    FROM public.market_screener_opportunities
+    WHERE active = true AND algorithm_version = p_algorithm_version;
+
+    INSERT INTO public.market_screener_ranking_snapshots(
+        screener_run_id, algorithm_version, opportunity_count
+    ) VALUES (p_screener_run_id, p_algorithm_version, v_count)
+    RETURNING ranking_snapshot_id INTO v_snapshot_id;
+
+    INSERT INTO public.market_screener_ranking_snapshot_items(
+        ranking_snapshot_id, opportunity_id, signal_id, entity_id, instrument_id,
+        symbol, direction, origin, ranking_position, previous_ranking_position,
+        ranking_change, attention_score, technical_score, quant_score, llm_score,
+        composite_score, verdict, summary, evidence
+    )
+    SELECT
+        v_snapshot_id, current_opportunity.opportunity_id,
+        current_opportunity.signal_id, current_opportunity.entity_id,
+        current_opportunity.instrument_id, current_opportunity.symbol,
+        current_opportunity.direction, current_opportunity.origin,
+        current_opportunity.ranking_position,
+        previous_item.ranking_position,
+        CASE WHEN previous_item.ranking_position IS NULL THEN NULL
+             ELSE previous_item.ranking_position - current_opportunity.ranking_position END,
+        current_opportunity.attention_score, current_opportunity.technical_score,
+        current_opportunity.quant_score, current_opportunity.llm_score,
+        current_opportunity.composite_score, current_opportunity.verdict,
+        current_opportunity.summary, current_opportunity.evidence
+    FROM public.market_screener_opportunities current_opportunity
+    LEFT JOIN LATERAL (
+        SELECT item.ranking_position
+        FROM public.market_screener_ranking_snapshot_items item
+        JOIN public.market_screener_ranking_snapshots snapshot
+          ON snapshot.ranking_snapshot_id = item.ranking_snapshot_id
+        WHERE item.entity_id = current_opportunity.entity_id
+          AND item.direction = current_opportunity.direction
+          AND snapshot.algorithm_version = p_algorithm_version
+        ORDER BY snapshot.observed_at DESC
+        LIMIT 1
+    ) previous_item ON true
+    WHERE current_opportunity.active = true
+      AND current_opportunity.algorithm_version = p_algorithm_version;
+
+    RETURN v_snapshot_id;
+END;
+$$;
+
+
+--
+-- Name: sp_market_screener_enrich_opportunity_payload(jsonb, uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_market_screener_enrich_opportunity_payload(p_payload jsonb, p_opportunity_id uuid) RETURNS jsonb
+    LANGUAGE sql STABLE
+    AS $$
+    SELECT p_payload || jsonb_build_object(
+        'strategy_code', opportunity.strategy_code,
+        'signal_type', opportunity.signal_type,
+        'signal_timeframe', opportunity.signal_timeframe,
+        'signal_trend', opportunity.signal_trend,
+        'signal_confidence', opportunity.signal_confidence,
+        'reference_price', opportunity.reference_price,
+        'invalidation_price', opportunity.invalidation_price,
+        'target_price', opportunity.target_price,
+        'signal_reasons', opportunity.signal_reasons,
+        'technical_evidence', opportunity.technical_evidence
+    )
+    FROM public.market_screener_opportunities opportunity
+    WHERE opportunity.opportunity_id = p_opportunity_id;
+$$;
+
+
+--
 -- Name: sp_market_screener_get_opportunity(uuid); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -5838,6 +5945,89 @@ CREATE FUNCTION public.sp_market_screener_list_ranking_inputs(p_algorithm_versio
       AND (p_algorithm_version IS NULL OR s.algorithm_version = p_algorithm_version)
     ORDER BY s.observed_at DESC, s.signal_id
     LIMIT GREATEST(COALESCE(p_limit, 200), 1);
+$$;
+
+
+--
+-- Name: sp_market_screener_list_ranking_snapshots(integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_market_screener_list_ranking_snapshots(p_limit integer DEFAULT 50) RETURNS SETOF jsonb
+    LANGUAGE sql STABLE
+    AS $$
+    SELECT jsonb_build_object(
+        'ranking_snapshot_id', snapshot.ranking_snapshot_id,
+        'screener_run_id', snapshot.screener_run_id,
+        'algorithm_version', snapshot.algorithm_version,
+        'observed_at', snapshot.observed_at,
+        'opportunity_count', snapshot.opportunity_count
+    )
+    FROM public.market_screener_ranking_snapshots snapshot
+    ORDER BY snapshot.observed_at DESC
+    LIMIT LEAST(GREATEST(p_limit, 1), 500);
+$$;
+
+
+--
+-- Name: sp_market_screener_list_runs(integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_market_screener_list_runs(p_limit integer DEFAULT 50) RETURNS SETOF jsonb
+    LANGUAGE sql STABLE
+    AS $$
+    SELECT jsonb_build_object(
+        'screener_run_id', run.screener_run_id,
+        'algorithm_version', run.algorithm_version,
+        'status', run.status,
+        'discovery_snapshot_id', run.discovery_snapshot_id,
+        'scan_run_id', run.scan_run_id,
+        'started_at', run.started_at,
+        'completed_at', run.completed_at,
+        'phase_results', run.phase_results,
+        'error_message', run.error_message,
+        'ranking_snapshot_id', snapshot.ranking_snapshot_id,
+        'opportunity_count', COALESCE(snapshot.opportunity_count, 0)
+    )
+    FROM public.market_screener_runs run
+    LEFT JOIN public.market_screener_ranking_snapshots snapshot
+      ON snapshot.screener_run_id = run.screener_run_id
+    ORDER BY run.started_at DESC
+    LIMIT LEAST(GREATEST(p_limit, 1), 500);
+$$;
+
+
+--
+-- Name: sp_market_screener_list_snapshot_items(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_market_screener_list_snapshot_items(p_ranking_snapshot_id uuid) RETURNS SETOF jsonb
+    LANGUAGE sql STABLE
+    AS $$
+    SELECT jsonb_build_object(
+        'ranking_snapshot_item_id', item.ranking_snapshot_item_id,
+        'ranking_snapshot_id', item.ranking_snapshot_id,
+        'opportunity_id', item.opportunity_id,
+        'signal_id', item.signal_id,
+        'entity_id', item.entity_id,
+        'instrument_id', item.instrument_id,
+        'symbol', item.symbol,
+        'direction', item.direction,
+        'origin', item.origin,
+        'ranking_position', item.ranking_position,
+        'previous_ranking_position', item.previous_ranking_position,
+        'ranking_change', item.ranking_change,
+        'attention_score', item.attention_score,
+        'technical_score', item.technical_score,
+        'quant_score', item.quant_score,
+        'llm_score', item.llm_score,
+        'composite_score', item.composite_score,
+        'verdict', item.verdict,
+        'summary', item.summary,
+        'evidence', item.evidence
+    )
+    FROM public.market_screener_ranking_snapshot_items item
+    WHERE item.ranking_snapshot_id = p_ranking_snapshot_id
+    ORDER BY item.ranking_position;
 $$;
 
 
@@ -6052,6 +6242,36 @@ $$;
 
 
 --
+-- Name: sp_market_screener_list_user_signals(uuid, character varying, character varying, character varying, character varying, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_market_screener_list_user_signals(p_user_id uuid, p_algorithm_version character varying DEFAULT NULL::character varying, p_signal_type character varying DEFAULT NULL::character varying, p_strategy_code character varying DEFAULT NULL::character varying, p_direction character varying DEFAULT NULL::character varying, p_limit integer DEFAULT 100) RETURNS SETOF jsonb
+    LANGUAGE sql STABLE
+    AS $$
+    SELECT public.sp_market_screener_enrich_opportunity_payload(
+        payload,
+        (payload->>'opportunity_id')::uuid
+    )
+    FROM public.sp_market_screener_list_user_opportunities(
+        p_user_id,
+        p_algorithm_version,
+        NULL,
+        p_direction,
+        NULL,
+        NULL,
+        0,
+        NULL,
+        LEAST(GREATEST(p_limit, 1), 1000)
+    ) payload
+    JOIN public.market_screener_opportunities opportunity
+      ON opportunity.opportunity_id = (payload->>'opportunity_id')::uuid
+    WHERE (p_signal_type IS NULL OR opportunity.signal_type = p_signal_type)
+      AND (p_strategy_code IS NULL OR opportunity.strategy_code = p_strategy_code)
+    ORDER BY opportunity.ranking_position;
+$$;
+
+
+--
 -- Name: sp_market_screener_replace_ranking(character varying, jsonb); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -6114,6 +6334,25 @@ BEGIN
 
     GET DIAGNOSTICS v_inserted = ROW_COUNT;
     RETURN jsonb_build_object('upserted', v_inserted, 'algorithm_version', p_algorithm_version);
+END;
+$$;
+
+
+--
+-- Name: sp_market_screener_start_run(character varying); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_market_screener_start_run(p_algorithm_version character varying) RETURNS uuid
+    LANGUAGE plpgsql
+    AS $$
+DECLARE v_id uuid;
+BEGIN
+    IF NULLIF(btrim(p_algorithm_version), '') IS NULL THEN
+        RAISE EXCEPTION 'p_algorithm_version is required';
+    END IF;
+    INSERT INTO public.market_screener_runs(algorithm_version, status)
+    VALUES (p_algorithm_version, 'RUNNING') RETURNING screener_run_id INTO v_id;
+    RETURN v_id;
 END;
 $$;
 
@@ -9219,6 +9458,62 @@ $$;
 
 
 --
+-- Name: trg_market_screener_populate_signal_fields(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.trg_market_screener_populate_signal_fields() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_signal record;
+BEGIN
+    SELECT
+        signal.strategy_code,
+        signal.signal_type,
+        signal.timeframe,
+        signal.trend,
+        signal.confidence,
+        signal.reference_price,
+        signal.invalidation_price,
+        signal.target_price,
+        CASE
+            WHEN jsonb_typeof(signal.evidence->'reasons') = 'array'
+                THEN signal.evidence->'reasons'
+            WHEN jsonb_typeof(signal.evidence->'signal'->'reasons') = 'array'
+                THEN signal.evidence->'signal'->'reasons'
+            ELSE '[]'::jsonb
+        END AS reasons,
+        COALESCE(
+            signal.evidence->'technical',
+            signal.evidence->'signal'->'evidence'->'technical',
+            '{}'::jsonb
+        ) AS technical_evidence
+    INTO v_signal
+    FROM public.trading_signals signal
+    WHERE signal.signal_id = NEW.signal_id;
+
+    IF FOUND THEN
+        NEW.strategy_code := v_signal.strategy_code;
+        NEW.signal_type := v_signal.signal_type;
+        NEW.signal_timeframe := v_signal.timeframe;
+        NEW.signal_trend := v_signal.trend;
+        NEW.signal_confidence := v_signal.confidence;
+        NEW.reference_price := v_signal.reference_price;
+        NEW.invalidation_price := v_signal.invalidation_price;
+        NEW.target_price := v_signal.target_price;
+        NEW.signal_reasons := COALESCE(v_signal.reasons, '[]'::jsonb);
+        NEW.technical_evidence := COALESCE(
+            v_signal.technical_evidence,
+            '{}'::jsonb
+        );
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
 -- Name: trg_market_screener_set_entity_id(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -10022,7 +10317,94 @@ CREATE TABLE public.market_screener_opportunities (
     active boolean DEFAULT true NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    entity_id uuid NOT NULL
+    entity_id uuid NOT NULL,
+    strategy_code character varying,
+    signal_type character varying,
+    signal_timeframe character varying,
+    signal_trend character varying,
+    signal_confidence numeric,
+    reference_price numeric,
+    invalidation_price numeric,
+    target_price numeric,
+    signal_reasons jsonb DEFAULT '[]'::jsonb NOT NULL,
+    technical_evidence jsonb DEFAULT '{}'::jsonb NOT NULL
+);
+
+
+--
+-- Name: market_screener_ranking_snapshot_items; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.market_screener_ranking_snapshot_items (
+    ranking_snapshot_item_id uuid DEFAULT gen_random_uuid() CONSTRAINT market_screener_ranking_snaps_ranking_snapshot_item_id_not_null NOT NULL,
+    ranking_snapshot_id uuid CONSTRAINT market_screener_ranking_snapshot_i_ranking_snapshot_id_not_null NOT NULL,
+    opportunity_id uuid NOT NULL,
+    signal_id uuid NOT NULL,
+    entity_id uuid NOT NULL,
+    instrument_id uuid NOT NULL,
+    symbol character varying NOT NULL,
+    direction character varying NOT NULL,
+    origin character varying NOT NULL,
+    ranking_position integer CONSTRAINT market_screener_ranking_snapshot_item_ranking_position_not_null NOT NULL,
+    previous_ranking_position integer,
+    ranking_change integer,
+    attention_score numeric,
+    technical_score numeric,
+    quant_score numeric,
+    llm_score numeric,
+    composite_score numeric NOT NULL,
+    verdict character varying,
+    summary text,
+    evidence jsonb DEFAULT '{}'::jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    strategy_code character varying,
+    signal_type character varying,
+    signal_timeframe character varying,
+    signal_trend character varying,
+    signal_confidence numeric,
+    reference_price numeric,
+    invalidation_price numeric,
+    target_price numeric,
+    signal_reasons jsonb DEFAULT '[]'::jsonb NOT NULL,
+    technical_evidence jsonb DEFAULT '{}'::jsonb CONSTRAINT market_screener_ranking_snapshot_it_technical_evidence_not_null NOT NULL,
+    CONSTRAINT ck_market_screener_snapshot_rank CHECK ((ranking_position > 0))
+);
+
+
+--
+-- Name: market_screener_ranking_snapshots; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.market_screener_ranking_snapshots (
+    ranking_snapshot_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    screener_run_id uuid NOT NULL,
+    algorithm_version character varying NOT NULL,
+    observed_at timestamp with time zone DEFAULT now() NOT NULL,
+    opportunity_count integer NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ck_market_screener_snapshot_count CHECK ((opportunity_count >= 0))
+);
+
+
+--
+-- Name: market_screener_runs; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.market_screener_runs (
+    screener_run_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    algorithm_version character varying NOT NULL,
+    status character varying NOT NULL,
+    discovery_snapshot_id uuid,
+    scan_run_id uuid,
+    started_at timestamp with time zone DEFAULT now() NOT NULL,
+    completed_at timestamp with time zone,
+    phase_results jsonb DEFAULT '{}'::jsonb NOT NULL,
+    error_message text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ck_market_screener_run_status CHECK (((status)::text = ANY ((ARRAY['RUNNING'::character varying, 'SUCCESS'::character varying, 'PARTIAL'::character varying, 'FAILED'::character varying])::text[])))
 );
 
 
@@ -11139,6 +11521,30 @@ ALTER TABLE ONLY public.market_screener_opportunities
 
 
 --
+-- Name: market_screener_ranking_snapshot_items market_screener_ranking_snapshot_items_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.market_screener_ranking_snapshot_items
+    ADD CONSTRAINT market_screener_ranking_snapshot_items_pkey PRIMARY KEY (ranking_snapshot_item_id);
+
+
+--
+-- Name: market_screener_ranking_snapshots market_screener_ranking_snapshots_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.market_screener_ranking_snapshots
+    ADD CONSTRAINT market_screener_ranking_snapshots_pkey PRIMARY KEY (ranking_snapshot_id);
+
+
+--
+-- Name: market_screener_runs market_screener_runs_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.market_screener_runs
+    ADD CONSTRAINT market_screener_runs_pkey PRIMARY KEY (screener_run_id);
+
+
+--
 -- Name: market_search_cache market_search_cache_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -11587,6 +11993,22 @@ ALTER TABLE ONLY public.market_price_refresh_queue
 
 
 --
+-- Name: market_screener_ranking_snapshot_items uq_market_screener_snapshot_item; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.market_screener_ranking_snapshot_items
+    ADD CONSTRAINT uq_market_screener_snapshot_item UNIQUE (ranking_snapshot_id, opportunity_id);
+
+
+--
+-- Name: market_screener_ranking_snapshots uq_market_screener_snapshot_run; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.market_screener_ranking_snapshots
+    ADD CONSTRAINT uq_market_screener_snapshot_run UNIQUE (screener_run_id);
+
+
+--
 -- Name: scheduler_manual_run_requests uq_scheduler_manual_run_job_run; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -11942,6 +12364,27 @@ CREATE INDEX ix_market_screener_opportunities_active_rank ON public.market_scree
 --
 
 CREATE INDEX ix_market_screener_opportunities_entity ON public.market_screener_opportunities USING btree (entity_id, active, ranking_position);
+
+
+--
+-- Name: ix_market_screener_runs_started; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_market_screener_runs_started ON public.market_screener_runs USING btree (started_at DESC);
+
+
+--
+-- Name: ix_market_screener_snapshot_items_entity; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_market_screener_snapshot_items_entity ON public.market_screener_ranking_snapshot_items USING btree (entity_id, ranking_snapshot_id);
+
+
+--
+-- Name: ix_market_screener_snapshots_observed; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_market_screener_snapshots_observed ON public.market_screener_ranking_snapshots USING btree (observed_at DESC);
 
 
 --
@@ -12540,10 +12983,59 @@ CREATE TRIGGER trg_market_screener_opportunities_updated_at BEFORE UPDATE ON pub
 
 
 --
+-- Name: market_screener_opportunities trg_market_screener_populate_signal_fields; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_market_screener_populate_signal_fields BEFORE INSERT OR UPDATE OF signal_id ON public.market_screener_opportunities FOR EACH ROW EXECUTE FUNCTION public.trg_market_screener_populate_signal_fields();
+
+
+--
+-- Name: market_screener_runs trg_market_screener_runs_created_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_market_screener_runs_created_at BEFORE INSERT ON public.market_screener_runs FOR EACH ROW EXECUTE FUNCTION public.trg_set_created_at();
+
+
+--
+-- Name: market_screener_runs trg_market_screener_runs_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_market_screener_runs_updated_at BEFORE INSERT OR UPDATE ON public.market_screener_runs FOR EACH ROW EXECUTE FUNCTION public.trg_set_updated_at();
+
+
+--
 -- Name: market_screener_opportunities trg_market_screener_set_entity_id; Type: TRIGGER; Schema: public; Owner: -
 --
 
 CREATE TRIGGER trg_market_screener_set_entity_id BEFORE INSERT OR UPDATE OF instrument_id ON public.market_screener_opportunities FOR EACH ROW EXECUTE FUNCTION public.trg_market_screener_set_entity_id();
+
+
+--
+-- Name: market_screener_ranking_snapshot_items trg_market_screener_snapshot_items_created_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_market_screener_snapshot_items_created_at BEFORE INSERT ON public.market_screener_ranking_snapshot_items FOR EACH ROW EXECUTE FUNCTION public.trg_set_created_at();
+
+
+--
+-- Name: market_screener_ranking_snapshot_items trg_market_screener_snapshot_items_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_market_screener_snapshot_items_updated_at BEFORE INSERT OR UPDATE ON public.market_screener_ranking_snapshot_items FOR EACH ROW EXECUTE FUNCTION public.trg_set_updated_at();
+
+
+--
+-- Name: market_screener_ranking_snapshots trg_market_screener_snapshots_created_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_market_screener_snapshots_created_at BEFORE INSERT ON public.market_screener_ranking_snapshots FOR EACH ROW EXECUTE FUNCTION public.trg_set_created_at();
+
+
+--
+-- Name: market_screener_ranking_snapshots trg_market_screener_snapshots_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_market_screener_snapshots_updated_at BEFORE INSERT OR UPDATE ON public.market_screener_ranking_snapshots FOR EACH ROW EXECUTE FUNCTION public.trg_set_updated_at();
 
 
 --
@@ -13100,6 +13592,22 @@ ALTER TABLE ONLY public.market_screener_opportunities
 
 
 --
+-- Name: market_screener_ranking_snapshot_items market_screener_ranking_snapshot_items_ranking_snapshot_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.market_screener_ranking_snapshot_items
+    ADD CONSTRAINT market_screener_ranking_snapshot_items_ranking_snapshot_id_fkey FOREIGN KEY (ranking_snapshot_id) REFERENCES public.market_screener_ranking_snapshots(ranking_snapshot_id) ON DELETE CASCADE;
+
+
+--
+-- Name: market_screener_ranking_snapshots market_screener_ranking_snapshots_screener_run_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.market_screener_ranking_snapshots
+    ADD CONSTRAINT market_screener_ranking_snapshots_screener_run_id_fkey FOREIGN KEY (screener_run_id) REFERENCES public.market_screener_runs(screener_run_id) ON DELETE CASCADE;
+
+
+--
 -- Name: market_universe_members market_universe_members_instrument_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -13463,5 +13971,5 @@ ALTER TABLE ONLY public.watchlists
 -- PostgreSQL database dump complete
 --
 
-\unrestrict bfMECDgkrJJd10yjaz8sjx2IBfb5eUGLx6j5FQxWpmGEzQytmcJdRMb4qaIaQ35
+\unrestrict 2urO0JXq9nnfUeEfEfJb2npfXeAVYjz8TuKXbet0UxpKsaceIzAMXpnKWJBMx0d
 
