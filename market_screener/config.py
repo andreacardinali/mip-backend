@@ -2,35 +2,42 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from market_screener.constants import (
+    MARKET_SCREENER_RANKING_FIELD,
+    MARKET_SCREENER_REQUIRE_QUANT,
+    MARKET_SCREENER_REQUIRE_TECHNICAL,
+    MARKET_SCREENER_WEIGHT_MARKET_CAP,
+    MARKET_SCREENER_WEIGHT_QUANT,
+    MARKET_SCREENER_WEIGHT_TECHNICAL,
+)
 
 @dataclass(frozen=True, slots=True)
 class ScreenerRankingConfig:
-    attention_weight: float = 0.20
-    technical_weight: float = 0.25
-    quant_weight: float = 0.35
-    llm_weight: float = 0.20
-    consensus_bonus: float = 8.0
-    conflict_penalty: float = 12.0
-    minimum_score: float = 0.0
-    limit: int = 50
+    technical_weight: float = MARKET_SCREENER_WEIGHT_TECHNICAL
+    quant_weight: float = MARKET_SCREENER_WEIGHT_QUANT
+    ranking_weight: float = MARKET_SCREENER_WEIGHT_MARKET_CAP
+    ranking_field: str = MARKET_SCREENER_RANKING_FIELD
+    require_technical: bool = MARKET_SCREENER_REQUIRE_TECHNICAL
+    require_quant: bool = MARKET_SCREENER_REQUIRE_QUANT
 
     def __post_init__(self):
-        weights = (
-            self.attention_weight,
-            self.technical_weight,
-            self.quant_weight,
-            self.llm_weight,
+        if self.technical_weight < 0:
+            raise ValueError("technical_weight must be non-negative")
+        if self.quant_weight < 0:
+            raise ValueError("quant_weight must be non-negative")
+        if self.ranking_weight < 0:
+            raise ValueError("ranking_weight must be non-negative")
+
+        total_weight = (
+            self.technical_weight
+            + self.quant_weight
+            + self.ranking_weight
         )
-        if any(x < 0 for x in weights):
-            raise ValueError("ranking weights cannot be negative")
-        if sum(weights) <= 0:
+        if total_weight <= 0:
             raise ValueError("at least one ranking weight must be positive")
-        if self.consensus_bonus < 0 or self.conflict_penalty < 0:
-            raise ValueError("consensus adjustments cannot be negative")
-        if not 0 <= self.minimum_score <= 100:
-            raise ValueError("minimum_score must be between 0 and 100")
-        if self.limit < 1:
-            raise ValueError("limit must be positive")
+
+        if not self.ranking_field.strip():
+            raise ValueError("ranking_field must not be empty")
 
     @property
     def weight_total(self):

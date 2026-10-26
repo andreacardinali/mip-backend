@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict EmmIcxt1ZsgMGgdNrUPvnlAbOSGooITrk3dq82HQOZWO4wHwvGeewrFCikMJKfT
+\restrict AYptmqJ9WdkFdFny68mmOYBMO52STvOiWWUhVZv1gnRPKJnEgVOyp0FsWCNbHQI
 
 -- Dumped from database version 18.6 (Debian 18.6-1.pgdg13+2)
 -- Dumped by pg_dump version 18.6 (Debian 18.6-1.pgdg13+2)
@@ -110,6 +110,15 @@ CREATE TYPE public.trend_type AS ENUM (
     'BEARISH',
     'SIDEWAYS'
 );
+
+
+--
+-- Name: fn_alert_set_updated_at(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.fn_alert_set_updated_at() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$ BEGIN NEW.updated_at=clock_timestamp();RETURN NEW;END $$;
 
 
 --
@@ -236,6 +245,42 @@ BEGIN
     RETURN (p_amount * v_from_rate) / v_to_rate;
 END;
 $$;
+
+
+--
+-- Name: sp_alert_list_enabled_rules(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_alert_list_enabled_rules() RETURNS TABLE(rule_id uuid, user_id uuid, name character varying, alert_type character varying, severity character varying, channel character varying, conditions jsonb, cooldown_minutes integer)
+    LANGUAGE sql STABLE
+    AS $$ SELECT r.rule_id,r.user_id,r.name,r.alert_type,r.severity,r.channel,r.conditions,r.cooldown_minutes FROM public.alert_rules r WHERE r.enabled ORDER BY r.user_id,r.name $$;
+
+
+--
+-- Name: sp_alert_mark_enqueued(uuid, uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_alert_mark_enqueued(p_event_id uuid, p_notification_id uuid) RETURNS void
+    LANGUAGE sql
+    AS $$ UPDATE public.alert_events SET notification_id=p_notification_id WHERE alert_event_id=p_event_id $$;
+
+
+--
+-- Name: sp_alert_register_match(uuid, uuid, uuid, character varying, jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_alert_register_match(p_rule_id uuid, p_instrument_id uuid, p_signal_id uuid, p_fingerprint character varying, p_payload jsonb) RETURNS uuid
+    LANGUAGE plpgsql
+    AS $$ DECLARE r public.alert_rules%ROWTYPE; e public.alert_events%ROWTYPE; v uuid; BEGIN SELECT * INTO r FROM public.alert_rules WHERE rule_id=p_rule_id AND enabled FOR SHARE; IF NOT FOUND THEN RETURN NULL;END IF; SELECT * INTO e FROM public.alert_events WHERE rule_id=p_rule_id AND instrument_id=p_instrument_id ORDER BY created_at DESC LIMIT 1; IF FOUND AND (e.fingerprint=p_fingerprint OR e.created_at>now()-make_interval(mins=>r.cooldown_minutes)) THEN RETURN NULL;END IF; INSERT INTO public.alert_events(rule_id,user_id,instrument_id,signal_id,fingerprint,payload) VALUES(p_rule_id,r.user_id,p_instrument_id,p_signal_id,p_fingerprint,coalesce(p_payload,'{}')) ON CONFLICT(rule_id,instrument_id,fingerprint) DO NOTHING RETURNING alert_event_id INTO v; RETURN v; END $$;
+
+
+--
+-- Name: sp_alert_upsert_rule(uuid, uuid, character varying, character varying, character varying, character varying, jsonb, integer, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_alert_upsert_rule(p_rule_id uuid, p_user_id uuid, p_name character varying, p_alert_type character varying, p_severity character varying, p_channel character varying, p_conditions jsonb, p_cooldown_minutes integer, p_enabled boolean) RETURNS uuid
+    LANGUAGE plpgsql
+    AS $$ DECLARE v uuid; BEGIN IF p_rule_id IS NULL THEN INSERT INTO public.alert_rules(user_id,name,alert_type,severity,channel,conditions,cooldown_minutes,enabled) VALUES(p_user_id,btrim(p_name),upper(coalesce(p_alert_type,'MARKET_SIGNAL')),upper(coalesce(p_severity,'MEDIUM')),nullif(upper(btrim(p_channel)),''),coalesce(p_conditions,'{}'),greatest(coalesce(p_cooldown_minutes,240),0),coalesce(p_enabled,true)) ON CONFLICT(user_id,name) DO UPDATE SET alert_type=excluded.alert_type,severity=excluded.severity,channel=excluded.channel,conditions=excluded.conditions,cooldown_minutes=excluded.cooldown_minutes,enabled=excluded.enabled RETURNING rule_id INTO v; ELSE UPDATE public.alert_rules SET name=btrim(p_name),alert_type=upper(coalesce(p_alert_type,'MARKET_SIGNAL')),severity=upper(coalesce(p_severity,'MEDIUM')),channel=nullif(upper(btrim(p_channel)),''),conditions=coalesce(p_conditions,'{}'),cooldown_minutes=greatest(coalesce(p_cooldown_minutes,240),0),enabled=coalesce(p_enabled,true) WHERE rule_id=p_rule_id AND user_id=p_user_id RETURNING rule_id INTO v; END IF; RETURN v; END $$;
 
 
 --
@@ -9793,6 +9838,46 @@ $$;
 
 
 --
+-- Name: alert_events; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.alert_events (
+    alert_event_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    rule_id uuid NOT NULL,
+    user_id uuid NOT NULL,
+    instrument_id uuid NOT NULL,
+    signal_id uuid NOT NULL,
+    fingerprint character varying(64) NOT NULL,
+    payload jsonb DEFAULT '{}'::jsonb NOT NULL,
+    notification_id uuid,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: alert_rules; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.alert_rules (
+    rule_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    user_id uuid NOT NULL,
+    name character varying(160) NOT NULL,
+    alert_type character varying(40) DEFAULT 'MARKET_SIGNAL'::character varying NOT NULL,
+    severity character varying(20) DEFAULT 'MEDIUM'::character varying NOT NULL,
+    channel character varying(30),
+    conditions jsonb DEFAULT '{}'::jsonb NOT NULL,
+    cooldown_minutes integer DEFAULT 240 NOT NULL,
+    enabled boolean DEFAULT true NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT alert_rules_alert_type_check CHECK (((alert_type)::text = 'MARKET_SIGNAL'::text)),
+    CONSTRAINT alert_rules_cooldown_minutes_check CHECK ((cooldown_minutes >= 0)),
+    CONSTRAINT alert_rules_severity_check CHECK (((severity)::text = ANY ((ARRAY['LOW'::character varying, 'MEDIUM'::character varying, 'HIGH'::character varying, 'CRITICAL'::character varying])::text[])))
+);
+
+
+--
 -- Name: api_sources; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -11410,6 +11495,30 @@ CREATE TABLE public.watchlist_items (
 
 
 --
+-- Name: alert_events alert_events_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.alert_events
+    ADD CONSTRAINT alert_events_pkey PRIMARY KEY (alert_event_id);
+
+
+--
+-- Name: alert_rules alert_rules_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.alert_rules
+    ADD CONSTRAINT alert_rules_pkey PRIMARY KEY (rule_id);
+
+
+--
+-- Name: alert_rules alert_rules_user_id_name_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.alert_rules
+    ADD CONSTRAINT alert_rules_user_id_name_key UNIQUE (user_id, name);
+
+
+--
 -- Name: api_sources api_sources_name_key; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -12343,6 +12452,13 @@ CREATE INDEX idx_market_search_cache_created ON public.market_search_cache USING
 
 
 --
+-- Name: ix_alert_events_rule_instrument_created; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_alert_events_rule_instrument_created ON public.alert_events USING btree (rule_id, instrument_id, created_at DESC);
+
+
+--
 -- Name: ix_entities_normalized_name_type; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -12819,6 +12935,13 @@ CREATE INDEX ix_watchlists_user ON public.watchlists USING btree (user_id);
 
 
 --
+-- Name: uq_alert_events_rule_instrument_fingerprint; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_alert_events_rule_instrument_fingerprint ON public.alert_events USING btree (rule_id, instrument_id, fingerprint);
+
+
+--
 -- Name: uq_cache_portfolio_exposure; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -13033,6 +13156,20 @@ CREATE UNIQUE INDEX uq_watchlist_name ON public.watchlists USING btree (user_id,
 --
 
 CREATE UNIQUE INDEX ux_scheduler_jobs_job_key ON public.scheduler_jobs USING btree (job_key);
+
+
+--
+-- Name: alert_events trg_alert_events_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_alert_events_updated_at BEFORE UPDATE ON public.alert_events FOR EACH ROW EXECUTE FUNCTION public.fn_alert_set_updated_at();
+
+
+--
+-- Name: alert_rules trg_alert_rules_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_alert_rules_updated_at BEFORE UPDATE ON public.alert_rules FOR EACH ROW EXECUTE FUNCTION public.fn_alert_set_updated_at();
 
 
 --
@@ -13474,6 +13611,14 @@ CREATE TRIGGER trg_watchlists_created_at BEFORE INSERT ON public.watchlists FOR 
 --
 
 CREATE TRIGGER trg_watchlists_updated_at BEFORE INSERT OR UPDATE ON public.watchlists FOR EACH ROW EXECUTE FUNCTION public.trg_set_updated_at();
+
+
+--
+-- Name: alert_events alert_events_rule_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.alert_events
+    ADD CONSTRAINT alert_events_rule_id_fkey FOREIGN KEY (rule_id) REFERENCES public.alert_rules(rule_id) ON DELETE CASCADE;
 
 
 --
@@ -14256,5 +14401,5 @@ ALTER TABLE ONLY public.watchlists
 -- PostgreSQL database dump complete
 --
 
-\unrestrict EmmIcxt1ZsgMGgdNrUPvnlAbOSGooITrk3dq82HQOZWO4wHwvGeewrFCikMJKfT
+\unrestrict AYptmqJ9WdkFdFny68mmOYBMO52STvOiWWUhVZv1gnRPKJnEgVOyp0FsWCNbHQI
 

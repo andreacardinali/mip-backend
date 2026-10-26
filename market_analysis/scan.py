@@ -24,7 +24,6 @@ class ScanConfig:
     interval: str = "1d"
     minimum_bars: int = 200
     timeframe: str = "1D"
-    algorithm_version: str = "market-analysis-v2-multistrategy"
     enabled_strategies: tuple[str, ...] | None = None
 
     def __post_init__(self):

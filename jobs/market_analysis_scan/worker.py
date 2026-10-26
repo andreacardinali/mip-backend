@@ -6,19 +6,23 @@ from market_analysis.scan import ScanConfig
 from market_data.factory import market_data
 from services.market_analysis_scan import run_market_analysis_scan
 
+from market_screener.constants import (
+    MARKET_ANALYSIS_INTERVAL,
+    MARKET_ANALYSIS_MINIMUM_BARS,
+    MARKET_ANALYSIS_PERIOD,
+    MARKET_ANALYSIS_TIMEFRAME,
+)
+
 logger = logging.getLogger(__name__)
 
 
 def run() -> dict:
     universe_code = str(settings.get("MARKET_ANALYSIS_UNIVERSE", "NASDAQ100"))
     config = ScanConfig(
-        period=str(settings.get("MARKET_ANALYSIS_PERIOD", "1y")),
-        interval=str(settings.get("MARKET_ANALYSIS_INTERVAL", "1d")),
-        minimum_bars=int(settings.get("MARKET_ANALYSIS_MINIMUM_BARS", 200)),
-        timeframe=str(settings.get("MARKET_ANALYSIS_TIMEFRAME", "1D")),
-        algorithm_version=str(
-            settings.get("MARKET_ANALYSIS_ALGORITHM_VERSION", "market-analysis-v1")
-        ),
+        period=MARKET_ANALYSIS_PERIOD,
+        interval=MARKET_ANALYSIS_INTERVAL,
+        minimum_bars=MARKET_ANALYSIS_MINIMUM_BARS,
+        timeframe=MARKET_ANALYSIS_TIMEFRAME,
     )
     result = run_transactional(
         lambda db: run_market_analysis_scan(

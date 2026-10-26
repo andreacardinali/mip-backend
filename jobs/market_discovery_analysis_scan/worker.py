@@ -1,13 +1,25 @@
 import logging
 from typing import Any
 
-from config.settings import settings
 from job_runtime.database import run_transactional
 from market_analysis.quant_prefilter import QuantPrefilterConfig
 from market_analysis.scan import ScanConfig
 from market_data.factory import market_data
 from services.market_discovery_analysis_scan import (
     run_market_discovery_analysis_scan,
+)
+
+from market_screener.constants import (
+    MARKET_ANALYSIS_CORE_CANDIDATE_LIMIT,
+    MARKET_ANALYSIS_CORE_MIN_ATTENTION_SCORE,
+    MARKET_ANALYSIS_DISCOVERY_CANDIDATE_LIMIT,
+    MARKET_ANALYSIS_DISCOVERY_MIN_ATTENTION_SCORE,
+    MARKET_ANALYSIS_INTERVAL,
+    MARKET_ANALYSIS_MINIMUM_BARS,
+    MARKET_ANALYSIS_PERIOD,
+    MARKET_ANALYSIS_QUANT_CANDIDATE_LIMIT,
+    MARKET_ANALYSIS_QUANT_MIN_SCORE,
+    MARKET_ANALYSIS_TIMEFRAME,
 )
 
 logger = logging.getLogger(__name__)
@@ -32,37 +44,29 @@ def _compact_result(result: dict[str, Any]) -> dict[str, Any]:
 
 def run() -> dict[str, Any]:
     scan_config = ScanConfig(
-        period=str(settings.get("MARKET_ANALYSIS_PERIOD", "1y")),
-        interval=str(settings.get("MARKET_ANALYSIS_INTERVAL", "1d")),
-        minimum_bars=int(settings.get("MARKET_ANALYSIS_MINIMUM_BARS", 200)),
-        timeframe=str(settings.get("MARKET_ANALYSIS_TIMEFRAME", "1D")),
-        algorithm_version=str(
-            settings.get(
-                "MARKET_ANALYSIS_ALGORITHM_VERSION",
-                "market-analysis-v2-discovery",
-            )
-        ),
+        period=MARKET_ANALYSIS_PERIOD,
+        interval=MARKET_ANALYSIS_INTERVAL,
+        minimum_bars=MARKET_ANALYSIS_MINIMUM_BARS,
+        timeframe=MARKET_ANALYSIS_TIMEFRAME,
     )
+
     quant_config = QuantPrefilterConfig(
-        minimum_score=float(settings.get("MARKET_ANALYSIS_QUANT_MIN_SCORE", 0)),
-        limit=int(settings.get("MARKET_ANALYSIS_QUANT_CANDIDATE_LIMIT", 25)),
+        minimum_score=MARKET_ANALYSIS_QUANT_MIN_SCORE,
+        limit=MARKET_ANALYSIS_QUANT_CANDIDATE_LIMIT,
     )
+
     result = run_transactional(
         lambda db: run_market_discovery_analysis_scan(
             db,
             market_data_service=market_data,
             scan_config=scan_config,
             quant_config=quant_config,
-            core_min_attention_score=float(
-                settings.get("MARKET_ANALYSIS_CORE_MIN_ATTENTION_SCORE", 20)
+            core_min_attention_score=MARKET_ANALYSIS_CORE_MIN_ATTENTION_SCORE,
+            discovery_min_attention_score=(
+                MARKET_ANALYSIS_DISCOVERY_MIN_ATTENTION_SCORE
             ),
-            discovery_min_attention_score=float(
-                settings.get("MARKET_ANALYSIS_DISCOVERY_MIN_ATTENTION_SCORE", 40)
-            ),
-            core_limit=int(settings.get("MARKET_ANALYSIS_CORE_CANDIDATE_LIMIT", 100)),
-            discovery_limit=int(
-                settings.get("MARKET_ANALYSIS_DISCOVERY_CANDIDATE_LIMIT", 25)
-            ),
+            core_limit=MARKET_ANALYSIS_CORE_CANDIDATE_LIMIT,
+            discovery_limit=MARKET_ANALYSIS_DISCOVERY_CANDIDATE_LIMIT,
         )
     )
 

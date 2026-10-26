@@ -1,0 +1,1 @@
+{"job_key":"market_alert_evaluation","display_name":"Market alert evaluation","description":"Valuta le regole di alert sui segnali del market screener e accoda le notifiche.","callable":"jobs.market_alert_evaluation.worker:run","default_cron":"*/15 * * * *","enabled":false,"timeout_seconds":900,"max_instances":1,"coalesce":true}
