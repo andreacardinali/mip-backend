@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict 2urO0JXq9nnfUeEfEfJb2npfXeAVYjz8TuKXbet0UxpKsaceIzAMXpnKWJBMx0d
+\restrict R7thQifuhhyQK0xAhmXjLqcVeNOh1v0UbrxY07SpNzSKD27YExhzEcZ6djcJfi4
 
 -- Dumped from database version 18.6 (Debian 18.6-1.pgdg13+2)
 -- Dumped by pg_dump version 18.6 (Debian 18.6-1.pgdg13+2)
@@ -4456,6 +4456,22 @@ $$;
 
 
 --
+-- Name: sp_market_analysis_close_missing_signals(timestamp with time zone, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_market_analysis_close_missing_signals(p_observed_before timestamp with time zone, p_stability_minutes integer DEFAULT 30) RETURNS integer
+    LANGUAGE plpgsql
+    AS $$
+DECLARE n integer;
+BEGIN
+ WITH latest AS (SELECT DISTINCT ON(instrument_id,strategy_code,timeframe) * FROM public.market_analysis_signal_events ORDER BY instrument_id,strategy_code,timeframe,observed_at DESC), inserted AS (
+ INSERT INTO public.market_analysis_signal_events(signal_id,instrument_id,strategy_code,timeframe,previous_status,new_status,previous_direction,new_direction,event_type,reason,observed_at,payload)
+ SELECT signal_id,instrument_id,strategy_code,timeframe,new_status,'EXPIRED',new_direction,new_direction,'EXPIRED','not observed in subsequent scan',now(),'{}'::jsonb FROM latest WHERE new_status IN('CANDIDATE','CONFIRMED') AND observed_at < p_observed_before-make_interval(mins=>GREATEST(p_stability_minutes,0)) RETURNING signal_id)
+ UPDATE public.trading_signals SET status='EXPIRED' WHERE signal_id IN(SELECT signal_id FROM inserted); GET DIAGNOSTICS n=ROW_COUNT; RETURN n;
+END;$$;
+
+
+--
 -- Name: sp_market_analysis_finish_scan_run(uuid, character varying, jsonb); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -4535,6 +4551,17 @@ $$;
 
 
 --
+-- Name: sp_market_analysis_list_signal_events(uuid, character varying, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_market_analysis_list_signal_events(p_instrument_id uuid, p_strategy_code character varying DEFAULT NULL::character varying, p_limit integer DEFAULT 100) RETURNS SETOF jsonb
+    LANGUAGE sql STABLE
+    AS $$
+ SELECT to_jsonb(e) FROM public.market_analysis_signal_events e WHERE e.instrument_id=p_instrument_id AND(p_strategy_code IS NULL OR e.strategy_code=p_strategy_code) ORDER BY e.observed_at DESC,e.created_at DESC LIMIT LEAST(GREATEST(p_limit,1),1000);
+$$;
+
+
+--
 -- Name: sp_market_analysis_list_universe_members(uuid); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -4570,6 +4597,144 @@ CREATE FUNCTION public.sp_market_analysis_list_universe_members(p_universe_id uu
     WHERE mum.universe_id = p_universe_id
       AND mum.valid_to IS NULL
     ORDER BY i.symbol, i.exchange NULLS LAST, i.instrument_id;
+$$;
+
+
+--
+-- Name: sp_market_analysis_reconcile_signal_lifecycle(uuid, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_market_analysis_reconcile_signal_lifecycle(p_signal_id uuid, p_stability_minutes integer DEFAULT 30) RETURNS jsonb
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_signal record;
+    v_previous record;
+    v_generation record;
+    v_status varchar;
+    v_event_type varchar;
+    v_event_id uuid;
+    v_now timestamptz := clock_timestamp();
+BEGIN
+    SELECT signal.*
+    INTO v_signal
+    FROM public.trading_signals signal
+    WHERE signal.signal_id = p_signal_id;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Signal not found: %', p_signal_id;
+    END IF;
+
+    SELECT event.*
+    INTO v_previous
+    FROM public.market_analysis_signal_events event
+    WHERE event.instrument_id = v_signal.instrument_id
+      AND event.strategy_code = v_signal.strategy_code
+      AND event.timeframe = v_signal.timeframe
+    ORDER BY event.created_at DESC, event.signal_event_id DESC
+    LIMIT 1;
+
+    SELECT event.*
+    INTO v_generation
+    FROM public.market_analysis_signal_events event
+    WHERE event.instrument_id = v_signal.instrument_id
+      AND event.strategy_code = v_signal.strategy_code
+      AND event.timeframe = v_signal.timeframe
+      AND event.event_type IN ('CREATED', 'DIRECTION_CHANGED')
+    ORDER BY event.created_at DESC, event.signal_event_id DESC
+    LIMIT 1;
+
+    IF v_previous.signal_event_id IS NULL THEN
+        v_status := 'CANDIDATE';
+        v_event_type := 'CREATED';
+
+    ELSIF v_previous.new_direction IS DISTINCT FROM v_signal.direction THEN
+        v_status := 'CANDIDATE';
+        v_event_type := 'DIRECTION_CHANGED';
+
+    ELSIF v_previous.new_status = 'CANDIDATE'
+       AND v_generation.signal_event_id IS NOT NULL
+       AND v_now >= (
+            v_generation.created_at
+            + make_interval(
+                mins => GREATEST(p_stability_minutes, 0)
+            )
+       )
+    THEN
+        v_status := 'CONFIRMED';
+        v_event_type := 'CONFIRMED';
+
+    ELSE
+        v_status := v_previous.new_status;
+        v_event_type := 'OBSERVED';
+    END IF;
+
+    -- Repeating a scan over the same market bar must not create an unlimited
+    -- number of identical OBSERVED events. A later call may still emit
+    -- CONFIRMED because confirmation uses processing time (created_at), while
+    -- observed_at remains the timestamp of the market observation.
+    IF v_event_type = 'OBSERVED'
+       AND v_previous.signal_id = v_signal.signal_id
+       AND v_previous.observed_at = v_signal.observed_at
+       AND v_previous.new_status = v_status
+       AND v_previous.new_direction = v_signal.direction
+    THEN
+        UPDATE public.trading_signals
+        SET status = v_status
+        WHERE signal_id = v_signal.signal_id;
+
+        RETURN jsonb_build_object(
+            'signal_event_id', v_previous.signal_event_id,
+            'signal_id', v_signal.signal_id,
+            'status', v_status,
+            'event_type', 'UNCHANGED'
+        );
+    END IF;
+
+    INSERT INTO public.market_analysis_signal_events (
+        signal_id,
+        instrument_id,
+        strategy_code,
+        timeframe,
+        previous_status,
+        new_status,
+        previous_direction,
+        new_direction,
+        event_type,
+        observed_at,
+        payload
+    )
+    VALUES (
+        v_signal.signal_id,
+        v_signal.instrument_id,
+        v_signal.strategy_code,
+        v_signal.timeframe,
+        v_previous.new_status,
+        v_status,
+        v_previous.new_direction,
+        v_signal.direction,
+        v_event_type,
+        v_signal.observed_at,
+        jsonb_build_object(
+            'confidence', v_signal.confidence,
+            'reference_price', v_signal.reference_price,
+            'market_observed_at', v_signal.observed_at,
+            'processed_at', v_now
+        )
+    )
+    RETURNING signal_event_id INTO v_event_id;
+
+    UPDATE public.trading_signals
+    SET status = v_status
+    WHERE signal_id = v_signal.signal_id;
+
+    RETURN jsonb_build_object(
+        'signal_event_id', v_event_id,
+        'signal_id', v_signal.signal_id,
+        'status', v_status,
+        'event_type', v_event_type
+    );
+END;
 $$;
 
 
@@ -10180,6 +10345,29 @@ CREATE TABLE public.market_analysis_scan_runs (
 
 
 --
+-- Name: market_analysis_signal_events; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.market_analysis_signal_events (
+    signal_event_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    signal_id uuid NOT NULL,
+    instrument_id uuid NOT NULL,
+    strategy_code character varying NOT NULL,
+    timeframe character varying NOT NULL,
+    previous_status character varying,
+    new_status character varying NOT NULL,
+    previous_direction character varying,
+    new_direction character varying NOT NULL,
+    event_type character varying NOT NULL,
+    reason character varying,
+    observed_at timestamp with time zone NOT NULL,
+    payload jsonb DEFAULT '{}'::jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
 -- Name: market_discovery_candidates; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -11465,6 +11653,14 @@ ALTER TABLE ONLY public.market_analysis_scan_runs
 
 
 --
+-- Name: market_analysis_signal_events market_analysis_signal_events_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.market_analysis_signal_events
+    ADD CONSTRAINT market_analysis_signal_events_pkey PRIMARY KEY (signal_event_id);
+
+
+--
 -- Name: market_discovery_candidates market_discovery_candidates_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -12311,6 +12507,13 @@ CREATE INDEX ix_market_analysis_scan_runs_universe_started ON public.market_anal
 
 
 --
+-- Name: ix_market_analysis_signal_events_lookup; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_market_analysis_signal_events_lookup ON public.market_analysis_signal_events USING btree (instrument_id, strategy_code, timeframe, observed_at DESC);
+
+
+--
 -- Name: ix_market_discovery_candidates_entity; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -12920,6 +13123,20 @@ CREATE TRIGGER trg_market_analysis_scan_runs_updated_at BEFORE INSERT OR UPDATE 
 
 
 --
+-- Name: market_analysis_signal_events trg_market_analysis_signal_events_created_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_market_analysis_signal_events_created_at BEFORE INSERT ON public.market_analysis_signal_events FOR EACH ROW EXECUTE FUNCTION public.trg_set_created_at();
+
+
+--
+-- Name: market_analysis_signal_events trg_market_analysis_signal_events_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_market_analysis_signal_events_updated_at BEFORE INSERT OR UPDATE ON public.market_analysis_signal_events FOR EACH ROW EXECUTE FUNCTION public.trg_set_updated_at();
+
+
+--
 -- Name: market_discovery_candidates trg_market_discovery_candidates_created_at; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -13520,6 +13737,14 @@ ALTER TABLE ONLY public.market_analysis_scan_runs
 
 
 --
+-- Name: market_analysis_signal_events market_analysis_signal_events_signal_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.market_analysis_signal_events
+    ADD CONSTRAINT market_analysis_signal_events_signal_id_fkey FOREIGN KEY (signal_id) REFERENCES public.trading_signals(signal_id) ON DELETE CASCADE;
+
+
+--
 -- Name: market_discovery_candidates market_discovery_candidates_entity_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -13971,5 +14196,5 @@ ALTER TABLE ONLY public.watchlists
 -- PostgreSQL database dump complete
 --
 
-\unrestrict 2urO0JXq9nnfUeEfEfJb2npfXeAVYjz8TuKXbet0UxpKsaceIzAMXpnKWJBMx0d
+\unrestrict R7thQifuhhyQK0xAhmXjLqcVeNOh1v0UbrxY07SpNzSKD27YExhzEcZ6djcJfi4
 

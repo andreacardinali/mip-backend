@@ -3,11 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any, Protocol
+from typing import Protocol
 
 from market_analysis.models import ScoreBreakdown, SignalCandidate
 from market_analysis.scoring import build_score_breakdown, score_technical_snapshot
-from market_analysis.signals import generate_trend_pullback_candidate
+from market_analysis.strategies import default_registry
 from market_analysis.technical import analyze_price_bars
 from market_data.capabilities import InstrumentType
 from market_data.models import HistoryRequest, InstrumentReference
@@ -24,13 +24,12 @@ class ScanConfig:
     interval: str = "1d"
     minimum_bars: int = 200
     timeframe: str = "1D"
-    algorithm_version: str = "market-analysis-v1"
+    algorithm_version: str = "market-analysis-v2-multistrategy"
+    enabled_strategies: tuple[str, ...] | None = None
 
-    def __post_init__(self) -> None:
+    def __post_init__(self):
         if self.minimum_bars < 2:
             raise ValueError("minimum_bars must be at least 2")
-        if not self.period.strip() or not self.interval.strip():
-            raise ValueError("period and interval cannot be empty")
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,7 +42,7 @@ class ScanMember:
     currency_code: str | None = None
     isin: str | None = None
 
-    def to_reference(self) -> InstrumentReference:
+    def to_reference(self):
         return InstrumentReference(
             symbol=self.symbol,
             isin=self.isin,
@@ -76,7 +75,7 @@ class ScanSkip:
     available_bars: int | None = None
     required_bars: int | None = None
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self):
         return {
             "instrument_id": self.instrument_id,
             "symbol": self.symbol,
@@ -94,34 +93,42 @@ class ScanResult:
     failures: tuple[ScanFailure, ...]
     skipped: tuple[ScanSkip, ...] = ()
 
-    def to_dict(self) -> dict[str, Any]:
-        skipped_by_reason = {
-            reason.value: sum(1 for item in self.skipped if item.reason == reason)
-            for reason in ScanSkipReason
-        }
+    def to_dict(self):
         return {
             "processed": self.processed,
             "candidates": len(self.candidates),
             "failures": len(self.failures),
             "skipped": len(self.skipped),
-            "skipped_by_reason": skipped_by_reason,
-            "symbols": [item.member.symbol for item in self.candidates],
-            "failed_symbols": [item.symbol for item in self.failures],
-            "skipped_symbols": [item.symbol for item in self.skipped],
+            "skipped_by_reason": {
+                r.value: sum(1 for x in self.skipped if x.reason == r)
+                for r in ScanSkipReason
+            },
+            "symbols": [x.member.symbol for x in self.candidates],
+            "failed_symbols": [x.symbol for x in self.failures],
+            "skipped_symbols": [x.symbol for x in self.skipped],
         }
 
 
 class MarketDataReader(Protocol):
     def get_ohlcv(self, request: HistoryRequest): ...
+def _evaluate(member, bars, config):
+    snapshot = analyze_price_bars(bars)
+    if snapshot is None:
+        raise ValueError("technical snapshot unavailable")
+    observed = datetime.fromtimestamp(snapshot.observed_timestamp, UTC)
+    score = build_score_breakdown(technical=score_technical_snapshot(snapshot))
+    return tuple(
+        EvaluatedSignal(member, x, score)
+        for x in default_registry.evaluate(
+            snapshot,
+            timeframe=config.timeframe,
+            observed_at=observed,
+            enabled=config.enabled_strategies,
+        )
+    )
 
 
-def evaluate_member(
-    member: ScanMember,
-    *,
-    market_data_service: MarketDataReader,
-    config: ScanConfig,
-    observed_at: datetime | None = None,
-) -> EvaluatedSignal | None:
+def evaluate_member(member, *, market_data_service, config, observed_at=None):
     bars = market_data_service.get_ohlcv(
         HistoryRequest(
             instrument=member.to_reference(),
@@ -133,36 +140,14 @@ def evaluate_member(
         raise ValueError(
             f"insufficient history: {len(bars)} bars; minimum {config.minimum_bars}"
         )
-
-    snapshot = analyze_price_bars(bars)
-    if snapshot is None:
-        raise ValueError("technical snapshot unavailable")
-
-    candidate = generate_trend_pullback_candidate(
-        snapshot,
-        timeframe=config.timeframe,
-        observed_at=observed_at
-        or datetime.fromtimestamp(snapshot.observed_timestamp, UTC),
-    )
-    if candidate is None:
-        return None
-
-    scores = build_score_breakdown(
-        technical=score_technical_snapshot(snapshot),
-    )
-    return EvaluatedSignal(member=member, candidate=candidate, scores=scores)
+    values = _evaluate(member, bars, config)
+    return values[0] if values else None
 
 
-def scan_members(
-    members: list[ScanMember],
-    *,
-    market_data_service: MarketDataReader,
-    config: ScanConfig,
-) -> ScanResult:
-    candidates: list[EvaluatedSignal] = []
-    failures: list[ScanFailure] = []
-    skipped: list[ScanSkip] = []
-
+def scan_members(members, *, market_data_service, config):
+    candidates = []
+    failures = []
+    skipped = []
     for member in members:
         try:
             bars = market_data_service.get_ohlcv(
@@ -172,74 +157,40 @@ def scan_members(
                     interval=config.interval,
                 )
             )
-            available_bars = len(bars)
-            if available_bars < config.minimum_bars:
+            if len(bars) < config.minimum_bars:
                 skipped.append(
                     ScanSkip(
-                        instrument_id=member.instrument_id,
-                        symbol=member.symbol,
-                        reason=ScanSkipReason.INSUFFICIENT_HISTORY,
-                        detail=(
-                            f"insufficient history: {available_bars} bars; "
-                            f"minimum {config.minimum_bars}"
-                        ),
-                        available_bars=available_bars,
-                        required_bars=config.minimum_bars,
+                        member.instrument_id,
+                        member.symbol,
+                        ScanSkipReason.INSUFFICIENT_HISTORY,
+                        f"insufficient history: {len(bars)} bars; minimum {config.minimum_bars}",
+                        len(bars),
+                        config.minimum_bars,
                     )
                 )
                 continue
-
-            snapshot = analyze_price_bars(bars)
-            if snapshot is None:
-                raise ValueError("technical snapshot unavailable")
-
-            candidate = generate_trend_pullback_candidate(
-                snapshot,
-                timeframe=config.timeframe,
-                observed_at=datetime.fromtimestamp(
-                    snapshot.observed_timestamp,
-                    UTC,
-                ),
-            )
-            if candidate is None:
+            values = _evaluate(member, bars, config)
+            if not values:
                 skipped.append(
                     ScanSkip(
-                        instrument_id=member.instrument_id,
-                        symbol=member.symbol,
-                        reason=ScanSkipReason.NO_TECHNICAL_SIGNAL,
-                        detail="no technical signal generated",
+                        member.instrument_id,
+                        member.symbol,
+                        ScanSkipReason.NO_TECHNICAL_SIGNAL,
+                        "no technical signal generated",
                     )
                 )
                 continue
-
-            candidates.append(
-                EvaluatedSignal(
-                    member=member,
-                    candidate=candidate,
-                    scores=build_score_breakdown(
-                        technical=score_technical_snapshot(snapshot),
-                    ),
-                )
-            )
+            candidates.extend(values)
         except Exception as error:
             failures.append(
-                ScanFailure(
-                    instrument_id=member.instrument_id,
-                    symbol=member.symbol,
-                    reason=str(error)[:500],
-                )
+                ScanFailure(member.instrument_id, member.symbol, str(error)[:500])
             )
-
     candidates.sort(
-        key=lambda item: (
-            -(item.scores.composite or 0.0),
-            -item.candidate.confidence,
-            item.member.symbol,
+        key=lambda x: (
+            -(x.scores.composite or 0),
+            -x.candidate.confidence,
+            x.member.symbol,
+            x.candidate.strategy_code,
         )
     )
-    return ScanResult(
-        processed=len(members),
-        candidates=tuple(candidates),
-        failures=tuple(failures),
-        skipped=tuple(skipped),
-    )
+    return ScanResult(len(members), tuple(candidates), tuple(failures), tuple(skipped))

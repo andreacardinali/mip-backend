@@ -14,18 +14,19 @@ logger = logging.getLogger(__name__)
 
 
 def _compact_result(result: dict[str, Any]) -> dict[str, Any]:
-    """Return the stable, concise job fields suitable for INFO and CLI output."""
     return {
         "status": result.get("status"),
+        "reason": result.get("reason"),
         "run_id": result.get("run_id"),
         "eligible_candidates": result.get("eligible_candidates", 0),
         "processed": result.get("processed", 0),
         "technical_candidates": result.get("technical_candidates", 0),
         "quant_candidates": result.get("quant_candidates", 0),
         "persisted_signals": result.get("persisted_signals", 0),
+        "lifecycle_events": result.get("lifecycle_events", 0),
         "failures": result.get("failures", 0),
         "skipped_by_reason": result.get("skipped_by_reason", {}),
-        "symbols": result.get("symbols", []),
+        "signals": result.get("signals", []),
     }
 
 
@@ -53,36 +54,28 @@ def run() -> dict[str, Any]:
             scan_config=scan_config,
             quant_config=quant_config,
             core_min_attention_score=float(
-                settings.get(
-                    "MARKET_ANALYSIS_CORE_MIN_ATTENTION_SCORE",
-                    20,
-                )
+                settings.get("MARKET_ANALYSIS_CORE_MIN_ATTENTION_SCORE", 20)
             ),
             discovery_min_attention_score=float(
-                settings.get(
-                    "MARKET_ANALYSIS_DISCOVERY_MIN_ATTENTION_SCORE",
-                    40,
-                )
+                settings.get("MARKET_ANALYSIS_DISCOVERY_MIN_ATTENTION_SCORE", 40)
             ),
-            core_limit=int(
-                settings.get(
-                    "MARKET_ANALYSIS_CORE_CANDIDATE_LIMIT",
-                    100,
-                )
-            ),
+            core_limit=int(settings.get("MARKET_ANALYSIS_CORE_CANDIDATE_LIMIT", 100)),
             discovery_limit=int(
-                settings.get(
-                    "MARKET_ANALYSIS_DISCOVERY_CANDIDATE_LIMIT",
-                    25,
-                )
+                settings.get("MARKET_ANALYSIS_DISCOVERY_CANDIDATE_LIMIT", 25)
             ),
         )
     )
 
-    logger.info(
-        "Market discovery analysis scan completed summary=%s",
-        _compact_result(result),
-    )
+    if result.get("status") == "SKIPPED":
+        logger.info(
+            "Market discovery analysis scan skipped summary=%s",
+            _compact_result(result),
+        )
+    else:
+        logger.info(
+            "Market discovery analysis scan completed summary=%s",
+            _compact_result(result),
+        )
     logger.debug(
         "Market discovery analysis scan completed details=%s",
         result,

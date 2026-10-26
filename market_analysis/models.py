@@ -45,9 +45,19 @@ class TechnicalSnapshot:
     sma_50: float | None
     sma_200: float | None
     bollinger_band_width_pct: float | None
+    atr: float | None = None
+    supertrend_value: float | None = None
+    supertrend_direction: int | None = None
+    swing_high: float | None = None
+    swing_low: float | None = None
+    change_of_character: int = 0
+    break_of_structure: int = 0
+    bullish_order_block: float | None = None
+    bearish_order_block: float | None = None
+    drop_from_high_pct: float | None = None
+    rise_from_low_pct: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        """Return the API/prompt-compatible representation used by MIP."""
         return {
             "marketPrice": self.market_price,
             "previousClose": self.previous_close,
@@ -57,6 +67,17 @@ class TechnicalSnapshot:
             "sma200": self.sma_200,
             "bbWidth": self.bollinger_band_width_pct,
             "observedDate": self.observed_timestamp,
+            "atr": self.atr,
+            "supertrendValue": self.supertrend_value,
+            "supertrendDirection": self.supertrend_direction,
+            "swingHigh": self.swing_high,
+            "swingLow": self.swing_low,
+            "changeOfCharacter": self.change_of_character,
+            "breakOfStructure": self.break_of_structure,
+            "bullishOrderBlock": self.bullish_order_block,
+            "bearishOrderBlock": self.bearish_order_block,
+            "dropFromHighPct": self.drop_from_high_pct,
+            "riseFromLowPct": self.rise_from_low_pct,
         }
 
 
@@ -83,7 +104,7 @@ class ScoreBreakdown:
     llm: float | None = None
     composite: float | None = None
 
-    def to_dict(self) -> dict[str, float | None]:
+    def to_dict(self):
         return {
             "technical": self.technical,
             "financial": self.financial,
@@ -108,8 +129,8 @@ class SignalCandidate:
     invalidation_price: float | None = None
     target_price: float | None = None
 
-    def __post_init__(self) -> None:
-        if not 0.0 <= self.confidence <= 1.0:
+    def __post_init__(self):
+        if not 0 <= self.confidence <= 1:
             raise ValueError("confidence must be between 0 and 1")
         if self.reference_price <= 0:
             raise ValueError("reference_price must be greater than zero")
@@ -118,7 +139,7 @@ class SignalCandidate:
         if not self.timeframe.strip():
             raise ValueError("timeframe cannot be empty")
 
-    def to_payload(self) -> dict[str, Any]:
+    def to_payload(self):
         return {
             "strategy_code": self.strategy_code,
             "timeframe": self.timeframe,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from market_analysis.lifecycle import reconcile_persisted_signals
 from market_analysis.repository import MarketAnalysisRepository
 from market_analysis.scan import ScanConfig, ScanMember, scan_members
 
@@ -57,6 +58,12 @@ def run_market_analysis_scan(
                 )
             )
 
+            lifecycle_events = reconcile_persisted_signals(
+                db,
+                signal_ids,
+                stability_minutes=30,
+            )
+
         for failure in result.failures:
             repository.record_scan_failure(
                 run_id=run_id,
@@ -70,6 +77,7 @@ def run_market_analysis_scan(
             "run_id": run_id,
             "universe_code": universe_code.upper(),
             "persisted_signals": len(signal_ids),
+            "lifecycle_events": len(lifecycle_events),
         }
         repository.finish_scan_run(
             run_id=run_id,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from market_analysis.lifecycle import reconcile_persisted_signals
 from market_analysis.quant_prefilter import (
     QuantPrefilterConfig,
     prefilter_evaluated_signals,
@@ -32,7 +33,25 @@ def run_market_discovery_analysis_scan(
         discovery_limit=discovery_limit,
     )
     if not rows:
-        raise ValueError("No eligible market discovery candidates")
+        return {
+            "status": "SKIPPED",
+            "reason": "NO_ELIGIBLE_CANDIDATES",
+            "run_id": None,
+            "eligible_candidates": 0,
+            "processed": 0,
+            "technical_candidates": 0,
+            "quant_candidates": 0,
+            "persisted_signals": 0,
+            "lifecycle_events": 0,
+            "failures": 0,
+            "failed_symbols": [],
+            "skipped": 0,
+            "skipped_by_reason": {},
+            "skipped_symbols": [],
+            "skipped_insufficient_history": [],
+            "skipped_details": [],
+            "signals": [],
+        }
 
     repository = MarketAnalysisRepository(db)
     scan_universe_id = repository.upsert_universe(
@@ -91,7 +110,6 @@ def run_market_discovery_analysis_scan(
         )
 
         signal_ids: list[str] = []
-        ranked_symbols: list[str] = []
         for ranked in quant_results:
             evaluated = ranked.evaluated
             context = context_by_instrument[evaluated.member.instrument_id]
@@ -117,7 +135,7 @@ def run_market_discovery_analysis_scan(
                 confidence=evaluated.candidate.confidence,
                 reasons=evaluated.candidate.reasons,
                 evidence=evidence,
-                invalidation_price=(evaluated.candidate.invalidation_price),
+                invalidation_price=evaluated.candidate.invalidation_price,
                 target_price=evaluated.candidate.target_price,
             )
             scores = evaluated.scores.to_dict()
@@ -132,7 +150,12 @@ def run_market_discovery_analysis_scan(
                     algorithm_version=scan_config.algorithm_version,
                 )
             )
-            ranked_symbols.append(evaluated.member.symbol)
+
+        lifecycle_events = reconcile_persisted_signals(
+            db,
+            signal_ids,
+            stability_minutes=30,
+        )
 
         for failure in scan_result.failures:
             repository.record_scan_failure(
@@ -156,6 +179,7 @@ def run_market_discovery_analysis_scan(
             "technical_candidates": len(scan_result.candidates),
             "quant_candidates": len(quant_results),
             "persisted_signals": len(signal_ids),
+            "lifecycle_events": len(lifecycle_events),
             "failures": len(scan_result.failures),
             "failed_symbols": [item.symbol for item in scan_result.failures],
             "skipped": len(scan_result.skipped),
@@ -163,7 +187,16 @@ def run_market_discovery_analysis_scan(
             "skipped_symbols": [item.symbol for item in scan_result.skipped],
             "skipped_insufficient_history": insufficient_history,
             "skipped_details": skipped_details,
-            "symbols": ranked_symbols,
+            "signals": [
+                {
+                    "symbol": item.evaluated.member.symbol,
+                    "strategy_code": item.evaluated.candidate.strategy_code,
+                    "signal_type": item.evaluated.candidate.signal_type.value,
+                    "direction": item.evaluated.candidate.direction.value,
+                    "quant_score": item.quant_score,
+                }
+                for item in quant_results
+            ],
         }
         repository.finish_scan_run(
             run_id=run_id,

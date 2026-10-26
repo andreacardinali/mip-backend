@@ -29,7 +29,7 @@ class MarketAnalysisTests(unittest.TestCase):
             expected,
         )
 
-    def test_snapshot_preserves_existing_payload_keys(self):
+    def test_snapshot_preserves_existing_and_extended_payload_keys(self):
         bars = [
             PriceBar(
                 timestamp=index,
@@ -55,9 +55,32 @@ class MarketAnalysisTests(unittest.TestCase):
                 "sma200",
                 "bbWidth",
                 "observedDate",
+                "atr",
+                "supertrendValue",
+                "supertrendDirection",
+                "swingHigh",
+                "swingLow",
+                "changeOfCharacter",
+                "breakOfStructure",
+                "bullishOrderBlock",
+                "bearishOrderBlock",
+                "dropFromHighPct",
+                "riseFromLowPct",
             },
         )
         self.assertEqual(payload["observedDate"], 201)
+
+        legacy_keys = {
+            "marketPrice",
+            "previousClose",
+            "dailyChangePct",
+            "rsi",
+            "sma50",
+            "sma200",
+            "bbWidth",
+            "observedDate",
+        }
+        self.assertTrue(legacy_keys.issubset(payload))
 
 
 if __name__ == "__main__":
