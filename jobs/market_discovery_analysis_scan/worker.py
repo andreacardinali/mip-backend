@@ -33,9 +33,7 @@ def run() -> dict[str, Any]:
     scan_config = ScanConfig(
         period=str(settings.get("MARKET_ANALYSIS_PERIOD", "1y")),
         interval=str(settings.get("MARKET_ANALYSIS_INTERVAL", "1d")),
-        minimum_bars=int(
-            settings.get("MARKET_ANALYSIS_MINIMUM_BARS", 200)
-        ),
+        minimum_bars=int(settings.get("MARKET_ANALYSIS_MINIMUM_BARS", 200)),
         timeframe=str(settings.get("MARKET_ANALYSIS_TIMEFRAME", "1D")),
         algorithm_version=str(
             settings.get(
@@ -45,12 +43,8 @@ def run() -> dict[str, Any]:
         ),
     )
     quant_config = QuantPrefilterConfig(
-        minimum_score=float(
-            settings.get("MARKET_ANALYSIS_QUANT_MIN_SCORE", 0)
-        ),
-        limit=int(
-            settings.get("MARKET_ANALYSIS_QUANT_CANDIDATE_LIMIT", 25)
-        ),
+        minimum_score=float(settings.get("MARKET_ANALYSIS_QUANT_MIN_SCORE", 0)),
+        limit=int(settings.get("MARKET_ANALYSIS_QUANT_CANDIDATE_LIMIT", 25)),
     )
     result = run_transactional(
         lambda db: run_market_discovery_analysis_scan(

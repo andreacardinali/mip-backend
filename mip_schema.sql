@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict jy98LjqTH7LkfsBnp0vba8fECb10uvlFaE8PBKQTru9quxJrMokBWU5kUgHdFwz
+\restrict zoncXlY5xsK6hSeXUi9ZErD6kEvSMq27ll9OR9hfeNXan7QnL7ucB34A5bUcJPm
 
 -- Dumped from database version 18.6 (Debian 18.6-1.pgdg13+2)
 -- Dumped by pg_dump version 18.6 (Debian 18.6-1.pgdg13+2)
@@ -4093,6 +4093,44 @@ $$;
 
 
 --
+-- Name: sp_market_analysis_apply_llm_enrichment(uuid, character varying, numeric, jsonb, numeric); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_market_analysis_apply_llm_enrichment(p_signal_id uuid, p_prompt_version character varying, p_llm_score numeric, p_llm_analysis jsonb, p_composite_score numeric DEFAULT NULL::numeric) RETURNS boolean
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF p_signal_id IS NULL THEN
+        RAISE EXCEPTION 'p_signal_id is required';
+    END IF;
+    IF NULLIF(BTRIM(p_prompt_version), '') IS NULL THEN
+        RAISE EXCEPTION 'p_prompt_version cannot be empty';
+    END IF;
+    IF p_llm_score IS NULL OR p_llm_score < 0 OR p_llm_score > 100 THEN
+        RAISE EXCEPTION 'p_llm_score must be between 0 and 100';
+    END IF;
+    IF p_llm_analysis IS NULL OR jsonb_typeof(p_llm_analysis) <> 'object' THEN
+        RAISE EXCEPTION 'p_llm_analysis must be a JSON object';
+    END IF;
+    IF p_composite_score IS NOT NULL
+       AND (p_composite_score < 0 OR p_composite_score > 100) THEN
+        RAISE EXCEPTION 'p_composite_score must be between 0 and 100';
+    END IF;
+
+    UPDATE public.trading_signals
+    SET llm_score = p_llm_score,
+        composite_score = COALESCE(p_composite_score, composite_score),
+        llm_analysis = p_llm_analysis,
+        prompt_version = BTRIM(p_prompt_version)
+    WHERE signal_id = p_signal_id
+      AND status IN ('CANDIDATE', 'CONFIRMED');
+
+    RETURN FOUND;
+END;
+$$;
+
+
+--
 -- Name: sp_market_analysis_finish_scan_run(uuid, character varying, jsonb); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -4127,6 +4165,47 @@ CREATE FUNCTION public.sp_market_analysis_get_universe(p_code character varying)
     WHERE UPPER(mu.code) = UPPER(BTRIM(p_code))
       AND mu.active = true
     LIMIT 1;
+$$;
+
+
+--
+-- Name: sp_market_analysis_list_pending_llm_enrichment(character varying, character varying, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_market_analysis_list_pending_llm_enrichment(p_algorithm_version character varying DEFAULT NULL::character varying, p_prompt_version character varying DEFAULT 'market-analysis-enrichment-v1'::character varying, p_limit integer DEFAULT 25) RETURNS TABLE(signal_id uuid, instrument_id uuid, entity_id uuid, symbol character varying, exchange character varying, entity_name character varying, strategy_code character varying, timeframe character varying, direction character varying, signal_type character varying, trend character varying, status character varying, confidence numeric, technical_score numeric, financial_score numeric, catalyst_score numeric, reference_price numeric, invalidation_price numeric, target_price numeric, observed_at timestamp with time zone, evidence jsonb, algorithm_version character varying)
+    LANGUAGE plpgsql STABLE
+    AS $$
+BEGIN
+    IF p_limit < 1 OR p_limit > 500 THEN
+        RAISE EXCEPTION 'p_limit must be between 1 and 500';
+    END IF;
+    IF NULLIF(BTRIM(p_prompt_version), '') IS NULL THEN
+        RAISE EXCEPTION 'p_prompt_version cannot be empty';
+    END IF;
+
+    RETURN QUERY
+    SELECT
+        s.signal_id, s.instrument_id, i.entity_id, i.symbol, i.exchange,
+        e.name, s.strategy_code, s.timeframe, s.direction, s.signal_type,
+        s.trend, s.status, s.confidence, s.technical_score,
+        s.financial_score, s.catalyst_score, s.reference_price,
+        s.invalidation_price, s.target_price, s.observed_at, s.evidence,
+        s.algorithm_version
+    FROM public.trading_signals s
+    JOIN public.instruments i ON i.instrument_id = s.instrument_id
+    JOIN public.entities e ON e.entity_id = i.entity_id
+    WHERE s.status IN ('CANDIDATE', 'CONFIRMED')
+      AND (p_algorithm_version IS NULL OR s.algorithm_version = p_algorithm_version)
+      AND (
+          s.llm_analysis IS NULL
+          OR s.prompt_version IS DISTINCT FROM p_prompt_version
+      )
+    ORDER BY
+        COALESCE(s.composite_score, s.technical_score, 0) DESC,
+        s.observed_at DESC,
+        s.signal_id
+    LIMIT p_limit;
+END;
 $$;
 
 
@@ -12364,5 +12443,5 @@ ALTER TABLE ONLY public.watchlists
 -- PostgreSQL database dump complete
 --
 
-\unrestrict jy98LjqTH7LkfsBnp0vba8fECb10uvlFaE8PBKQTru9quxJrMokBWU5kUgHdFwz
+\unrestrict zoncXlY5xsK6hSeXUi9ZErD6kEvSMq27ll9OR9hfeNXan7QnL7ucB34A5bUcJPm
 

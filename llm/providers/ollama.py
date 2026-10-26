@@ -1,3 +1,5 @@
+import json
+
 import httpx
 
 from http_client.retry import RetryPolicy, request_with_retry
@@ -7,7 +9,11 @@ from llm.parsing import parse_json_object
 
 class OllamaProvider(LLMProvider):
     def __init__(
-        self, base_url: str, model: str, timeout: float = 120, max_retries: int = 4
+        self,
+        base_url: str,
+        model: str,
+        timeout: float = 120,
+        max_retries: int = 4,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
@@ -16,6 +22,16 @@ class OllamaProvider(LLMProvider):
         self.max_retries = max_retries
 
     def generate_json(self, request: LLMRequest) -> LLMResponse:
+        response_format = request.response_schema or "json"
+        prompt = request.prompt
+
+        if request.response_schema is not None:
+            prompt = (
+                f"{prompt}\n\n"
+                "Return JSON conforming exactly to this JSON Schema:\n"
+                f"{json.dumps(request.response_schema, separators=(',', ':'))}"
+            )
+
         with httpx.Client(timeout=self.timeout) as client:
             response = request_with_retry(
                 client,
@@ -27,8 +43,8 @@ class OllamaProvider(LLMProvider):
                     "model": self.model,
                     "stream": False,
                     "think": False,
-                    "format": "json",
-                    "prompt": request.prompt,
+                    "format": response_format,
+                    "prompt": prompt,
                     "options": {
                         "temperature": request.temperature,
                         "num_predict": request.max_tokens,
@@ -36,4 +52,8 @@ class OllamaProvider(LLMProvider):
                 },
             )
             raw = response.json()
-        return LLMResponse(data=parse_json_object(raw.get("response", "")), raw=raw)
+
+        return LLMResponse(
+            data=parse_json_object(raw.get("response", "")),
+            raw=raw,
+        )
