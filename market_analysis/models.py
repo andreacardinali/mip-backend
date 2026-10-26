@@ -56,6 +56,11 @@ class TechnicalSnapshot:
     bearish_order_block: float | None = None
     drop_from_high_pct: float | None = None
     rise_from_low_pct: float | None = None
+    ema_50: float | None = None
+    bollinger_lower: float | None = None
+    bollinger_upper: float | None = None
+    bullish_fair_value_gap: float | None = None
+    bearish_fair_value_gap: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
