@@ -67,7 +67,6 @@ def run_market_discovery_analysis_scan(
     )
     run_id = repository.start_scan_run(
         universe_id=scan_universe_id,
-        algorithm_version=scan_config.algorithm_version,
         config={
             "period": scan_config.period,
             "interval": scan_config.interval,
@@ -147,7 +146,6 @@ def run_market_discovery_analysis_scan(
                     universe_id=(evaluated.member.universe_id or None),
                     candidate=candidate,
                     scores=scores,
-                    algorithm_version=scan_config.algorithm_version,
                 )
             )
 

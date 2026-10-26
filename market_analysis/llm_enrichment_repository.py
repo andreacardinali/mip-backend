@@ -15,21 +15,18 @@ class MarketAnalysisLLMEnrichmentRepository:
         *,
         prompt_version: str,
         limit: int,
-        algorithm_version: str | None = None,
     ) -> list[dict[str, Any]]:
         rows = self.db.execute(
             text(
                 """
                 SELECT *
                 FROM public.sp_market_analysis_list_pending_llm_enrichment(
-                    CAST(:algorithm_version AS varchar),
                     CAST(:prompt_version AS varchar),
                     CAST(:limit AS integer)
                 )
                 """
             ),
             {
-                "algorithm_version": algorithm_version,
                 "prompt_version": prompt_version,
                 "limit": limit,
             },

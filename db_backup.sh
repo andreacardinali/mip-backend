@@ -1,0 +1,1 @@
+pg_dump --host=postgresql.internal --port=5432 --username=postgres --dbname=market_intelligence --format=custom --no-owner --no-privileges --file="/root/mip_before_remove_algorithm_version_$(date +%Y%m%d_%H%M%S).dump"

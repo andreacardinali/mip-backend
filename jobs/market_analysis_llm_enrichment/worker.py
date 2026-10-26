@@ -35,13 +35,11 @@ def _load_pending_candidates(
     *,
     prompt_version: str,
     limit: int,
-    algorithm_version: str | None,
 ) -> list[dict[str, Any]]:
     return run_transactional(
         lambda db: MarketAnalysisLLMEnrichmentRepository(db).list_pending(
             prompt_version=prompt_version,
             limit=limit,
-            algorithm_version=algorithm_version,
         )
     )
 
@@ -81,15 +79,7 @@ def run() -> dict[str, Any]:
             PROMPT_VERSION,
         )
     )
-    algorithm_version = (
-        str(
-            settings.get(
-                "MARKET_ANALYSIS_LLM_ALGORITHM_VERSION",
-                "",
-            )
-        ).strip()
-        or None
-    )
+
     candidates = _load_pending_candidates(
         prompt_version=prompt_version,
         limit=int(
@@ -98,7 +88,6 @@ def run() -> dict[str, Any]:
                 25,
             )
         ),
-        algorithm_version=algorithm_version,
     )
 
     result = run_market_analysis_llm_enrichment(
