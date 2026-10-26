@@ -5,10 +5,6 @@ from job_runtime.database import run_transactional
 from market_analysis.quant_prefilter import QuantPrefilterConfig
 from market_analysis.scan import ScanConfig
 from market_data.factory import market_data
-from services.market_discovery_analysis_scan import (
-    run_market_discovery_analysis_scan,
-)
-
 from market_screener.constants import (
     MARKET_ANALYSIS_CORE_CANDIDATE_LIMIT,
     MARKET_ANALYSIS_CORE_MIN_ATTENTION_SCORE,
@@ -21,6 +17,7 @@ from market_screener.constants import (
     MARKET_ANALYSIS_QUANT_MIN_SCORE,
     MARKET_ANALYSIS_TIMEFRAME,
 )
+from services.market_discovery_analysis_scan import run_market_discovery_analysis_scan
 
 logger = logging.getLogger(__name__)
 
@@ -49,12 +46,10 @@ def run() -> dict[str, Any]:
         minimum_bars=MARKET_ANALYSIS_MINIMUM_BARS,
         timeframe=MARKET_ANALYSIS_TIMEFRAME,
     )
-
     quant_config = QuantPrefilterConfig(
         minimum_score=MARKET_ANALYSIS_QUANT_MIN_SCORE,
         limit=MARKET_ANALYSIS_QUANT_CANDIDATE_LIMIT,
     )
-
     result = run_transactional(
         lambda db: run_market_discovery_analysis_scan(
             db,
@@ -62,28 +57,17 @@ def run() -> dict[str, Any]:
             scan_config=scan_config,
             quant_config=quant_config,
             core_min_attention_score=MARKET_ANALYSIS_CORE_MIN_ATTENTION_SCORE,
-            discovery_min_attention_score=(
-                MARKET_ANALYSIS_DISCOVERY_MIN_ATTENTION_SCORE
-            ),
+            discovery_min_attention_score=MARKET_ANALYSIS_DISCOVERY_MIN_ATTENTION_SCORE,
             core_limit=MARKET_ANALYSIS_CORE_CANDIDATE_LIMIT,
             discovery_limit=MARKET_ANALYSIS_DISCOVERY_CANDIDATE_LIMIT,
         )
     )
-
-    if result.get("status") == "SKIPPED":
-        logger.info(
-            "Market discovery analysis scan skipped summary=%s",
-            _compact_result(result),
-        )
-    else:
-        logger.info(
-            "Market discovery analysis scan completed summary=%s",
-            _compact_result(result),
-        )
-    logger.debug(
-        "Market discovery analysis scan completed details=%s",
-        result,
+    logger.info(
+        "Market discovery analysis scan %s summary=%s",
+        "skipped" if result.get("status") == "SKIPPED" else "completed",
+        _compact_result(result),
     )
+    logger.debug("Market discovery analysis scan details=%s", result)
     return result
 
 

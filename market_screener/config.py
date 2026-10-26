@@ -3,44 +3,52 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from market_screener.constants import (
-    MARKET_SCREENER_RANKING_FIELD,
-    MARKET_SCREENER_REQUIRE_QUANT,
-    MARKET_SCREENER_REQUIRE_TECHNICAL,
-    MARKET_SCREENER_WEIGHT_MARKET_CAP,
-    MARKET_SCREENER_WEIGHT_QUANT,
-    MARKET_SCREENER_WEIGHT_TECHNICAL,
+    ATTENTION_WEIGHT,
+    CONFLICT_PENALTY_MAXIMUM,
+    CONSENSUS_BONUS_MAXIMUM,
+    LLM_WEIGHT,
+    MARKET_SCREENER_LIMIT,
+    MARKET_SCREENER_MINIMUM_SCORE,
+    QUANT_WEIGHT,
+    REQUIRE_QUANT_SCORE,
+    REQUIRE_TECHNICAL_SCORE,
+    TECHNICAL_WEIGHT,
 )
+
 
 @dataclass(frozen=True, slots=True)
 class ScreenerRankingConfig:
-    technical_weight: float = MARKET_SCREENER_WEIGHT_TECHNICAL
-    quant_weight: float = MARKET_SCREENER_WEIGHT_QUANT
-    ranking_weight: float = MARKET_SCREENER_WEIGHT_MARKET_CAP
-    ranking_field: str = MARKET_SCREENER_RANKING_FIELD
-    require_technical: bool = MARKET_SCREENER_REQUIRE_TECHNICAL
-    require_quant: bool = MARKET_SCREENER_REQUIRE_QUANT
+    attention_weight: float = ATTENTION_WEIGHT
+    technical_weight: float = TECHNICAL_WEIGHT
+    quant_weight: float = QUANT_WEIGHT
+    llm_weight: float = LLM_WEIGHT
+    consensus_bonus: float = CONSENSUS_BONUS_MAXIMUM
+    conflict_penalty: float = CONFLICT_PENALTY_MAXIMUM
+    require_technical: bool = REQUIRE_TECHNICAL_SCORE
+    require_quant: bool = REQUIRE_QUANT_SCORE
+    minimum_score: float = MARKET_SCREENER_MINIMUM_SCORE
+    limit: int = MARKET_SCREENER_LIMIT
 
-    def __post_init__(self):
-        if self.technical_weight < 0:
-            raise ValueError("technical_weight must be non-negative")
-        if self.quant_weight < 0:
-            raise ValueError("quant_weight must be non-negative")
-        if self.ranking_weight < 0:
-            raise ValueError("ranking_weight must be non-negative")
-
-        total_weight = (
-            self.technical_weight
-            + self.quant_weight
-            + self.ranking_weight
+    def __post_init__(self) -> None:
+        weights = (
+            self.attention_weight,
+            self.technical_weight,
+            self.quant_weight,
+            self.llm_weight,
         )
-        if total_weight <= 0:
+        if any(weight < 0 for weight in weights):
+            raise ValueError("ranking weights cannot be negative")
+        if sum(weights) <= 0:
             raise ValueError("at least one ranking weight must be positive")
-
-        if not self.ranking_field.strip():
-            raise ValueError("ranking_field must not be empty")
+        if self.consensus_bonus < 0 or self.conflict_penalty < 0:
+            raise ValueError("consensus adjustments cannot be negative")
+        if not 0 <= self.minimum_score <= 100:
+            raise ValueError("minimum_score must be between 0 and 100")
+        if self.limit < 1:
+            raise ValueError("limit must be positive")
 
     @property
-    def weight_total(self):
+    def weight_total(self) -> float:
         return (
             self.attention_weight
             + self.technical_weight

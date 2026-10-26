@@ -18,26 +18,31 @@ def _weighted_score(
     row: Mapping[str, Any],
     config: ScreenerRankingConfig,
 ) -> float:
+    attention = _score(row.get("attention_score"))
+    technical = _score(row.get("technical_score"))
+    quant = _score(row.get("quant_score"))
+    llm = _score(row.get("llm_score"))
+
     components = (
-        (_score(row.get("attention_score")), config.attention_weight),
-        (_score(row.get("technical_score")), config.technical_weight),
-        (_score(row.get("quant_score")), config.quant_weight),
-        (_score(row.get("llm_score")), config.llm_weight),
+        (attention, config.attention_weight),
+        (technical, config.technical_weight),
+        (quant, config.quant_weight),
+        (llm, config.llm_weight),
     )
     available = [
-        (value, weight)
-        for value, weight in components
-        if value is not None and weight > 0
+        (score, weight)
+        for score, weight in components
+        if score is not None and weight > 0
     ]
     if not available:
         return 0.0
 
-    weight_total = sum(weight for _, weight in available)
-    base_score = sum(value * weight for value, weight in available) / weight_total
+    available_weight = sum(weight for _, weight in available)
+    base_score = sum(score * weight for score, weight in available) / available_weight
 
     # Consensus is meaningful only when at least two strategies independently
     # evaluated the same instrument and timeframe. A single signal preserves
-    # the legacy weighted score and receives neither bonus nor penalty.
+    # the weighted score and receives neither bonus nor penalty.
     strategy_count = int(row.get("strategy_count") or 1)
     if strategy_count < 2:
         return round(base_score, 4)

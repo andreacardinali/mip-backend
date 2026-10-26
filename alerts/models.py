@@ -1,6 +1,8 @@
 from __future__ import annotations
+
 from dataclasses import dataclass, field
 from typing import Any
+
 
 @dataclass(frozen=True, slots=True)
 class AlertRule:
@@ -12,6 +14,7 @@ class AlertRule:
     channel: str | None
     conditions: dict[str, Any] = field(default_factory=dict)
     cooldown_minutes: int = 240
+
 
 @dataclass(frozen=True, slots=True)
 class AlertCandidate:
@@ -27,6 +30,7 @@ class AlertCandidate:
     verdict: str | None
     summary: str | None
     evidence: dict[str, Any] = field(default_factory=dict)
+
 
 @dataclass(frozen=True, slots=True)
 class AlertMatch:

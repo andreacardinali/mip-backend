@@ -4,14 +4,13 @@ from config.settings import settings
 from job_runtime.database import run_transactional
 from market_analysis.scan import ScanConfig
 from market_data.factory import market_data
-from services.market_analysis_scan import run_market_analysis_scan
-
 from market_screener.constants import (
     MARKET_ANALYSIS_INTERVAL,
     MARKET_ANALYSIS_MINIMUM_BARS,
     MARKET_ANALYSIS_PERIOD,
     MARKET_ANALYSIS_TIMEFRAME,
 )
+from services.market_analysis_scan import run_market_analysis_scan
 
 logger = logging.getLogger(__name__)
 
