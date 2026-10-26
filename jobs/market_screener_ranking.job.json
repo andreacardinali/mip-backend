@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "job_key": "market_screener_ranking",
+  "job_name": "Market Screener Ranking",
+  "python_module": "jobs.market_screener_ranking.worker",
+  "trigger": {
+    "type": "interval",
+    "interval_minutes": 30
+  },
+  "enabled_by_default": false
+}

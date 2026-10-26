@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict ccEHWnSw0CoVSs14ubguCnYFDmIDp6ZFmk2fiuL3rH3XiEhi9yrsxWjpWDbEyMo
+\restrict bfMECDgkrJJd10yjaz8sjx2IBfb5eUGLx6j5FQxWpmGEzQytmcJdRMb4qaIaQ35
 
 -- Dumped from database version 18.6 (Debian 18.6-1.pgdg13+2)
 -- Dumped by pg_dump version 18.6 (Debian 18.6-1.pgdg13+2)
@@ -113,6 +113,20 @@ CREATE TYPE public.trend_type AS ENUM (
 
 
 --
+-- Name: fn_market_screener_touch_updated_at(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.fn_market_screener_touch_updated_at() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    NEW.updated_at := now();
+    RETURN NEW;
+END;
+$$;
+
+
+--
 -- Name: fx_convert(numeric, character, character); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -161,6 +175,65 @@ BEGIN
     RETURN
         (p_amount * v_from_rate)
         / v_to_rate;
+END;
+$$;
+
+
+--
+-- Name: fx_convert_at_date(numeric, character, character, date); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.fx_convert_at_date(p_amount numeric, p_from character, p_to character, p_rate_date date) RETURNS numeric
+    LANGUAGE plpgsql STABLE
+    AS $$
+DECLARE
+    v_from_currency char(3);
+    v_to_currency char(3);
+    v_from_rate numeric;
+    v_to_rate numeric;
+BEGIN
+    IF p_amount IS NULL THEN
+        RETURN NULL;
+    END IF;
+
+    IF p_rate_date IS NULL THEN
+        RAISE EXCEPTION 'p_rate_date is required';
+    END IF;
+
+    v_from_currency := upper(btrim(p_from));
+    v_to_currency := upper(btrim(p_to));
+
+    IF v_from_currency = v_to_currency THEN
+        RETURN p_amount;
+    END IF;
+
+    SELECT h.rate_to_usd
+    INTO v_from_rate
+    FROM public.exchange_rate_history h
+    WHERE h.currency_code = v_from_currency
+      AND h.rate_date <= p_rate_date
+    ORDER BY h.rate_date DESC
+    LIMIT 1;
+
+    SELECT h.rate_to_usd
+    INTO v_to_rate
+    FROM public.exchange_rate_history h
+    WHERE h.currency_code = v_to_currency
+      AND h.rate_date <= p_rate_date
+    ORDER BY h.rate_date DESC
+    LIMIT 1;
+
+    IF v_from_rate IS NULL THEN
+        RAISE EXCEPTION 'Historical exchange rate not found for % at %',
+            v_from_currency, p_rate_date;
+    END IF;
+
+    IF v_to_rate IS NULL THEN
+        RAISE EXCEPTION 'Historical exchange rate not found for % at %',
+            v_to_currency, p_rate_date;
+    END IF;
+
+    RETURN (p_amount * v_from_rate) / v_to_rate;
 END;
 $$;
 
@@ -2529,6 +2602,115 @@ BEGIN
               AND upper(i.symbol) = upper(btrim(p_symbol)))
       )
     ORDER BY i.symbol, i.instrument_id;
+END;
+$$;
+
+
+--
+-- Name: sp_get_entity_performance(uuid, uuid, date, date, character); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_get_entity_performance(p_entity_id uuid, p_user_id uuid, p_date_from date, p_date_to date, p_reporting_currency character DEFAULT NULL::bpchar) RETURNS TABLE(entity_id uuid, instrument_id uuid, symbol character varying, exchange character varying, currency_code character, isin character varying, price_date date, native_close numeric, reporting_currency character, reporting_close numeric, native_return_pct numeric, reporting_return_pct numeric)
+    LANGUAGE plpgsql STABLE
+    AS $$
+DECLARE
+    v_reporting_currency char(3);
+BEGIN
+    IF p_entity_id IS NULL OR p_user_id IS NULL THEN
+        RAISE EXCEPTION 'p_entity_id and p_user_id are required';
+    END IF;
+
+    IF p_date_from IS NULL OR p_date_to IS NULL OR p_date_from > p_date_to THEN
+        RAISE EXCEPTION 'Invalid date range: % - %', p_date_from, p_date_to;
+    END IF;
+
+    SELECT upper(btrim(coalesce(p_reporting_currency, u.reporting_currency)))
+    INTO v_reporting_currency
+    FROM public.users u
+    WHERE u.user_id = p_user_id
+      AND u.is_active = true;
+
+    IF v_reporting_currency IS NULL THEN
+        RAISE EXCEPTION 'Active user not found or reporting currency unavailable: %',
+            p_user_id;
+    END IF;
+
+    RETURN QUERY
+    WITH instrument_rows AS (
+        SELECT
+            i.entity_id,
+            i.instrument_id,
+            i.symbol,
+            i.exchange,
+            i.currency_code,
+            (
+                SELECT id.identity_value
+                FROM public.instrument_identities ii
+                JOIN public.identities id
+                  ON id.identity_id = ii.identity_id
+                JOIN public.identity_types it
+                  ON it.identity_type_id = id.identity_type_id
+                WHERE ii.instrument_id = i.instrument_id
+                  AND it.target_kind = 'INSTRUMENT'
+                  AND upper(it.code) = 'ISIN'
+                ORDER BY
+                    ii.is_primary DESC,
+                    ii.verified_at DESC NULLS LAST,
+                    ii.created_at DESC,
+                    id.identity_id
+                LIMIT 1
+            ) AS isin
+        FROM public.instruments i
+        JOIN public.entities e ON e.entity_id = i.entity_id
+        WHERE i.entity_id = p_entity_id
+          AND e.active = true
+          AND nullif(btrim(i.currency_code), '') IS NOT NULL
+    ), prices AS (
+        SELECT
+            ir.*,
+            ph.ts::date AS price_date,
+            ph.close AS native_close,
+            public.fx_convert_at_date(
+                ph.close,
+                ir.currency_code,
+                v_reporting_currency,
+                ph.ts::date
+            ) AS reporting_close
+        FROM instrument_rows ir
+        JOIN public.price_history ph
+          ON ph.instrument_id = ir.instrument_id
+        WHERE ph.ts::date BETWEEN p_date_from AND p_date_to
+          AND ph.close IS NOT NULL
+    ), based AS (
+        SELECT
+            p.*,
+            first_value(p.native_close) OVER (
+                PARTITION BY p.instrument_id
+                ORDER BY p.price_date
+            ) AS native_base,
+            first_value(p.reporting_close) OVER (
+                PARTITION BY p.instrument_id
+                ORDER BY p.price_date
+            ) AS reporting_base
+        FROM prices p
+    )
+    SELECT
+        b.entity_id,
+        b.instrument_id,
+        b.symbol,
+        b.exchange,
+        b.currency_code,
+        b.isin,
+        b.price_date,
+        b.native_close,
+        v_reporting_currency,
+        b.reporting_close,
+        CASE WHEN b.native_base <> 0
+             THEN ((b.native_close / b.native_base) - 1) * 100 END,
+        CASE WHEN b.reporting_base <> 0
+             THEN ((b.reporting_close / b.reporting_base) - 1) * 100 END
+    FROM based b
+    ORDER BY b.isin NULLS LAST, b.symbol, b.exchange NULLS LAST, b.price_date;
 END;
 $$;
 
@@ -5521,6 +5703,422 @@ $$;
 
 
 --
+-- Name: sp_market_screener_get_opportunity(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_market_screener_get_opportunity(p_opportunity_id uuid) RETURNS TABLE(opportunity_id uuid, signal_id uuid, instrument_id uuid, ranking_position integer, symbol text, direction text, origin text, attention_score numeric, technical_score numeric, quant_score numeric, llm_score numeric, composite_score numeric, verdict text, summary text, evidence jsonb, algorithm_version text, active boolean, created_at timestamp with time zone, updated_at timestamp with time zone)
+    LANGUAGE sql STABLE
+    AS $$
+    SELECT
+        o.opportunity_id,
+        o.signal_id,
+        o.instrument_id,
+        o.ranking_position,
+        o.symbol::text,
+        o.direction::text,
+        o.origin::text,
+        o.attention_score,
+        o.technical_score,
+        o.quant_score,
+        o.llm_score,
+        o.composite_score,
+        o.verdict::text,
+        o.summary,
+        o.evidence,
+        o.algorithm_version::text,
+        o.active,
+        o.created_at,
+        o.updated_at
+    FROM public.market_screener_opportunities o
+    WHERE o.opportunity_id = p_opportunity_id;
+$$;
+
+
+--
+-- Name: sp_market_screener_get_user_opportunity(uuid, uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_market_screener_get_user_opportunity(p_user_id uuid, p_opportunity_id uuid) RETURNS jsonb
+    LANGUAGE plpgsql STABLE
+    AS $$
+DECLARE
+    v_payload jsonb;
+BEGIN
+    IF p_user_id IS NULL OR p_opportunity_id IS NULL THEN
+        RAISE EXCEPTION 'p_user_id and p_opportunity_id are required';
+    END IF;
+
+    SELECT item
+    INTO v_payload
+    FROM public.sp_market_screener_list_user_opportunities(
+        p_user_id,
+        NULL,
+        NULL,
+        NULL,
+        NULL,
+        NULL,
+        0,
+        NULL,
+        1000
+    ) item
+    WHERE (item->>'opportunity_id')::uuid = p_opportunity_id
+    LIMIT 1;
+
+    RETURN v_payload;
+END;
+$$;
+
+
+--
+-- Name: sp_market_screener_list_opportunities(character varying, character varying, character varying, character varying, numeric, character varying, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_market_screener_list_opportunities(p_algorithm_version character varying DEFAULT 'market-screener-v1'::character varying, p_origin character varying DEFAULT NULL::character varying, p_direction character varying DEFAULT NULL::character varying, p_verdict character varying DEFAULT NULL::character varying, p_minimum_score numeric DEFAULT 0, p_query character varying DEFAULT NULL::character varying, p_limit integer DEFAULT 100) RETURNS TABLE(opportunity_id uuid, signal_id uuid, instrument_id uuid, ranking_position integer, symbol text, direction text, origin text, attention_score numeric, technical_score numeric, quant_score numeric, llm_score numeric, composite_score numeric, verdict text, summary text, evidence jsonb, algorithm_version text, updated_at timestamp with time zone)
+    LANGUAGE sql STABLE
+    AS $$
+    SELECT
+        o.opportunity_id,
+        o.signal_id,
+        o.instrument_id,
+        o.ranking_position,
+        o.symbol::text,
+        o.direction::text,
+        o.origin::text,
+        o.attention_score,
+        o.technical_score,
+        o.quant_score,
+        o.llm_score,
+        o.composite_score,
+        o.verdict::text,
+        o.summary,
+        o.evidence,
+        o.algorithm_version::text,
+        o.updated_at
+    FROM public.market_screener_opportunities o
+    WHERE o.active = true
+      AND o.algorithm_version = p_algorithm_version
+      AND (p_origin IS NULL OR o.origin = p_origin)
+      AND (p_direction IS NULL OR o.direction = p_direction)
+      AND (p_verdict IS NULL OR o.verdict = p_verdict)
+      AND o.composite_score >= COALESCE(p_minimum_score, 0)
+      AND (
+          p_query IS NULL
+          OR btrim(p_query) = ''
+          OR o.symbol ILIKE '%' || btrim(p_query) || '%'
+          OR COALESCE(o.summary, '') ILIKE '%' || btrim(p_query) || '%'
+      )
+    ORDER BY o.ranking_position, o.symbol
+    LIMIT GREATEST(COALESCE(p_limit, 100), 1);
+$$;
+
+
+--
+-- Name: sp_market_screener_list_ranking_inputs(character varying, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_market_screener_list_ranking_inputs(p_algorithm_version character varying, p_limit integer DEFAULT 200) RETURNS TABLE(signal_id uuid, instrument_id uuid, symbol text, direction text, origin text, attention_score numeric, technical_score numeric, quant_score numeric, llm_score numeric, verdict text, summary text, evidence jsonb)
+    LANGUAGE sql STABLE
+    AS $$
+    SELECT
+        s.signal_id,
+        s.instrument_id,
+        i.symbol::text,
+        s.direction::text,
+        NULLIF(s.evidence #>> '{market_discovery,origin}', '')::text,
+        NULLIF(s.evidence #>> '{market_discovery,attention_score}', '')::numeric,
+        s.technical_score,
+        NULLIF(s.evidence #>> '{market_discovery,quant_score}', '')::numeric,
+        s.llm_score,
+        NULLIF(s.llm_analysis->>'verdict', '')::text,
+        NULLIF(s.llm_analysis->>'summary', '')::text,
+        COALESCE(s.evidence, '{}'::jsonb)
+    FROM public.trading_signals s
+    JOIN public.instruments i ON i.instrument_id = s.instrument_id
+    WHERE s.status IN ('CANDIDATE', 'CONFIRMED')
+      AND (p_algorithm_version IS NULL OR s.algorithm_version = p_algorithm_version)
+    ORDER BY s.observed_at DESC, s.signal_id
+    LIMIT GREATEST(COALESCE(p_limit, 200), 1);
+$$;
+
+
+--
+-- Name: sp_market_screener_list_user_opportunities(uuid, character varying, character varying, character varying, character varying, boolean, numeric, text, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_market_screener_list_user_opportunities(p_user_id uuid, p_algorithm_version character varying DEFAULT NULL::character varying, p_origin character varying DEFAULT NULL::character varying, p_direction character varying DEFAULT NULL::character varying, p_verdict character varying DEFAULT NULL::character varying, p_portfolio_match boolean DEFAULT NULL::boolean, p_minimum_score numeric DEFAULT 0, p_query text DEFAULT NULL::text, p_limit integer DEFAULT 100) RETURNS SETOF jsonb
+    LANGUAGE plpgsql STABLE
+    AS $$
+BEGIN
+    IF p_user_id IS NULL THEN
+        RAISE EXCEPTION 'p_user_id is required';
+    END IF;
+
+    IF COALESCE(p_limit, 0) <= 0 OR p_limit > 1000 THEN
+        RAISE EXCEPTION 'p_limit must be between 1 and 1000';
+    END IF;
+
+    RETURN QUERY
+    WITH instrument_isins AS (
+        SELECT
+            instrument.instrument_id,
+            (
+                SELECT identity.identity_value
+                FROM public.instrument_identities instrument_identity
+                JOIN public.identities identity
+                  ON identity.identity_id = instrument_identity.identity_id
+                JOIN public.identity_types identity_type
+                  ON identity_type.identity_type_id = identity.identity_type_id
+                WHERE instrument_identity.instrument_id = instrument.instrument_id
+                  AND identity_type.target_kind = 'INSTRUMENT'
+                  AND upper(identity_type.code) = 'ISIN'
+                ORDER BY
+                    instrument_identity.is_primary DESC,
+                    instrument_identity.verified_at DESC NULLS LAST,
+                    instrument_identity.created_at DESC,
+                    identity.identity_id
+                LIMIT 1
+            ) AS isin
+        FROM public.instruments instrument
+    ), enriched AS (
+        SELECT
+            opportunity.*,
+            entity.name AS entity_name,
+            source_instrument.symbol AS source_symbol,
+            source_instrument.exchange AS source_exchange,
+            source_instrument.currency_code AS source_currency_code,
+            source_isin.isin AS source_isin,
+            COALESCE(position_match.position_count, 0) AS portfolio_position_count,
+            COALESCE(position_match.exact_count, 0) AS exact_position_count,
+            COALESCE(position_match.same_isin_count, 0) AS same_isin_position_count,
+            COALESCE(position_match.portfolio_symbols, '[]'::jsonb)
+                AS portfolio_symbols,
+            COALESCE(position_match.portfolio_names, '[]'::jsonb)
+                AS portfolio_names,
+            COALESCE(position_match.positions, '[]'::jsonb)
+                AS portfolio_positions,
+            COALESCE(alternatives.instruments, '[]'::jsonb)
+                AS alternative_instruments
+        FROM public.market_screener_opportunities opportunity
+        JOIN public.entities entity
+          ON entity.entity_id = opportunity.entity_id
+        JOIN public.instruments source_instrument
+          ON source_instrument.instrument_id = opportunity.instrument_id
+        LEFT JOIN instrument_isins source_isin
+          ON source_isin.instrument_id = source_instrument.instrument_id
+        LEFT JOIN LATERAL (
+            SELECT
+                COUNT(DISTINCT position.position_id)::integer AS position_count,
+                COUNT(DISTINCT position.position_id) FILTER (
+                    WHERE position.instrument_id = opportunity.instrument_id
+                )::integer AS exact_count,
+                COUNT(DISTINCT position.position_id) FILTER (
+                    WHERE source_isin.isin IS NOT NULL
+                      AND held_isin.isin = source_isin.isin
+                )::integer AS same_isin_count,
+                COALESCE(
+                    jsonb_agg(DISTINCT to_jsonb(held_instrument.symbol))
+                        FILTER (WHERE held_instrument.symbol IS NOT NULL),
+                    '[]'::jsonb
+                ) AS portfolio_symbols,
+                COALESCE(
+                    jsonb_agg(DISTINCT to_jsonb(portfolio.name))
+                        FILTER (WHERE portfolio.name IS NOT NULL),
+                    '[]'::jsonb
+                ) AS portfolio_names,
+                COALESCE(
+                    jsonb_agg(
+                        DISTINCT jsonb_build_object(
+                            'position_id', position.position_id,
+                            'portfolio_id', portfolio.portfolio_id,
+                            'portfolio_name', portfolio.name,
+                            'instrument_id', held_instrument.instrument_id,
+                            'symbol', held_instrument.symbol,
+                            'exchange', held_instrument.exchange,
+                            'currency_code', held_instrument.currency_code,
+                            'isin', held_isin.isin,
+                            'quantity', position.quantity,
+                            'match_type', CASE
+                                WHEN position.instrument_id = opportunity.instrument_id
+                                    THEN 'EXACT_INSTRUMENT'
+                                WHEN source_isin.isin IS NOT NULL
+                                     AND held_isin.isin = source_isin.isin
+                                    THEN 'SAME_ISIN'
+                                ELSE 'SAME_ENTITY'
+                            END
+                        )
+                    ) FILTER (WHERE position.position_id IS NOT NULL),
+                    '[]'::jsonb
+                ) AS positions
+            FROM public.positions position
+            JOIN public.portfolios portfolio
+              ON portfolio.portfolio_id = position.portfolio_id
+             AND portfolio.user_id = p_user_id
+            JOIN public.instruments held_instrument
+              ON held_instrument.instrument_id = position.instrument_id
+             AND held_instrument.entity_id = opportunity.entity_id
+            LEFT JOIN instrument_isins held_isin
+              ON held_isin.instrument_id = held_instrument.instrument_id
+        ) position_match ON true
+        LEFT JOIN LATERAL (
+            SELECT COALESCE(
+                jsonb_agg(
+                    jsonb_build_object(
+                        'instrument_id', alternative.instrument_id,
+                        'symbol', alternative.symbol,
+                        'exchange', alternative.exchange,
+                        'currency_code', alternative.currency_code,
+                        'isin', alternative_isin.isin,
+                        'is_source', alternative.instrument_id = opportunity.instrument_id,
+                        'same_isin', source_isin.isin IS NOT NULL
+                            AND alternative_isin.isin = source_isin.isin
+                    )
+                    ORDER BY
+                        alternative.instrument_id = opportunity.instrument_id DESC,
+                        alternative.symbol,
+                        alternative.exchange
+                ),
+                '[]'::jsonb
+            ) AS instruments
+            FROM public.instruments alternative
+            LEFT JOIN instrument_isins alternative_isin
+              ON alternative_isin.instrument_id = alternative.instrument_id
+            WHERE alternative.entity_id = opportunity.entity_id
+        ) alternatives ON true
+        WHERE opportunity.active = true
+          AND (
+              p_algorithm_version IS NULL
+              OR opportunity.algorithm_version = p_algorithm_version
+          )
+          AND (p_origin IS NULL OR opportunity.origin = p_origin)
+          AND (p_direction IS NULL OR opportunity.direction = p_direction)
+          AND (p_verdict IS NULL OR opportunity.verdict = p_verdict)
+          AND opportunity.composite_score >= COALESCE(p_minimum_score, 0)
+    )
+    SELECT jsonb_build_object(
+        'opportunity_id', enriched.opportunity_id,
+        'signal_id', enriched.signal_id,
+        'entity_id', enriched.entity_id,
+        'entity_name', enriched.entity_name,
+        'instrument_id', enriched.instrument_id,
+        'source_instrument_id', enriched.instrument_id,
+        'symbol', enriched.symbol,
+        'source_symbol', enriched.source_symbol,
+        'source_exchange', enriched.source_exchange,
+        'source_currency_code', enriched.source_currency_code,
+        'source_isin', enriched.source_isin,
+        'direction', enriched.direction,
+        'origin', enriched.origin,
+        'attention_score', enriched.attention_score,
+        'technical_score', enriched.technical_score,
+        'quant_score', enriched.quant_score,
+        'llm_score', enriched.llm_score,
+        'composite_score', enriched.composite_score,
+        'ranking_position', enriched.ranking_position,
+        'verdict', enriched.verdict,
+        'summary', enriched.summary,
+        'evidence', enriched.evidence,
+        'algorithm_version', enriched.algorithm_version,
+        'created_at', enriched.created_at,
+        'updated_at', enriched.updated_at,
+        'portfolio_match', enriched.portfolio_position_count > 0,
+        'portfolio_match_type', CASE
+            WHEN enriched.exact_position_count > 0 THEN 'EXACT_INSTRUMENT'
+            WHEN enriched.same_isin_position_count > 0 THEN 'SAME_ISIN'
+            WHEN enriched.portfolio_position_count > 0 THEN 'SAME_ENTITY'
+            ELSE 'NO_MATCH'
+        END,
+        'portfolio_position_count', enriched.portfolio_position_count,
+        'portfolio_symbols', enriched.portfolio_symbols,
+        'portfolio_names', enriched.portfolio_names,
+        'portfolio_positions', enriched.portfolio_positions,
+        'alternative_instruments', enriched.alternative_instruments
+    )
+    FROM enriched
+    WHERE (
+        p_portfolio_match IS NULL
+        OR p_portfolio_match = (enriched.portfolio_position_count > 0)
+    )
+      AND (
+        NULLIF(btrim(p_query), '') IS NULL
+        OR enriched.source_symbol ILIKE '%' || btrim(p_query) || '%'
+        OR enriched.entity_name ILIKE '%' || btrim(p_query) || '%'
+        OR enriched.source_isin ILIKE '%' || btrim(p_query) || '%'
+        OR enriched.portfolio_symbols::text ILIKE '%' || btrim(p_query) || '%'
+    )
+    ORDER BY enriched.ranking_position, enriched.composite_score DESC
+    LIMIT p_limit;
+END;
+$$;
+
+
+--
+-- Name: sp_market_screener_replace_ranking(character varying, jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_market_screener_replace_ranking(p_algorithm_version character varying, p_opportunities jsonb) RETURNS jsonb
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_inserted integer := 0;
+BEGIN
+    IF NULLIF(btrim(p_algorithm_version), '') IS NULL THEN
+        RAISE EXCEPTION 'algorithm_version cannot be empty';
+    END IF;
+    IF jsonb_typeof(COALESCE(p_opportunities, '[]'::jsonb)) <> 'array' THEN
+        RAISE EXCEPTION 'opportunities must be a JSON array';
+    END IF;
+
+    UPDATE public.market_screener_opportunities
+    SET active = false
+    WHERE algorithm_version = p_algorithm_version AND active;
+
+    INSERT INTO public.market_screener_opportunities (
+        signal_id, instrument_id, algorithm_version, symbol, direction, origin,
+        attention_score, technical_score, quant_score, llm_score,
+        composite_score, ranking_position, verdict, summary, evidence, active
+    )
+    SELECT
+        (item->>'signal_id')::uuid,
+        (item->>'instrument_id')::uuid,
+        p_algorithm_version,
+        item->>'symbol',
+        item->>'direction',
+        NULLIF(item->>'origin', ''),
+        NULLIF(item->>'attention_score', '')::numeric,
+        NULLIF(item->>'technical_score', '')::numeric,
+        NULLIF(item->>'quant_score', '')::numeric,
+        NULLIF(item->>'llm_score', '')::numeric,
+        (item->>'composite_score')::numeric,
+        (item->>'ranking_position')::integer,
+        NULLIF(item->>'verdict', ''),
+        NULLIF(item->>'summary', ''),
+        COALESCE(item->'evidence', '{}'::jsonb),
+        true
+    FROM jsonb_array_elements(COALESCE(p_opportunities, '[]'::jsonb)) AS item
+    ON CONFLICT (algorithm_version, signal_id)
+    DO UPDATE SET
+        instrument_id = EXCLUDED.instrument_id,
+        symbol = EXCLUDED.symbol,
+        direction = EXCLUDED.direction,
+        origin = EXCLUDED.origin,
+        attention_score = EXCLUDED.attention_score,
+        technical_score = EXCLUDED.technical_score,
+        quant_score = EXCLUDED.quant_score,
+        llm_score = EXCLUDED.llm_score,
+        composite_score = EXCLUDED.composite_score,
+        ranking_position = EXCLUDED.ranking_position,
+        verdict = EXCLUDED.verdict,
+        summary = EXCLUDED.summary,
+        evidence = EXCLUDED.evidence,
+        active = true;
+
+    GET DIAGNOSTICS v_inserted = ROW_COUNT;
+    RETURN jsonb_build_object('upserted', v_inserted, 'algorithm_version', p_algorithm_version);
+END;
+$$;
+
+
+--
 -- Name: sp_news_get_user_news(uuid, character varying, timestamp with time zone, timestamp with time zone, character varying, numeric, numeric, numeric, character varying, integer); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -7834,6 +8432,50 @@ $$;
 
 
 --
+-- Name: sp_upsert_exchange_rate_history(character, date, numeric); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_upsert_exchange_rate_history(p_currency_code character, p_rate_date date, p_rate_to_usd numeric) RETURNS void
+    LANGUAGE plpgsql
+    AS $_$
+DECLARE
+    v_currency_code char(3);
+BEGIN
+    v_currency_code := upper(btrim(p_currency_code));
+
+    IF v_currency_code IS NULL
+       OR length(v_currency_code) <> 3
+       OR v_currency_code !~ '^[A-Z]{3}$'
+    THEN
+        RAISE EXCEPTION 'Invalid currency code: %', p_currency_code;
+    END IF;
+
+    IF p_rate_date IS NULL THEN
+        RAISE EXCEPTION 'p_rate_date is required';
+    END IF;
+
+    IF p_rate_to_usd IS NULL OR p_rate_to_usd <= 0 THEN
+        RAISE EXCEPTION 'Invalid exchange rate for % on %: %',
+            v_currency_code, p_rate_date, p_rate_to_usd;
+    END IF;
+
+    INSERT INTO public.exchange_rate_history (
+        currency_code,
+        rate_date,
+        rate_to_usd
+    )
+    VALUES (
+        v_currency_code,
+        p_rate_date,
+        p_rate_to_usd
+    )
+    ON CONFLICT (currency_code, rate_date)
+    DO UPDATE SET rate_to_usd = EXCLUDED.rate_to_usd;
+END;
+$_$;
+
+
+--
 -- Name: sp_upsert_filing(text, text, text, date, timestamp without time zone, text, text, jsonb, text, text); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -8577,6 +9219,29 @@ $$;
 
 
 --
+-- Name: trg_market_screener_set_entity_id(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.trg_market_screener_set_entity_id() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    SELECT instrument.entity_id
+    INTO NEW.entity_id
+    FROM public.instruments instrument
+    WHERE instrument.instrument_id = NEW.instrument_id;
+
+    IF NEW.entity_id IS NULL THEN
+        RAISE EXCEPTION 'Instrument not found for screener opportunity: %',
+            NEW.instrument_id;
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
 -- Name: trg_set_created_at(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -8863,6 +9528,21 @@ CREATE TABLE public.etf_constituents (
     entity_id uuid,
     weight numeric(10,6),
     effective_date date
+);
+
+
+--
+-- Name: exchange_rate_history; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.exchange_rate_history (
+    currency_code character(3) NOT NULL,
+    rate_date date NOT NULL,
+    rate_to_usd numeric(18,8) NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ck_exchange_rate_history_currency CHECK ((((currency_code)::text = upper((currency_code)::text)) AND (currency_code ~ '^[A-Z]{3}$'::text))),
+    CONSTRAINT ck_exchange_rate_history_rate CHECK ((rate_to_usd > (0)::numeric))
 );
 
 
@@ -9315,6 +9995,34 @@ CREATE TABLE public.market_price_refresh_queue (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT ck_market_price_refresh_attempts CHECK (((attempt_count >= 0) AND (max_attempts > 0))),
     CONSTRAINT ck_market_price_refresh_status CHECK (((status)::text = ANY ((ARRAY['PENDING'::character varying, 'PROCESSING'::character varying, 'RETRY'::character varying, 'COMPLETED'::character varying, 'FAILED'::character varying])::text[])))
+);
+
+
+--
+-- Name: market_screener_opportunities; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.market_screener_opportunities (
+    opportunity_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    signal_id uuid NOT NULL,
+    instrument_id uuid NOT NULL,
+    algorithm_version character varying(100) NOT NULL,
+    symbol character varying(50) NOT NULL,
+    direction character varying(20) NOT NULL,
+    origin character varying(30),
+    attention_score numeric(12,4),
+    technical_score numeric(12,4),
+    quant_score numeric(12,4),
+    llm_score numeric(12,4),
+    composite_score numeric(12,4) NOT NULL,
+    ranking_position integer NOT NULL,
+    verdict character varying(30),
+    summary text,
+    evidence jsonb DEFAULT '{}'::jsonb NOT NULL,
+    active boolean DEFAULT true NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    entity_id uuid NOT NULL
 );
 
 
@@ -10415,6 +11123,22 @@ ALTER TABLE ONLY public.market_price_refresh_queue
 
 
 --
+-- Name: market_screener_opportunities market_screener_opportunities_algorithm_version_signal_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.market_screener_opportunities
+    ADD CONSTRAINT market_screener_opportunities_algorithm_version_signal_id_key UNIQUE (algorithm_version, signal_id);
+
+
+--
+-- Name: market_screener_opportunities market_screener_opportunities_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.market_screener_opportunities
+    ADD CONSTRAINT market_screener_opportunities_pkey PRIMARY KEY (opportunity_id);
+
+
+--
 -- Name: market_search_cache market_search_cache_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -10532,6 +11256,14 @@ ALTER TABLE ONLY public.notification_templates
 
 ALTER TABLE ONLY public.notifications
     ADD CONSTRAINT notifications_pkey PRIMARY KEY (notification_id);
+
+
+--
+-- Name: exchange_rate_history pk_exchange_rate_history; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.exchange_rate_history
+    ADD CONSTRAINT pk_exchange_rate_history PRIMARY KEY (currency_code, rate_date);
 
 
 --
@@ -11003,6 +11735,13 @@ CREATE INDEX ix_entity_name_observations_source_entity ON public.entity_name_obs
 
 
 --
+-- Name: ix_exchange_rate_history_date; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_exchange_rate_history_date ON public.exchange_rate_history USING btree (rate_date DESC, currency_code);
+
+
+--
 -- Name: ix_exchange_source_mappings_exchange; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -11189,6 +11928,20 @@ CREATE INDEX ix_market_discovery_snapshots_latest ON public.market_discovery_sna
 --
 
 CREATE INDEX ix_market_price_refresh_due ON public.market_price_refresh_queue USING btree (status, next_attempt_at) WHERE ((status)::text = ANY ((ARRAY['PENDING'::character varying, 'RETRY'::character varying])::text[]));
+
+
+--
+-- Name: ix_market_screener_opportunities_active_rank; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_market_screener_opportunities_active_rank ON public.market_screener_opportunities USING btree (algorithm_version, active, ranking_position);
+
+
+--
+-- Name: ix_market_screener_opportunities_entity; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_market_screener_opportunities_entity ON public.market_screener_opportunities USING btree (entity_id, active, ranking_position);
 
 
 --
@@ -11612,6 +12365,20 @@ CREATE TRIGGER trg_entity_impact_history_created_at BEFORE INSERT ON public.enti
 
 
 --
+-- Name: exchange_rate_history trg_exchange_rate_history_created_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_exchange_rate_history_created_at BEFORE INSERT ON public.exchange_rate_history FOR EACH ROW EXECUTE FUNCTION public.trg_set_created_at();
+
+
+--
+-- Name: exchange_rate_history trg_exchange_rate_history_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_exchange_rate_history_updated_at BEFORE INSERT OR UPDATE ON public.exchange_rate_history FOR EACH ROW EXECUTE FUNCTION public.trg_set_updated_at();
+
+
+--
 -- Name: exchange_rates trg_exchange_rates_updated_at; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -11763,6 +12530,20 @@ CREATE TRIGGER trg_market_discovery_sources_created_at BEFORE INSERT ON public.m
 --
 
 CREATE TRIGGER trg_market_discovery_sources_updated_at BEFORE INSERT OR UPDATE ON public.market_discovery_sources FOR EACH ROW EXECUTE FUNCTION public.trg_set_updated_at();
+
+
+--
+-- Name: market_screener_opportunities trg_market_screener_opportunities_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_market_screener_opportunities_updated_at BEFORE UPDATE ON public.market_screener_opportunities FOR EACH ROW EXECUTE FUNCTION public.fn_market_screener_touch_updated_at();
+
+
+--
+-- Name: market_screener_opportunities trg_market_screener_set_entity_id; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_market_screener_set_entity_id BEFORE INSERT OR UPDATE OF instrument_id ON public.market_screener_opportunities FOR EACH ROW EXECUTE FUNCTION public.trg_market_screener_set_entity_id();
 
 
 --
@@ -12103,6 +12884,14 @@ ALTER TABLE ONLY public.filings
 
 
 --
+-- Name: market_screener_opportunities fk_market_screener_opportunity_entity; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.market_screener_opportunities
+    ADD CONSTRAINT fk_market_screener_opportunity_entity FOREIGN KEY (entity_id) REFERENCES public.entities(entity_id);
+
+
+--
 -- Name: identities identities_identity_type_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -12292,6 +13081,22 @@ ALTER TABLE ONLY public.market_discovery_snapshots
 
 ALTER TABLE ONLY public.market_price_refresh_queue
     ADD CONSTRAINT market_price_refresh_queue_instrument_id_fkey FOREIGN KEY (instrument_id) REFERENCES public.instruments(instrument_id) ON DELETE CASCADE;
+
+
+--
+-- Name: market_screener_opportunities market_screener_opportunities_instrument_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.market_screener_opportunities
+    ADD CONSTRAINT market_screener_opportunities_instrument_id_fkey FOREIGN KEY (instrument_id) REFERENCES public.instruments(instrument_id);
+
+
+--
+-- Name: market_screener_opportunities market_screener_opportunities_signal_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.market_screener_opportunities
+    ADD CONSTRAINT market_screener_opportunities_signal_id_fkey FOREIGN KEY (signal_id) REFERENCES public.trading_signals(signal_id) ON DELETE CASCADE;
 
 
 --
@@ -12658,5 +13463,5 @@ ALTER TABLE ONLY public.watchlists
 -- PostgreSQL database dump complete
 --
 
-\unrestrict ccEHWnSw0CoVSs14ubguCnYFDmIDp6ZFmk2fiuL3rH3XiEhi9yrsxWjpWDbEyMo
+\unrestrict bfMECDgkrJJd10yjaz8sjx2IBfb5eUGLx6j5FQxWpmGEzQytmcJdRMb4qaIaQ35
 

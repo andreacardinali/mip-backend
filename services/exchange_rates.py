@@ -27,14 +27,31 @@ def refresh_exchange_rates(
                 db.execute(
                     text(
                         """
-                        SELECT sp_upsert_exchange_rate(
-                            :currency_code,
-                            :rate_to_usd
+                        SELECT public.sp_upsert_exchange_rate(
+                            CAST(:currency_code AS char(3)),
+                            CAST(:rate_to_usd AS numeric)
                         )
                         """
                     ),
                     {
                         "currency_code": currency_code,
+                        "rate_to_usd": rate_to_usd,
+                    },
+                )
+
+                db.execute(
+                    text(
+                        """
+                        SELECT public.sp_upsert_exchange_rate_history(
+                            CAST(:currency_code AS char(3)),
+                            CAST(:reference_date AS date),
+                            CAST(:rate_to_usd AS numeric)
+                        )
+                        """
+                    ),
+                    {
+                        "currency_code": currency_code,
+                        "reference_date": snapshot.reference_date,
                         "rate_to_usd": rate_to_usd,
                     },
                 )

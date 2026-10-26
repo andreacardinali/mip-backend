@@ -1,23 +1,47 @@
-# Commit per simbolo per Market Analysis LLM Enrichment
+# MIP entity performance with historical FX
 
-Questa patch rimuove la transazione unica intorno all'intero job.
+This package adds database support for comparing all listings of one MIP entity on a common reporting-currency basis.
 
-Nuovo flusso:
+## Expected behavior
 
-1. carica i segnali pendenti in una transazione breve;
-2. chiude la transazione;
-3. esegue la chiamata LLM senza transazioni DB aperte;
-4. persiste ogni singolo segnale con un nuovo `run_transactional()`;
-5. committa immediatamente il risultato del simbolo;
-6. continua con i simboli successivi anche se uno fallisce.
+Listings tied to the same ISIN represent the same security. Their normalized total direction should therefore be materially aligned. Differences in native-price performance can be explained primarily by the trading-currency path, while small residual gaps may still arise from market hours, stale/missing bars, provider adjustments, liquidity and rounding.
 
-Non richiede migrazioni SQL.
+The package deliberately uses **historical daily FX rates**. Applying today's FX rate to every historical point would only rescale a series and would not remove the historical currency effect.
+
+## Files
+
+- `sql/20261023_entity_performance_fx.sql`: table, indexes, timestamp triggers and stored procedures.
+- `tests/test_entity_performance_fx.sql`: transactional smoke tests.
+
+## Apply
 
 ```bash
-cd /opt/mip/mip-backend
-unzip -o mip_llm_enrichment_commit_per_symbol.zip
-python -m pytest -q \
-  tests/test_market_analysis_llm_enrichment.py \
-  tests/test_market_analysis_llm_enrichment_transactions.py
-python -m jobs.market_analysis_llm_enrichment.worker
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \
+  -f sql/20261023_entity_performance_fx.sql
 ```
+
+## Test
+
+```bash
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \
+  -f tests/test_entity_performance_fx.sql
+```
+
+## API-facing stored procedure
+
+```sql
+SELECT *
+FROM public.sp_get_entity_performance(
+    :entity_id,
+    :user_id,
+    :date_from,
+    :date_to,
+    :reporting_currency
+);
+```
+
+The result includes native and reporting-currency closes plus rebased percentage performance for each listing, with ISIN exposed for frontend grouping.
+
+## Important ingestion requirement
+
+The configured EXCHANGE_RATES provider should populate one row per currency and effective date through `sp_upsert_exchange_rate_history`. No provider-specific SQL is required in application code.
