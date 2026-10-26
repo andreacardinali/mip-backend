@@ -10,6 +10,9 @@ class LLMRequest:
     max_tokens: int = 4096
     grounded_search: bool = False
     response_schema: dict[str, Any] | None = None
+    cache_namespace: str = ""
+    cache_ttl_seconds: int | None = None
+    cache_bypass: bool = False
 
 
 @dataclass(frozen=True, slots=True)

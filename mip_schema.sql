@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict zoncXlY5xsK6hSeXUi9ZErD6kEvSMq27ll9OR9hfeNXan7QnL7ucB34A5bUcJPm
+\restrict 7yJP5SVwqs9M2WVhLhK7wnuGc1H2bfFbBDjzrLROoNCDSs0BfF1Yw3hC42UVUd3
 
 -- Dumped from database version 18.6 (Debian 18.6-1.pgdg13+2)
 -- Dumped by pg_dump version 18.6 (Debian 18.6-1.pgdg13+2)
@@ -3909,6 +3909,149 @@ CREATE FUNCTION public.sp_list_scheduler_jobs() RETURNS TABLE(job_id uuid, job_k
         LIMIT 1
     ) latest_run ON TRUE
     ORDER BY sj.job_name;
+$$;
+
+
+--
+-- Name: sp_llm_claim_cached_response(character varying, character varying, character varying, jsonb, integer, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_llm_claim_cached_response(p_cache_key character varying, p_provider character varying, p_model character varying, p_request_payload jsonb, p_ttl_seconds integer, p_claim_stale_seconds integer) RETURNS TABLE(action character varying, response_data jsonb, response_raw jsonb, sources jsonb, search_executed boolean)
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_row public.llm_response_cache%ROWTYPE;
+BEGIN
+    IF length(p_cache_key) <> 64 THEN
+        RAISE EXCEPTION 'p_cache_key must contain a SHA-256 hex digest';
+    END IF;
+    IF p_ttl_seconds <= 0 OR p_claim_stale_seconds <= 0 THEN
+        RAISE EXCEPTION 'LLM cache timing values must be positive';
+    END IF;
+
+    INSERT INTO public.llm_response_cache(
+        cache_key, provider, model, status, request_payload,
+        expires_at, claimed_at
+    ) VALUES (
+        p_cache_key, p_provider, p_model, 'PROCESSING', p_request_payload,
+        now() + make_interval(secs => p_ttl_seconds), now()
+    )
+    ON CONFLICT (cache_key) DO NOTHING;
+
+    IF FOUND THEN
+        RETURN QUERY SELECT 'CLAIM'::varchar, NULL::jsonb, NULL::jsonb,
+            '[]'::jsonb, false;
+        RETURN;
+    END IF;
+
+    SELECT * INTO v_row
+    FROM public.llm_response_cache
+    WHERE cache_key = p_cache_key
+    FOR UPDATE;
+
+    IF v_row.status = 'READY' AND v_row.expires_at > now() THEN
+        UPDATE public.llm_response_cache
+        SET hit_count = hit_count + 1,
+            last_accessed_at = now()
+        WHERE cache_key = p_cache_key;
+        RETURN QUERY SELECT 'HIT'::varchar, v_row.response_data,
+            v_row.response_raw, v_row.sources, v_row.search_executed;
+        RETURN;
+    END IF;
+
+    IF v_row.status = 'READY'
+       OR v_row.claimed_at IS NULL
+       OR v_row.claimed_at < now() - make_interval(secs => p_claim_stale_seconds)
+    THEN
+        UPDATE public.llm_response_cache
+        SET provider = p_provider,
+            model = p_model,
+            status = 'PROCESSING',
+            request_payload = p_request_payload,
+            response_data = NULL,
+            response_raw = NULL,
+            sources = '[]'::jsonb,
+            search_executed = false,
+            expires_at = now() + make_interval(secs => p_ttl_seconds),
+            claimed_at = now(),
+            last_error = NULL
+        WHERE cache_key = p_cache_key;
+        RETURN QUERY SELECT 'CLAIM'::varchar, NULL::jsonb, NULL::jsonb,
+            '[]'::jsonb, false;
+        RETURN;
+    END IF;
+
+    RETURN QUERY SELECT 'WAIT'::varchar, NULL::jsonb, NULL::jsonb,
+        '[]'::jsonb, false;
+END;
+$$;
+
+
+--
+-- Name: sp_llm_complete_cached_response(character varying, jsonb, jsonb, jsonb, boolean, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_llm_complete_cached_response(p_cache_key character varying, p_response_data jsonb, p_response_raw jsonb, p_sources jsonb, p_search_executed boolean, p_ttl_seconds integer) RETURNS boolean
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    UPDATE public.llm_response_cache
+    SET status = 'READY',
+        response_data = p_response_data,
+        response_raw = p_response_raw,
+        sources = COALESCE(p_sources, '[]'::jsonb),
+        search_executed = COALESCE(p_search_executed, false),
+        expires_at = now() + make_interval(secs => p_ttl_seconds),
+        claimed_at = NULL,
+        last_accessed_at = now(),
+        last_error = NULL
+    WHERE cache_key = p_cache_key
+      AND status = 'PROCESSING';
+    RETURN FOUND;
+END;
+$$;
+
+
+--
+-- Name: sp_llm_delete_expired_responses(integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_llm_delete_expired_responses(p_limit integer DEFAULT 1000) RETURNS integer
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_deleted integer;
+BEGIN
+    WITH expired AS (
+        SELECT cache_key
+        FROM public.llm_response_cache
+        WHERE status = 'READY' AND expires_at <= now()
+        ORDER BY expires_at
+        LIMIT p_limit
+        FOR UPDATE SKIP LOCKED
+    )
+    DELETE FROM public.llm_response_cache c
+    USING expired e
+    WHERE c.cache_key = e.cache_key;
+    GET DIAGNOSTICS v_deleted = ROW_COUNT;
+    RETURN v_deleted;
+END;
+$$;
+
+
+--
+-- Name: sp_llm_release_cached_response(character varying, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_llm_release_cached_response(p_cache_key character varying, p_error text) RETURNS boolean
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    DELETE FROM public.llm_response_cache
+    WHERE cache_key = p_cache_key
+      AND status = 'PROCESSING';
+    RETURN FOUND;
+END;
 $$;
 
 
@@ -8417,6 +8560,23 @@ $$;
 
 
 --
+-- Name: trg_llm_response_cache_timestamps(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.trg_llm_response_cache_timestamps() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        NEW.created_at := COALESCE(NEW.created_at, now());
+    END IF;
+    NEW.updated_at := now();
+    RETURN NEW;
+END;
+$$;
+
+
+--
 -- Name: trg_set_created_at(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -8981,6 +9141,32 @@ CREATE TABLE public.llm_request_queue (
     lease_expires_at timestamp with time zone,
     CONSTRAINT ck_llm_queue_attempts CHECK (((estimated_tokens > 0) AND (attempt_count >= 0) AND (max_attempts > 0))),
     CONSTRAINT ck_llm_queue_status CHECK (((status)::text = ANY ((ARRAY['PENDING'::character varying, 'PROCESSING'::character varying, 'RETRY'::character varying, 'COMPLETED'::character varying, 'FAILED'::character varying])::text[])))
+);
+
+
+--
+-- Name: llm_response_cache; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.llm_response_cache (
+    cache_key character varying(64) NOT NULL,
+    provider character varying(50) NOT NULL,
+    model character varying(255) NOT NULL,
+    status character varying(20) NOT NULL,
+    request_payload jsonb NOT NULL,
+    response_data jsonb,
+    response_raw jsonb,
+    sources jsonb DEFAULT '[]'::jsonb NOT NULL,
+    search_executed boolean DEFAULT false NOT NULL,
+    expires_at timestamp with time zone NOT NULL,
+    claimed_at timestamp with time zone,
+    last_accessed_at timestamp with time zone,
+    hit_count bigint DEFAULT 0 NOT NULL,
+    last_error text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ck_llm_response_cache_response CHECK ((((status)::text <> 'READY'::text) OR ((response_data IS NOT NULL) AND (response_raw IS NOT NULL)))),
+    CONSTRAINT ck_llm_response_cache_status CHECK (((status)::text = ANY ((ARRAY['PROCESSING'::character varying, 'READY'::character varying])::text[])))
 );
 
 
@@ -10165,6 +10351,14 @@ ALTER TABLE ONLY public.llm_request_queue
 
 
 --
+-- Name: llm_response_cache llm_response_cache_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.llm_response_cache
+    ADD CONSTRAINT llm_response_cache_pkey PRIMARY KEY (cache_key);
+
+
+--
 -- Name: market_analysis_scan_failures market_analysis_scan_failures_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -10935,6 +11129,20 @@ CREATE INDEX ix_llm_request_queue_cleanup ON public.llm_request_queue USING btre
 
 
 --
+-- Name: ix_llm_response_cache_expiry; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_llm_response_cache_expiry ON public.llm_response_cache USING btree (expires_at);
+
+
+--
+-- Name: ix_llm_response_cache_provider_model; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_llm_response_cache_provider_model ON public.llm_response_cache USING btree (provider, model);
+
+
+--
 -- Name: ix_market_analysis_scan_runs_universe_started; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -11464,6 +11672,13 @@ CREATE TRIGGER trg_llm_request_queue_created_at BEFORE INSERT ON public.llm_requ
 --
 
 CREATE TRIGGER trg_llm_request_queue_updated_at BEFORE INSERT OR UPDATE ON public.llm_request_queue FOR EACH ROW EXECUTE FUNCTION public.trg_set_updated_at();
+
+
+--
+-- Name: llm_response_cache trg_llm_response_cache_timestamps; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_llm_response_cache_timestamps BEFORE INSERT OR UPDATE ON public.llm_response_cache FOR EACH ROW EXECUTE FUNCTION public.trg_llm_response_cache_timestamps();
 
 
 --
@@ -12443,5 +12658,5 @@ ALTER TABLE ONLY public.watchlists
 -- PostgreSQL database dump complete
 --
 
-\unrestrict zoncXlY5xsK6hSeXUi9ZErD6kEvSMq27ll9OR9hfeNXan7QnL7ucB34A5bUcJPm
+\unrestrict 7yJP5SVwqs9M2WVhLhK7wnuGc1H2bfFbBDjzrLROoNCDSs0BfF1Yw3hC42UVUd3
 
