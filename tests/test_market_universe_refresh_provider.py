@@ -1,22 +1,22 @@
 from datetime import UTC, datetime
 
 from market_analysis.universes import UniverseDefinition
-from market_data.models import IndexConstituent
+from market_sources.models import UniverseMember
 from services.market_universe_refresh import refresh_market_universes
 
 
 class FakeMarketData:
-    def get_index_constituents(self, code):
+    def get_universe_members(self, code):
         return [
-            IndexConstituent(
-                index_code=code,
+            UniverseMember(
+                universe_code=code,
                 symbol="AAPL",
                 source="WIKIPEDIA",
                 source_reference="u",
                 raw_payload={},
             ),
-            IndexConstituent(
-                index_code=code,
+            UniverseMember(
+                universe_code=code,
                 symbol="MSFT",
                 source="WIKIPEDIA",
                 source_reference="u",
@@ -47,7 +47,7 @@ def test_refresh_reads_constituents_via_market_data(monkeypatch) -> None:
     definition = UniverseDefinition("TEST", "Test", "INDEX", 2, 2)
     result = refresh_market_universes(
         object(),
-        market_data_service=FakeMarketData(),
+        market_source_service=FakeMarketData(),
         definitions=[definition],
         effective_at=datetime(2026, 10, 23, tzinfo=UTC),
     )

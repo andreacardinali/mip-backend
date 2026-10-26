@@ -3,13 +3,13 @@ from __future__ import annotations
 import pytest
 
 from market_analysis.universes import UniverseDefinition, validate_constituents
-from market_data.models import IndexConstituent
-from market_data.providers.wikipedia import (
-    INDEX_DEFINITIONS,
+from market_sources.models import UniverseMember
+from market_sources.universe.providers.wikipedia import (
+    UNIVERSE_DEFINITIONS,
     _select_table,
     _WikiTableParser,
-    normalize_index_symbol,
-    parse_index_constituents,
+    normalize_universe_symbol,
+    parse_universe_members,
 )
 
 
@@ -36,11 +36,11 @@ def test_parser_finds_wikitable_by_symbol_header() -> None:
     )
     table = _select_table(parser.tables, "Symbol")
     assert table[1][0] == "BRK.B"
-    assert normalize_index_symbol(table[1][0]) == "BRK-B"
+    assert normalize_universe_symbol(table[1][0]) == "BRK-B"
 
 
-def test_wikipedia_parser_returns_normalized_market_data_models() -> None:
-    result = parse_index_constituents(
+def test_wikipedia_parser_returns_normalized_market_source_models() -> None:
+    result = parse_universe_members(
         """
         <table>
           <tr><th>Symbol</th><th>Security</th></tr>
@@ -48,22 +48,22 @@ def test_wikipedia_parser_returns_normalized_market_data_models() -> None:
           <tr><td>AAPL</td><td>Apple</td></tr>
         </table>
         """,
-        INDEX_DEFINITIONS["SP500"],
+        UNIVERSE_DEFINITIONS["SP500"],
     )
     assert [item.symbol for item in result] == ["BRK-B", "AAPL"]
-    assert all(item.index_code == "SP500" for item in result)
+    assert all(item.universe_code == "SP500" for item in result)
 
 
 def test_validation_rejects_duplicates() -> None:
     items = [
-        IndexConstituent(index_code="TEST", symbol="AAPL"),
-        IndexConstituent(index_code="TEST", symbol="AAPL"),
+        UniverseMember(universe_code="TEST", symbol="AAPL"),
+        UniverseMember(universe_code="TEST", symbol="AAPL"),
     ]
     with pytest.raises(ValueError, match="duplicate"):
         validate_constituents(items, definition())
 
 
 def test_validation_rejects_suspicious_cardinality() -> None:
-    items = [IndexConstituent(index_code="TEST", symbol="AAPL")]
+    items = [UniverseMember(universe_code="TEST", symbol="AAPL")]
     with pytest.raises(ValueError, match="unexpected member count"):
         validate_constituents(items, definition())

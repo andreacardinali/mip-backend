@@ -13,7 +13,7 @@ InstrumentImporter = Callable[[str], bool]
 def refresh_market_universes(
     db,
     *,
-    market_data_service,
+    market_source_service,
     definitions: Iterable[UniverseDefinition],
     instrument_importer: InstrumentImporter | None = None,
     effective_at: datetime | None = None,
@@ -24,7 +24,7 @@ def refresh_market_universes(
     results: dict[str, Any] = {}
 
     for definition in definitions:
-        constituents = market_data_service.get_index_constituents(definition.code)
+        constituents = market_source_service.get_universe_members(definition.code)
         validate_constituents(constituents, definition)
         symbols = [item.symbol for item in constituents]
         resolved = repository.resolve_universe_symbols(symbols=symbols)

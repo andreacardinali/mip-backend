@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "job_key": "market_discovery_refresh",
+  "job_name": "Market Discovery Refresh",
+  "python_module": "jobs.market_discovery_refresh.worker",
+  "trigger": {"type": "cron", "cron_expression": "15 * * * *"},
+  "enabled_by_default": true
+}

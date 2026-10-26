@@ -5,22 +5,22 @@ from datetime import UTC, datetime
 import pytest
 
 from market_analysis.universes import UniverseDefinition
-from market_data.models import IndexConstituent
+from market_sources.models import UniverseMember
 from services.market_universe_refresh import refresh_market_universes
 
 
-class FakeMarketData:
-    def get_index_constituents(self, index_code):
+class FakeMarketSource:
+    def get_universe_members(self, universe_code):
         return [
-            IndexConstituent(
-                index_code=index_code,
+            UniverseMember(
+                universe_code=universe_code,
                 symbol="AAPL",
                 source="WIKIPEDIA",
                 source_reference="https://example.invalid",
                 raw_payload={"Symbol": "AAPL"},
             ),
-            IndexConstituent(
-                index_code=index_code,
+            UniverseMember(
+                universe_code=universe_code,
                 symbol="MSFT",
                 source="WIKIPEDIA",
                 source_reference="https://example.invalid",
@@ -62,7 +62,7 @@ def test_refresh_is_atomic_after_full_resolution(monkeypatch) -> None:
     )
     result = refresh_market_universes(
         object(),
-        market_data_service=FakeMarketData(),
+        market_source_service=FakeMarketSource(),
         definitions=[definition()],
         effective_at=datetime(2026, 10, 23, tzinfo=UTC),
     )
@@ -83,6 +83,6 @@ def test_refresh_refuses_partial_replacement(monkeypatch) -> None:
     with pytest.raises(ValueError, match="unresolved symbols"):
         refresh_market_universes(
             object(),
-            market_data_service=FakeMarketData(),
+            market_source_service=FakeMarketSource(),
             definitions=[definition()],
         )

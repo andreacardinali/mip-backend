@@ -24,9 +24,11 @@ from routers.watchlists import router as watchlists_router
 
 logger = logging.getLogger(__name__)
 
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     yield
+
 
 app = FastAPI(
     title="Market Intelligence Platform",

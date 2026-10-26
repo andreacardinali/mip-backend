@@ -17,14 +17,14 @@ class Definition:
 @dataclass
 class Constituent:
     symbol: str
-    index_code: str = "TEST"
+    universe_code: str = "TEST"
     source: str = "WIKIPEDIA"
     source_reference: str = "source"
     raw_payload: dict | None = None
 
 
 class FakeMarketData:
-    def get_index_constituents(self, code):
+    def get_universe_members(self, code):
         return [
             Constituent("AAPL", raw_payload={}),
             Constituent("MSFT", raw_payload={}),
@@ -63,7 +63,7 @@ def test_each_import_uses_and_commits_its_own_transaction(monkeypatch) -> None:
     monkeypatch.setattr(module, "validate_constituents", lambda items, definition: None)
 
     result = module.refresh_market_universes_incrementally(
-        market_data_service=FakeMarketData(),
+        market_source_service=FakeMarketData(),
         definitions=[Definition()],
         run_transactional=transaction,
         instrument_importer=importer,
@@ -100,13 +100,13 @@ def test_successful_import_is_not_repeated_on_next_execution(monkeypatch) -> Non
     monkeypatch.setattr(module, "validate_constituents", lambda items, definition: None)
 
     first = module.refresh_market_universes_incrementally(
-        market_data_service=FakeMarketData(),
+        market_source_service=FakeMarketData(),
         definitions=[Definition()],
         run_transactional=transaction,
         instrument_importer=importer,
     )
     second = module.refresh_market_universes_incrementally(
-        market_data_service=FakeMarketData(),
+        market_source_service=FakeMarketData(),
         definitions=[Definition()],
         run_transactional=transaction,
         instrument_importer=importer,

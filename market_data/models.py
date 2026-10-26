@@ -212,19 +212,6 @@ class EtfExposure:
 
 
 @dataclass(frozen=True, slots=True)
-class IndexConstituent:
-    index_code: str
-    symbol: str
-    name: str | None = None
-    exchange_code: str | None = None
-    sector: str | None = None
-    industry: str | None = None
-    source_reference: str | None = None
-    source: str | None = None
-    raw_payload: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass(frozen=True, slots=True)
 class EarningsEvent:
     symbol: str
     event_date: date

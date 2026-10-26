@@ -1,9 +1,9 @@
 import httpx
 
-from market_data.providers.wikipedia import (
-    INDEX_DEFINITIONS,
-    WikipediaProvider,
-    parse_index_constituents,
+from market_sources.universe.providers.wikipedia import (
+    UNIVERSE_DEFINITIONS,
+    WikipediaUniverseProvider,
+    parse_universe_members,
 )
 
 SP500_HTML = """
@@ -25,20 +25,20 @@ class FakeClient:
 
 
 def test_parse_normalizes_symbols() -> None:
-    result = parse_index_constituents(SP500_HTML, INDEX_DEFINITIONS["SP500"])
+    result = parse_universe_members(SP500_HTML, UNIVERSE_DEFINITIONS["SP500"])
     assert [item.symbol for item in result] == ["BRK-B", "AAPL"]
     assert result[0].source == "WIKIPEDIA"
 
 
 def test_provider_sends_descriptive_user_agent() -> None:
     client = FakeClient()
-    provider = WikipediaProvider(
+    provider = WikipediaUniverseProvider(
         user_agent="MIP/1.0 (ops@example.com)",
         retry_policy=__import__(
             "http_client.retry", fromlist=["RetryPolicy"]
         ).RetryPolicy(max_retries=2, jitter_seconds=0),
         client=client,
     )
-    result = provider.get_index_constituents("SP500")
+    result = provider.get_universe_members("SP500")
     assert len(result) == 2
     assert client.headers["User-Agent"] == "MIP/1.0 (ops@example.com)"

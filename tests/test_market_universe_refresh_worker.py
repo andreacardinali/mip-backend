@@ -33,7 +33,7 @@ def test_worker_uses_incremental_refresh(monkeypatch) -> None:
 
     assert result["SP500"]["status"] == "COMPLETED"
     assert result["SP500"]["members"] == 500
-    assert captured["market_data_service"] is worker.market_data
+    assert captured["market_source_service"] is worker.market_sources
     assert captured["definitions"] is worker.DEFAULT_UNIVERSES
     assert captured["run_transactional"] is worker.run_transactional
     assert captured["instrument_importer"] is worker.import_universe_instrument

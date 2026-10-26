@@ -13,7 +13,6 @@ class MarketDataCapability(StrEnum):
     EXCHANGE_RATES = "exchange_rates"
     NEWS = "news"
     ETF_HOLDINGS = "etf_holdings"
-    INDEX_CONSTITUENTS = "index_constituents"
     EARNINGS_CALENDAR = "earnings_calendar"
     ECONOMIC_CALENDAR = "economic_calendar"
 
@@ -40,22 +39,21 @@ class ProviderCapabilities:
     def supports(self, capability, *, instrument_type=None, interval=None):
         if capability not in self.supported:
             return False
-        allowed_types = self.instrument_types.get(capability)
-        if instrument_type and allowed_types and instrument_type not in allowed_types:
+        types = self.instrument_types.get(capability)
+        intervals = self.intervals.get(capability)
+        if instrument_type and types and instrument_type not in types:
             return False
-        allowed_intervals = self.intervals.get(capability)
-        if interval and allowed_intervals and interval not in allowed_intervals:
+        if interval and intervals and interval not in intervals:
             return False
         return True
 
-    def to_dict(self) -> dict:
-        result = {}
-        for capability in sorted(self.supported, key=str):
-            result[capability.value] = {
+    def to_dict(self):
+        return {
+            c.value: {
                 "instrument_types": sorted(
-                    item.value
-                    for item in self.instrument_types.get(capability, frozenset())
+                    x.value for x in self.instrument_types.get(c, frozenset())
                 ),
-                "intervals": sorted(self.intervals.get(capability, frozenset())),
+                "intervals": sorted(self.intervals.get(c, frozenset())),
             }
-        return result
+            for c in sorted(self.supported, key=str)
+        }

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import StrEnum
 from typing import Any, Protocol
 
 from market_analysis.models import ScoreBreakdown, SignalCandidate
@@ -10,6 +11,11 @@ from market_analysis.signals import generate_trend_pullback_candidate
 from market_analysis.technical import analyze_price_bars
 from market_data.capabilities import InstrumentType
 from market_data.models import HistoryRequest, InstrumentReference
+
+
+class ScanSkipReason(StrEnum):
+    INSUFFICIENT_HISTORY = "INSUFFICIENT_HISTORY"
+    NO_TECHNICAL_SIGNAL = "NO_TECHNICAL_SIGNAL"
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,17 +68,46 @@ class ScanFailure:
 
 
 @dataclass(frozen=True, slots=True)
+class ScanSkip:
+    instrument_id: str
+    symbol: str
+    reason: ScanSkipReason
+    detail: str
+    available_bars: int | None = None
+    required_bars: int | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "instrument_id": self.instrument_id,
+            "symbol": self.symbol,
+            "reason": self.reason.value,
+            "detail": self.detail,
+            "available_bars": self.available_bars,
+            "required_bars": self.required_bars,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class ScanResult:
     processed: int
     candidates: tuple[EvaluatedSignal, ...]
     failures: tuple[ScanFailure, ...]
+    skipped: tuple[ScanSkip, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
+        skipped_by_reason = {
+            reason.value: sum(1 for item in self.skipped if item.reason == reason)
+            for reason in ScanSkipReason
+        }
         return {
             "processed": self.processed,
             "candidates": len(self.candidates),
             "failures": len(self.failures),
+            "skipped": len(self.skipped),
+            "skipped_by_reason": skipped_by_reason,
             "symbols": [item.member.symbol for item in self.candidates],
+            "failed_symbols": [item.symbol for item in self.failures],
+            "skipped_symbols": [item.symbol for item in self.skipped],
         }
 
 
@@ -126,16 +161,66 @@ def scan_members(
 ) -> ScanResult:
     candidates: list[EvaluatedSignal] = []
     failures: list[ScanFailure] = []
+    skipped: list[ScanSkip] = []
 
     for member in members:
         try:
-            evaluated = evaluate_member(
-                member,
-                market_data_service=market_data_service,
-                config=config,
+            bars = market_data_service.get_ohlcv(
+                HistoryRequest(
+                    instrument=member.to_reference(),
+                    period=config.period,
+                    interval=config.interval,
+                )
             )
-            if evaluated is not None:
-                candidates.append(evaluated)
+            available_bars = len(bars)
+            if available_bars < config.minimum_bars:
+                skipped.append(
+                    ScanSkip(
+                        instrument_id=member.instrument_id,
+                        symbol=member.symbol,
+                        reason=ScanSkipReason.INSUFFICIENT_HISTORY,
+                        detail=(
+                            f"insufficient history: {available_bars} bars; "
+                            f"minimum {config.minimum_bars}"
+                        ),
+                        available_bars=available_bars,
+                        required_bars=config.minimum_bars,
+                    )
+                )
+                continue
+
+            snapshot = analyze_price_bars(bars)
+            if snapshot is None:
+                raise ValueError("technical snapshot unavailable")
+
+            candidate = generate_trend_pullback_candidate(
+                snapshot,
+                timeframe=config.timeframe,
+                observed_at=datetime.fromtimestamp(
+                    snapshot.observed_timestamp,
+                    UTC,
+                ),
+            )
+            if candidate is None:
+                skipped.append(
+                    ScanSkip(
+                        instrument_id=member.instrument_id,
+                        symbol=member.symbol,
+                        reason=ScanSkipReason.NO_TECHNICAL_SIGNAL,
+                        detail="no technical signal generated",
+                    )
+                )
+                continue
+
+            candidates.append(
+                EvaluatedSignal(
+                    member=member,
+                    candidate=candidate,
+                    scores=build_score_breakdown(
+                        technical=score_technical_snapshot(snapshot),
+                    ),
+                )
+            )
         except Exception as error:
             failures.append(
                 ScanFailure(
@@ -156,4 +241,5 @@ def scan_members(
         processed=len(members),
         candidates=tuple(candidates),
         failures=tuple(failures),
+        skipped=tuple(skipped),
     )

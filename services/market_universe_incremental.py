@@ -15,7 +15,7 @@ InstrumentImporter = Callable[[Any, str], bool]
 
 def refresh_market_universes_incrementally(
     *,
-    market_data_service,
+    market_source_service,
     definitions: Iterable[UniverseDefinition],
     run_transactional: TransactionRunner,
     instrument_importer: InstrumentImporter,
@@ -35,7 +35,7 @@ def refresh_market_universes_incrementally(
     remaining_budget = import_limit
 
     for definition in definitions:
-        constituents = market_data_service.get_index_constituents(definition.code)
+        constituents = market_source_service.get_universe_members(definition.code)
         validate_constituents(constituents, definition)
         symbols = [item.symbol for item in constituents]
 

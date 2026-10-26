@@ -6,27 +6,25 @@ from market_data.providers.eulerpool import EulerpoolProvider
 from market_data.providers.fmp import FMPProvider
 from market_data.providers.ghostfolio import GhostfolioProvider
 from market_data.providers.openfigi import OpenFigiProvider
-from market_data.providers.wikipedia import WikipediaProvider
 from market_data.providers.yahoo import YahooProvider
 from market_data.registry import ProviderRegistry
 from market_data.service import MarketDataService
 
 
-def _retry_policy(config: MarketDataConfig) -> RetryPolicy:
+def _retry_policy(c):
     return RetryPolicy(
-        max_retries=config.http_max_retries,
-        base_delay_seconds=config.http_retry_base_seconds,
+        max_retries=c.http_max_retries, base_delay_seconds=c.http_retry_base_seconds
     )
 
 
-def _ecb_retry_policy(config: MarketDataConfig) -> RetryPolicy:
+def _ecb_retry_policy(c):
     return RetryPolicy(
         max_retries=int(
-            settings.get("EXCHANGE_RATES_HTTP_MAX_RETRIES", config.http_max_retries)
+            settings.get("EXCHANGE_RATES_HTTP_MAX_RETRIES", c.http_max_retries)
         ),
         base_delay_seconds=float(
             settings.get(
-                "EXCHANGE_RATES_HTTP_RETRY_BASE_SECONDS", config.http_retry_base_seconds
+                "EXCHANGE_RATES_HTTP_RETRY_BASE_SECONDS", c.http_retry_base_seconds
             )
         ),
     )
@@ -36,15 +34,6 @@ def create_market_data_service(config=None):
     config = config or MarketDataConfig.from_settings(settings)
     retry = _retry_policy(config)
     providers = [
-        WikipediaProvider(
-            user_agent=str(
-                settings.get(
-                    "WIKIPEDIA_USER_AGENT",
-                    "MIP/1.0 (https://github.com/andreacardinali/mip-backend)",
-                )
-            ),
-            timeout=float(settings.get("WIKIPEDIA_HTTP_TIMEOUT", config.http_timeout)),
-        ),
         YahooProvider(timeout=config.http_timeout, retry_policy=retry),
         EcbProvider(
             timeout=float(
@@ -53,29 +42,24 @@ def create_market_data_service(config=None):
             retry_policy=_ecb_retry_policy(config),
         ),
     ]
-    ghostfolio_base_url = settings.get("GHOSTFOLIO_BASE_URL")
-    ghostfolio_token = settings.get("GHOSTFOLIO_SECURITY_TOKEN")
-    if ghostfolio_base_url and ghostfolio_token:
+    base, token = settings.get("GHOSTFOLIO_BASE_URL"), settings.get(
+        "GHOSTFOLIO_SECURITY_TOKEN"
+    )
+    if base and token:
         providers.append(
             GhostfolioProvider(
-                ghostfolio_base_url,
-                ghostfolio_token,
-                timeout=config.http_timeout,
-                retry_policy=retry,
+                base, token, timeout=config.http_timeout, retry_policy=retry
             )
         )
-    fmp_api_key = settings.get("FMP_API_KEY")
-    if fmp_api_key:
+    key = settings.get("FMP_API_KEY")
+    if key:
         providers.append(
-            FMPProvider(fmp_api_key, timeout=config.http_timeout, retry_policy=retry)
+            FMPProvider(key, timeout=config.http_timeout, retry_policy=retry)
         )
-    eulerpool_api_key = settings.get("EULERPOOL_API_KEY")
-    if eulerpool_api_key:
+    key = settings.get("EULERPOOL_API_KEY")
+    if key:
         providers.insert(
-            0,
-            EulerpoolProvider(
-                eulerpool_api_key, timeout=config.http_timeout, retry_policy=retry
-            ),
+            0, EulerpoolProvider(key, timeout=config.http_timeout, retry_policy=retry)
         )
     providers.append(
         OpenFigiProvider(

@@ -1,9 +1,7 @@
-from __future__ import annotations
-
 from collections import Counter
 from dataclasses import dataclass
 
-from market_data.models import IndexConstituent
+from market_sources.models import UniverseMember
 
 
 @dataclass(frozen=True, slots=True)
@@ -16,48 +14,32 @@ class UniverseDefinition:
 
 
 DEFAULT_UNIVERSES = (
-    UniverseDefinition(
-        code="SP500",
-        name="S&P 500",
-        universe_type="INDEX",
-        minimum_members=490,
-        maximum_members=510,
-    ),
-    UniverseDefinition(
-        code="NASDAQ100",
-        name="NASDAQ-100",
-        universe_type="INDEX",
-        minimum_members=95,
-        maximum_members=110,
-    ),
+    UniverseDefinition("SP500", "S&P 500", "INDEX", 490, 510),
+    UniverseDefinition("NASDAQ100", "NASDAQ-100", "INDEX", 95, 110),
 )
 
 
-def validate_constituents(
-    constituents: list[IndexConstituent],
-    definition: UniverseDefinition,
-) -> None:
+def validate_constituents(constituents: list[UniverseMember], definition):
     if not constituents:
         raise ValueError(f"{definition.code}: empty constituent set")
-
-    wrong_index = sorted(
-        {item.index_code for item in constituents if item.index_code != definition.code}
+    wrong = sorted(
+        {x.universe_code for x in constituents if x.universe_code != definition.code}
     )
-    if wrong_index:
+    if wrong:
         raise ValueError(
-            f"{definition.code}: provider returned constituents for: {', '.join(wrong_index)}"
+            f"{definition.code}: provider returned members for: {', '.join(wrong)}"
         )
-
-    counts = Counter(item.symbol for item in constituents)
-    duplicates = sorted(symbol for symbol, count in counts.items() if count > 1)
+    counts = Counter(x.symbol for x in constituents)
+    duplicates = sorted(x for x, c in counts.items() if c > 1)
     if duplicates:
         raise ValueError(
             f"{definition.code}: duplicate symbols: {', '.join(duplicates[:10])}"
         )
-
-    count = len(constituents)
-    if not definition.minimum_members <= count <= definition.maximum_members:
+    if (
+        not definition.minimum_members
+        <= len(constituents)
+        <= definition.maximum_members
+    ):
         raise ValueError(
-            f"{definition.code}: unexpected member count {count}; expected "
-            f"{definition.minimum_members}-{definition.maximum_members}"
+            f"{definition.code}: unexpected member count {len(constituents)}; expected {definition.minimum_members}-{definition.maximum_members}"
         )

@@ -25,9 +25,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(message)s",
 )
 
-logging.getLogger(
-    "apscheduler.executors.default"
-).setLevel(logging.WARNING)
+logging.getLogger("apscheduler.executors.default").setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
 

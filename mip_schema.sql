@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict HGK7amaHlv6oEciSrI2WL6GHxryhOc3u3gqjgwcfOPgROTXyt5dF3tgcwdLrnLM
+\restrict jy98LjqTH7LkfsBnp0vba8fECb10uvlFaE8PBKQTru9quxJrMokBWU5kUgHdFwz
 
 -- Dumped from database version 18.6 (Debian 18.6-1.pgdg13+2)
 -- Dumped by pg_dump version 18.6 (Debian 18.6-1.pgdg13+2)
@@ -4694,6 +4694,611 @@ END; $$;
 
 
 --
+-- Name: sp_market_discovery_build_candidates(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_market_discovery_build_candidates(p_snapshot_id uuid DEFAULT NULL::uuid) RETURNS jsonb
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_snapshot_id uuid;
+    v_total integer;
+    v_resolved integer;
+    v_core integer;
+    v_discovery integer;
+    v_ambiguous integer;
+    v_unresolved integer;
+    v_rejected integer;
+BEGIN
+    SELECT COALESCE(
+        p_snapshot_id,
+        (
+            SELECT s.snapshot_id
+            FROM public.market_discovery_snapshots s
+            ORDER BY s.observed_at DESC, s.snapshot_id DESC
+            LIMIT 1
+        )
+    )
+    INTO v_snapshot_id;
+
+    IF v_snapshot_id IS NULL THEN
+        RAISE EXCEPTION 'No market discovery snapshot is available';
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM public.market_discovery_snapshots s
+        WHERE s.snapshot_id = v_snapshot_id
+    ) THEN
+        RAISE EXCEPTION 'Market discovery snapshot not found: %', v_snapshot_id;
+    END IF;
+
+    DELETE FROM public.market_discovery_candidates c
+    WHERE c.snapshot_id = v_snapshot_id;
+
+    WITH snapshot_context AS (
+        SELECT s.snapshot_id, GREATEST(s.returned_count, 1) AS returned_count
+        FROM public.market_discovery_snapshots s
+        WHERE s.snapshot_id = v_snapshot_id
+    ),
+    item_scores AS (
+        SELECT
+            i.*,
+            LEAST(
+                35.0,
+                GREATEST(
+                    0.0,
+                    35.0 * (
+                        1.0 - (
+                            GREATEST(COALESCE(i.rank, sc.returned_count), 1) - 1
+                        )::numeric / GREATEST(sc.returned_count - 1, 1)
+                    )
+                )
+            ) AS rank_score,
+            LEAST(
+                30.0,
+                15.0 * LEAST(
+                    1.0,
+                    LN(1 + GREATEST(COALESCE(i.mentions, 0) - COALESCE(i.previous_mentions, 0), 0)) / LN(51.0)
+                )
+                + 15.0 * LEAST(
+                    1.0,
+                    GREATEST(COALESCE(i.mentions, 0) - COALESCE(i.previous_mentions, 0), 0)::numeric
+                    / GREATEST(COALESCE(i.previous_mentions, 0), 1)
+                )
+            ) AS mentions_growth_score,
+            LEAST(
+                20.0,
+                20.0 * LEAST(
+                    1.0,
+                    LN(
+                        1 + GREATEST(
+                            COALESCE(i.previous_rank, i.rank) - COALESCE(i.rank, i.previous_rank),
+                            0
+                        )
+                    ) / LN(101.0)
+                )
+            ) AS rank_momentum_score,
+            LEAST(
+                15.0,
+                15.0 * LEAST(
+                    1.0,
+                    LN(1 + GREATEST(COALESCE(i.upvotes, 0), 0)) / LN(1001.0)
+                )
+            ) AS engagement_score
+        FROM public.market_discovery_snapshot_items i
+        JOIN snapshot_context sc ON sc.snapshot_id = i.snapshot_id
+    ),
+    exact_matches AS (
+        SELECT
+            scores.snapshot_item_id,
+            i.instrument_id,
+            i.entity_id,
+            e.active AS instrument_active,
+            EXISTS (
+                SELECT 1
+                FROM public.market_universe_members um
+                JOIN public.market_universes u
+                  ON u.universe_id = um.universe_id
+                WHERE um.instrument_id = i.instrument_id
+                  AND um.valid_to IS NULL
+                  AND u.active = true
+            ) AS is_core_listing
+        FROM item_scores scores
+        JOIN public.instruments i
+          ON upper(btrim(i.symbol)) =
+             upper(btrim(scores.symbol))
+        JOIN public.entities e
+          ON e.entity_id = i.entity_id
+    ),
+    match_summary AS (
+        SELECT
+            scores.snapshot_item_id,
+            COUNT(matches.instrument_id) AS all_instrument_count,
+            COUNT(matches.instrument_id) FILTER (WHERE matches.instrument_active) AS active_instrument_count,
+            COUNT(DISTINCT matches.entity_id) FILTER (WHERE matches.instrument_active) AS active_entity_count
+        FROM item_scores scores
+        LEFT JOIN exact_matches matches ON matches.snapshot_item_id = scores.snapshot_item_id
+        GROUP BY scores.snapshot_item_id
+    ),
+    selected_match AS (
+        SELECT DISTINCT ON (matches.snapshot_item_id)
+            matches.snapshot_item_id,
+            matches.instrument_id,
+            matches.entity_id,
+            matches.is_core_listing
+        FROM exact_matches matches
+        JOIN match_summary summary ON summary.snapshot_item_id = matches.snapshot_item_id
+        WHERE matches.instrument_active
+          AND summary.active_entity_count = 1
+        ORDER BY
+            matches.snapshot_item_id,
+            matches.is_core_listing DESC,
+            matches.instrument_id
+    ),
+    universe_memberships AS (
+        SELECT
+            selected.snapshot_item_id,
+            COALESCE(
+                jsonb_agg(DISTINCT u.code ORDER BY u.code)
+                    FILTER (WHERE u.code IS NOT NULL),
+                '[]'::jsonb
+            ) AS universe_codes
+        FROM selected_match selected
+        LEFT JOIN public.market_universe_members um
+          ON um.instrument_id = selected.instrument_id
+         AND um.valid_to IS NULL
+        LEFT JOIN public.market_universes u
+          ON u.universe_id = um.universe_id
+         AND u.active = true
+        GROUP BY selected.snapshot_item_id
+    )
+    INSERT INTO public.market_discovery_candidates (
+        snapshot_id,
+        snapshot_item_id,
+        entity_id,
+        instrument_id,
+        symbol,
+        origin,
+        resolution_status,
+        attention_score,
+        universe_codes,
+        attention_evidence
+    )
+    SELECT
+        scores.snapshot_id,
+        scores.snapshot_item_id,
+        CASE WHEN summary.active_entity_count = 1 THEN selected.entity_id END,
+        CASE WHEN summary.active_entity_count = 1 THEN selected.instrument_id END,
+        upper(btrim(scores.symbol)),
+        CASE
+            WHEN summary.active_entity_count = 1 AND COALESCE(jsonb_array_length(memberships.universe_codes), 0) > 0
+                THEN 'CORE'
+            WHEN summary.active_entity_count = 1
+                THEN 'DISCOVERY'
+            ELSE NULL
+        END,
+        CASE
+            WHEN summary.all_instrument_count = 0 THEN 'UNRESOLVED'
+            WHEN summary.active_instrument_count = 0 THEN 'REJECTED'
+            WHEN summary.active_entity_count > 1 THEN 'AMBIGUOUS'
+            WHEN summary.active_entity_count = 1 THEN 'RESOLVED'
+            ELSE 'UNRESOLVED'
+        END,
+        ROUND(
+            (
+                LEAST(
+                    100.0,
+                    GREATEST(
+                        0.0,
+                        scores.rank_score
+                        + scores.mentions_growth_score
+                        + scores.rank_momentum_score
+                        + scores.engagement_score
+                    )
+                )
+            )::numeric,
+            4
+        ),
+        COALESCE(memberships.universe_codes, '[]'::jsonb),
+        jsonb_build_object(
+            'rank', scores.rank,
+            'previous_rank', scores.previous_rank,
+            'rank_improvement', CASE
+                WHEN scores.rank IS NOT NULL AND scores.previous_rank IS NOT NULL
+                    THEN scores.previous_rank - scores.rank
+                ELSE NULL
+            END,
+            'mentions', scores.mentions,
+            'previous_mentions', scores.previous_mentions,
+            'mentions_delta', COALESCE(scores.mentions, 0) - COALESCE(scores.previous_mentions, 0),
+            'upvotes', scores.upvotes,
+            'components', jsonb_build_object(
+                'rank_score',
+                    ROUND(scores.rank_score::numeric, 4),
+                'mentions_growth_score',
+                    ROUND(scores.mentions_growth_score::numeric, 4),
+                'rank_momentum_score',
+                    ROUND(scores.rank_momentum_score::numeric, 4),
+                'engagement_score',
+                    ROUND(scores.engagement_score::numeric, 4)
+            ),
+            'resolution', jsonb_build_object(
+                'all_instrument_count', summary.all_instrument_count,
+                'active_instrument_count', summary.active_instrument_count,
+                'active_entity_count', summary.active_entity_count,
+                'selected_instrument_id', selected.instrument_id,
+                'selected_entity_id', selected.entity_id,
+                'selection_rule', 'exact symbol; unique active entity; active universe listing preferred; instrument_id tie-break'
+            )
+        )
+    FROM item_scores scores
+    JOIN match_summary summary ON summary.snapshot_item_id = scores.snapshot_item_id
+    LEFT JOIN selected_match selected ON selected.snapshot_item_id = scores.snapshot_item_id
+    LEFT JOIN universe_memberships memberships ON memberships.snapshot_item_id = scores.snapshot_item_id;
+
+    SELECT
+        COUNT(*),
+        COUNT(*) FILTER (WHERE resolution_status = 'RESOLVED'),
+        COUNT(*) FILTER (WHERE origin = 'CORE'),
+        COUNT(*) FILTER (WHERE origin = 'DISCOVERY'),
+        COUNT(*) FILTER (WHERE resolution_status = 'AMBIGUOUS'),
+        COUNT(*) FILTER (WHERE resolution_status = 'UNRESOLVED'),
+        COUNT(*) FILTER (WHERE resolution_status = 'REJECTED')
+    INTO
+        v_total,
+        v_resolved,
+        v_core,
+        v_discovery,
+        v_ambiguous,
+        v_unresolved,
+        v_rejected
+    FROM public.market_discovery_candidates c
+    WHERE c.snapshot_id = v_snapshot_id;
+
+    RETURN jsonb_build_object(
+        'snapshot_id', v_snapshot_id,
+        'total', v_total,
+        'resolved', v_resolved,
+        'core', v_core,
+        'discovery', v_discovery,
+        'ambiguous', v_ambiguous,
+        'unresolved', v_unresolved,
+        'rejected', v_rejected
+    );
+END;
+$$;
+
+
+--
+-- Name: sp_market_discovery_create_snapshot(character varying, character varying, character varying, timestamp with time zone, integer, text, jsonb, jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_market_discovery_create_snapshot(p_provider_code character varying, p_source_type character varying, p_source_name character varying, p_observed_at timestamp with time zone, p_requested_limit integer, p_source_reference text, p_source_metadata jsonb, p_items jsonb) RETURNS uuid
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_source_id uuid;
+    v_snapshot_id uuid;
+    v_item_count integer;
+BEGIN
+    IF p_observed_at IS NULL THEN RAISE EXCEPTION 'observed_at is required'; END IF;
+    IF p_requested_limit < 1 THEN RAISE EXCEPTION 'requested_limit must be positive'; END IF;
+    IF p_items IS NULL OR jsonb_typeof(p_items) <> 'array' THEN RAISE EXCEPTION 'items must be a JSON array'; END IF;
+    SELECT count(*) INTO v_item_count FROM jsonb_array_elements(p_items);
+    IF EXISTS (
+        SELECT 1 FROM jsonb_to_recordset(p_items) AS x(symbol text)
+        WHERE NULLIF(btrim(x.symbol), '') IS NULL
+    ) THEN RAISE EXCEPTION 'every item requires a symbol'; END IF;
+    IF EXISTS (
+        SELECT 1 FROM jsonb_to_recordset(p_items) AS x(symbol text)
+        GROUP BY upper(btrim(x.symbol)) HAVING count(*) > 1
+    ) THEN RAISE EXCEPTION 'items contain duplicate symbols'; END IF;
+    IF EXISTS (
+        SELECT 1 FROM jsonb_to_recordset(p_items) AS x(rank integer)
+        WHERE x.rank IS NOT NULL GROUP BY x.rank HAVING count(*) > 1
+    ) THEN RAISE EXCEPTION 'items contain duplicate ranks'; END IF;
+
+    v_source_id := public.sp_market_discovery_upsert_source(
+        p_provider_code, p_source_type, p_source_name, true
+    );
+    INSERT INTO public.market_discovery_snapshots(
+        source_id, observed_at, requested_limit, returned_count, source_reference, source_metadata
+    ) VALUES (
+        v_source_id, p_observed_at, p_requested_limit, v_item_count,
+        NULLIF(btrim(p_source_reference), ''), COALESCE(p_source_metadata, '{}'::jsonb)
+    ) RETURNING snapshot_id INTO v_snapshot_id;
+
+    INSERT INTO public.market_discovery_snapshot_items(
+        snapshot_id, symbol, name, rank, previous_rank, mentions,
+        previous_mentions, upvotes, score, raw_payload
+    )
+    SELECT v_snapshot_id, upper(btrim(x.symbol)), NULLIF(btrim(x.name), ''),
+           x.rank, x.previous_rank, x.mentions, x.previous_mentions,
+           x.upvotes, x.score, COALESCE(x.raw_payload, '{}'::jsonb)
+    FROM jsonb_to_recordset(p_items) AS x(
+        symbol text, name text, rank integer, previous_rank integer,
+        mentions integer, previous_mentions integer, upvotes integer,
+        score numeric, raw_payload jsonb
+    );
+    RETURN v_snapshot_id;
+END;
+$$;
+
+
+--
+-- Name: sp_market_discovery_delete_expired_candidates(integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_market_discovery_delete_expired_candidates(p_retention_days integer) RETURNS integer
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_deleted integer;
+BEGIN
+    IF p_retention_days < 1 THEN
+        RAISE EXCEPTION 'retention_days must be positive';
+    END IF;
+
+    DELETE FROM public.market_discovery_candidates c
+    USING public.market_discovery_snapshots s
+    WHERE s.snapshot_id = c.snapshot_id
+      AND s.observed_at < now() - make_interval(days => p_retention_days);
+
+    GET DIAGNOSTICS v_deleted = ROW_COUNT;
+    RETURN v_deleted;
+END;
+$$;
+
+
+--
+-- Name: sp_market_discovery_delete_expired_snapshots(integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_market_discovery_delete_expired_snapshots(p_retention_days integer) RETURNS integer
+    LANGUAGE plpgsql
+    AS $$
+DECLARE v_deleted integer;
+BEGIN
+    IF p_retention_days < 1 THEN RAISE EXCEPTION 'retention_days must be positive'; END IF;
+    DELETE FROM public.market_discovery_snapshots
+    WHERE observed_at < now() - make_interval(days => p_retention_days);
+    GET DIAGNOSTICS v_deleted = ROW_COUNT;
+    RETURN v_deleted;
+END;
+$$;
+
+
+--
+-- Name: sp_market_discovery_get_candidate(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_market_discovery_get_candidate(p_candidate_id uuid) RETURNS jsonb
+    LANGUAGE sql STABLE
+    AS $$
+SELECT jsonb_build_object(
+    'candidate_id', c.candidate_id,
+    'snapshot_id', c.snapshot_id,
+    'snapshot_item_id', c.snapshot_item_id,
+    'entity_id', c.entity_id,
+    'instrument_id', c.instrument_id,
+    'symbol', c.symbol,
+    'origin', c.origin,
+    'resolution_status', c.resolution_status,
+    'attention_score', c.attention_score,
+    'universe_codes', c.universe_codes,
+    'attention_evidence', c.attention_evidence,
+    'created_at', c.created_at,
+    'updated_at', c.updated_at
+)
+FROM public.market_discovery_candidates c
+WHERE c.candidate_id = p_candidate_id;
+$$;
+
+
+--
+-- Name: sp_market_discovery_get_latest_snapshot(character varying, character varying); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_market_discovery_get_latest_snapshot(p_provider_code character varying, p_source_type character varying) RETURNS jsonb
+    LANGUAGE sql STABLE
+    AS $$
+SELECT jsonb_build_object(
+    'snapshot_id', s.snapshot_id, 'provider_code', src.provider_code,
+    'source_type', src.source_type, 'source_name', src.name,
+    'observed_at', s.observed_at, 'requested_limit', s.requested_limit,
+    'returned_count', s.returned_count, 'source_reference', s.source_reference,
+    'source_metadata', s.source_metadata,
+    'items', COALESCE((SELECT jsonb_agg(to_jsonb(i) - 'snapshot_id' - 'created_at' - 'updated_at'
+        ORDER BY i.rank NULLS LAST, i.symbol) FROM public.market_discovery_snapshot_items i
+        WHERE i.snapshot_id = s.snapshot_id), '[]'::jsonb)
+)
+FROM public.market_discovery_snapshots s
+JOIN public.market_discovery_sources src ON src.source_id = s.source_id
+WHERE src.provider_code = upper(btrim(p_provider_code))
+  AND src.source_type = upper(btrim(p_source_type))
+ORDER BY s.observed_at DESC, s.snapshot_id DESC LIMIT 1;
+$$;
+
+
+--
+-- Name: sp_market_discovery_list_candidates(uuid, character varying, character varying, numeric, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_market_discovery_list_candidates(p_snapshot_id uuid DEFAULT NULL::uuid, p_resolution_status character varying DEFAULT NULL::character varying, p_origin character varying DEFAULT NULL::character varying, p_min_attention_score numeric DEFAULT 0, p_limit integer DEFAULT 100) RETURNS TABLE(candidate_id uuid, snapshot_id uuid, snapshot_item_id uuid, entity_id uuid, instrument_id uuid, symbol character varying, origin character varying, resolution_status character varying, attention_score numeric, universe_codes jsonb, attention_evidence jsonb, observed_at timestamp with time zone)
+    LANGUAGE sql STABLE
+    AS $$
+WITH selected_snapshot AS (
+    SELECT COALESCE(
+        p_snapshot_id,
+        (
+            SELECT s.snapshot_id
+            FROM public.market_discovery_snapshots s
+            ORDER BY s.observed_at DESC, s.snapshot_id DESC
+            LIMIT 1
+        )
+    ) AS snapshot_id
+)
+SELECT
+    c.candidate_id,
+    c.snapshot_id,
+    c.snapshot_item_id,
+    c.entity_id,
+    c.instrument_id,
+    c.symbol,
+    c.origin,
+    c.resolution_status,
+    c.attention_score,
+    c.universe_codes,
+    c.attention_evidence,
+    s.observed_at
+FROM public.market_discovery_candidates c
+JOIN selected_snapshot selected ON selected.snapshot_id = c.snapshot_id
+JOIN public.market_discovery_snapshots s ON s.snapshot_id = c.snapshot_id
+WHERE (p_resolution_status IS NULL OR c.resolution_status = upper(btrim(p_resolution_status)))
+  AND (p_origin IS NULL OR c.origin = upper(btrim(p_origin)))
+  AND c.attention_score >= COALESCE(p_min_attention_score, 0)
+ORDER BY c.attention_score DESC, c.symbol
+LIMIT LEAST(GREATEST(p_limit, 1), 1000);
+$$;
+
+
+--
+-- Name: sp_market_discovery_list_scan_candidates(uuid, numeric, numeric, integer, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_market_discovery_list_scan_candidates(p_snapshot_id uuid DEFAULT NULL::uuid, p_core_min_attention_score numeric DEFAULT 20, p_discovery_min_attention_score numeric DEFAULT 40, p_core_limit integer DEFAULT 100, p_discovery_limit integer DEFAULT 25) RETURNS TABLE(candidate_id uuid, snapshot_id uuid, instrument_id uuid, entity_id uuid, symbol character varying, exchange text, currency_code text, isin text, universe_id uuid, origin character varying, attention_score numeric, universe_codes jsonb, attention_evidence jsonb)
+    LANGUAGE sql STABLE
+    AS $$
+WITH selected_snapshot AS (
+    SELECT COALESCE(
+        p_snapshot_id,
+        (
+            SELECT s.snapshot_id
+            FROM public.market_discovery_snapshots s
+            ORDER BY s.observed_at DESC, s.snapshot_id DESC
+            LIMIT 1
+        )
+    ) AS snapshot_id
+),
+eligible AS (
+    SELECT
+        c.*,
+        ROW_NUMBER() OVER (
+            PARTITION BY c.origin
+            ORDER BY c.attention_score DESC, c.symbol
+        ) AS origin_position
+    FROM public.market_discovery_candidates c
+    JOIN selected_snapshot selected
+      ON selected.snapshot_id = c.snapshot_id
+    WHERE c.resolution_status = 'RESOLVED'
+      AND (
+          (c.origin = 'CORE' AND c.attention_score >= COALESCE(p_core_min_attention_score, 0))
+          OR
+          (c.origin = 'DISCOVERY' AND c.attention_score >= COALESCE(p_discovery_min_attention_score, 0))
+      )
+),
+limited AS (
+    SELECT *
+    FROM eligible
+    WHERE (origin = 'CORE' AND origin_position <= GREATEST(p_core_limit, 0))
+       OR (origin = 'DISCOVERY' AND origin_position <= GREATEST(p_discovery_limit, 0))
+),
+deduplicated AS (
+    SELECT DISTINCT ON (instrument_id)
+        *
+    FROM limited
+    ORDER BY
+        instrument_id,
+        CASE origin WHEN 'CORE' THEN 0 ELSE 1 END,
+        attention_score DESC,
+        symbol
+),
+preferred_universe AS (
+    SELECT
+        d.candidate_id,
+        membership.universe_id
+    FROM deduplicated d
+    LEFT JOIN LATERAL (
+        SELECT um.universe_id
+        FROM public.market_universe_members um
+        JOIN public.market_universes u
+          ON u.universe_id = um.universe_id
+        WHERE um.instrument_id = d.instrument_id
+          AND um.valid_to IS NULL
+          AND u.active = true
+        ORDER BY u.code, um.universe_id
+        LIMIT 1
+    ) membership ON true
+)
+SELECT
+    d.candidate_id,
+    d.snapshot_id,
+    d.instrument_id,
+    d.entity_id,
+    d.symbol,
+    i.exchange,
+    i.currency_code,
+    NULL::text AS isin,
+    preferred.universe_id,
+    d.origin,
+    d.attention_score,
+    d.universe_codes,
+    d.attention_evidence
+FROM deduplicated d
+JOIN public.instruments i
+  ON i.instrument_id = d.instrument_id
+LEFT JOIN preferred_universe preferred
+  ON preferred.candidate_id = d.candidate_id
+ORDER BY
+    CASE d.origin WHEN 'CORE' THEN 0 ELSE 1 END,
+    d.attention_score DESC,
+    d.symbol;
+$$;
+
+
+--
+-- Name: sp_market_discovery_list_snapshot_history(character varying, character varying, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_market_discovery_list_snapshot_history(p_provider_code character varying, p_source_type character varying, p_limit integer DEFAULT 100) RETURNS TABLE(snapshot_id uuid, observed_at timestamp with time zone, requested_limit integer, returned_count integer, source_reference text, source_metadata jsonb)
+    LANGUAGE sql STABLE
+    AS $$
+SELECT s.snapshot_id, s.observed_at, s.requested_limit, s.returned_count,
+       s.source_reference, s.source_metadata
+FROM public.market_discovery_snapshots s
+JOIN public.market_discovery_sources src ON src.source_id = s.source_id
+WHERE src.provider_code = upper(btrim(p_provider_code))
+  AND src.source_type = upper(btrim(p_source_type))
+ORDER BY s.observed_at DESC, s.snapshot_id DESC
+LIMIT least(greatest(p_limit, 1), 1000);
+$$;
+
+
+--
+-- Name: sp_market_discovery_upsert_source(character varying, character varying, character varying, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_market_discovery_upsert_source(p_provider_code character varying, p_source_type character varying, p_name character varying, p_is_enabled boolean DEFAULT true) RETURNS uuid
+    LANGUAGE plpgsql
+    AS $$
+DECLARE v_source_id uuid;
+BEGIN
+    IF NULLIF(btrim(p_provider_code), '') IS NULL OR NULLIF(btrim(p_source_type), '') IS NULL THEN
+        RAISE EXCEPTION 'provider_code and source_type are required';
+    END IF;
+    INSERT INTO public.market_discovery_sources(provider_code, source_type, name, is_enabled)
+    VALUES (upper(btrim(p_provider_code)), upper(btrim(p_source_type)), btrim(p_name), p_is_enabled)
+    ON CONFLICT (provider_code, source_type) DO UPDATE SET
+        name = EXCLUDED.name,
+        is_enabled = EXCLUDED.is_enabled
+    RETURNING source_id INTO v_source_id;
+    RETURN v_source_id;
+END;
+$$;
+
+
+--
 -- Name: sp_news_get_user_news(uuid, character varying, timestamp with time zone, timestamp with time zone, character varying, numeric, numeric, numeric, character varying, integer); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -8335,6 +8940,96 @@ CREATE TABLE public.market_analysis_scan_runs (
 
 
 --
+-- Name: market_discovery_candidates; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.market_discovery_candidates (
+    candidate_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    snapshot_id uuid NOT NULL,
+    snapshot_item_id uuid NOT NULL,
+    entity_id uuid,
+    instrument_id uuid,
+    symbol character varying(50) NOT NULL,
+    origin character varying(20),
+    resolution_status character varying(20) NOT NULL,
+    attention_score numeric(7,4) NOT NULL,
+    universe_codes jsonb DEFAULT '[]'::jsonb NOT NULL,
+    attention_evidence jsonb DEFAULT '{}'::jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ck_market_discovery_candidates_origin CHECK (((origin IS NULL) OR ((origin)::text = ANY ((ARRAY['CORE'::character varying, 'DISCOVERY'::character varying])::text[])))),
+    CONSTRAINT ck_market_discovery_candidates_resolution CHECK (((resolution_status)::text = ANY ((ARRAY['RESOLVED'::character varying, 'AMBIGUOUS'::character varying, 'UNRESOLVED'::character varying, 'REJECTED'::character varying])::text[]))),
+    CONSTRAINT ck_market_discovery_candidates_resolution_values CHECK (((((resolution_status)::text = 'RESOLVED'::text) AND (entity_id IS NOT NULL) AND (instrument_id IS NOT NULL) AND (origin IS NOT NULL)) OR (((resolution_status)::text <> 'RESOLVED'::text) AND (origin IS NULL)))),
+    CONSTRAINT ck_market_discovery_candidates_score CHECK (((attention_score >= (0)::numeric) AND (attention_score <= (100)::numeric))),
+    CONSTRAINT ck_market_discovery_candidates_symbol CHECK ((btrim((symbol)::text) <> ''::text))
+);
+
+
+--
+-- Name: market_discovery_snapshot_items; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.market_discovery_snapshot_items (
+    snapshot_item_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    snapshot_id uuid NOT NULL,
+    symbol character varying(50) NOT NULL,
+    name character varying(255),
+    rank integer,
+    previous_rank integer,
+    mentions integer,
+    previous_mentions integer,
+    upvotes integer,
+    score numeric,
+    raw_payload jsonb DEFAULT '{}'::jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ck_market_discovery_items_mentions CHECK (((mentions IS NULL) OR (mentions >= 0))),
+    CONSTRAINT ck_market_discovery_items_previous_mentions CHECK (((previous_mentions IS NULL) OR (previous_mentions >= 0))),
+    CONSTRAINT ck_market_discovery_items_previous_rank CHECK (((previous_rank IS NULL) OR (previous_rank > 0))),
+    CONSTRAINT ck_market_discovery_items_rank CHECK (((rank IS NULL) OR (rank > 0))),
+    CONSTRAINT ck_market_discovery_items_symbol CHECK ((btrim((symbol)::text) <> ''::text)),
+    CONSTRAINT ck_market_discovery_items_upvotes CHECK (((upvotes IS NULL) OR (upvotes >= 0)))
+);
+
+
+--
+-- Name: market_discovery_snapshots; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.market_discovery_snapshots (
+    snapshot_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    source_id uuid NOT NULL,
+    observed_at timestamp with time zone NOT NULL,
+    requested_limit integer NOT NULL,
+    returned_count integer NOT NULL,
+    source_reference text,
+    source_metadata jsonb DEFAULT '{}'::jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ck_market_discovery_snapshots_count CHECK ((returned_count >= 0)),
+    CONSTRAINT ck_market_discovery_snapshots_limit CHECK ((requested_limit > 0))
+);
+
+
+--
+-- Name: market_discovery_sources; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.market_discovery_sources (
+    source_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    provider_code character varying(50) NOT NULL,
+    source_type character varying(50) NOT NULL,
+    name character varying(255) NOT NULL,
+    is_enabled boolean DEFAULT true NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ck_market_discovery_sources_name CHECK ((btrim((name)::text) <> ''::text)),
+    CONSTRAINT ck_market_discovery_sources_provider CHECK ((btrim((provider_code)::text) <> ''::text)),
+    CONSTRAINT ck_market_discovery_sources_type CHECK ((btrim((source_type)::text) <> ''::text))
+);
+
+
+--
 -- Name: market_price_refresh_queue; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -9407,6 +10102,38 @@ ALTER TABLE ONLY public.market_analysis_scan_runs
 
 
 --
+-- Name: market_discovery_candidates market_discovery_candidates_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.market_discovery_candidates
+    ADD CONSTRAINT market_discovery_candidates_pkey PRIMARY KEY (candidate_id);
+
+
+--
+-- Name: market_discovery_snapshot_items market_discovery_snapshot_items_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.market_discovery_snapshot_items
+    ADD CONSTRAINT market_discovery_snapshot_items_pkey PRIMARY KEY (snapshot_item_id);
+
+
+--
+-- Name: market_discovery_snapshots market_discovery_snapshots_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.market_discovery_snapshots
+    ADD CONSTRAINT market_discovery_snapshots_pkey PRIMARY KEY (snapshot_id);
+
+
+--
+-- Name: market_discovery_sources market_discovery_sources_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.market_discovery_sources
+    ADD CONSTRAINT market_discovery_sources_pkey PRIMARY KEY (source_id);
+
+
+--
 -- Name: market_price_refresh_queue market_price_refresh_queue_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -9807,6 +10534,46 @@ ALTER TABLE ONLY public.identities
 
 
 --
+-- Name: market_discovery_candidates uq_market_discovery_candidates_snapshot_item; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.market_discovery_candidates
+    ADD CONSTRAINT uq_market_discovery_candidates_snapshot_item UNIQUE (snapshot_item_id);
+
+
+--
+-- Name: market_discovery_candidates uq_market_discovery_candidates_snapshot_symbol; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.market_discovery_candidates
+    ADD CONSTRAINT uq_market_discovery_candidates_snapshot_symbol UNIQUE (snapshot_id, symbol);
+
+
+--
+-- Name: market_discovery_snapshot_items uq_market_discovery_items_rank; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.market_discovery_snapshot_items
+    ADD CONSTRAINT uq_market_discovery_items_rank UNIQUE (snapshot_id, rank);
+
+
+--
+-- Name: market_discovery_snapshot_items uq_market_discovery_items_symbol; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.market_discovery_snapshot_items
+    ADD CONSTRAINT uq_market_discovery_items_symbol UNIQUE (snapshot_id, symbol);
+
+
+--
+-- Name: market_discovery_sources uq_market_discovery_sources; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.market_discovery_sources
+    ADD CONSTRAINT uq_market_discovery_sources UNIQUE (provider_code, source_type);
+
+
+--
 -- Name: market_price_refresh_queue uq_market_price_refresh_instrument; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -10093,6 +10860,41 @@ CREATE INDEX ix_llm_request_queue_cleanup ON public.llm_request_queue USING btre
 --
 
 CREATE INDEX ix_market_analysis_scan_runs_universe_started ON public.market_analysis_scan_runs USING btree (universe_id, started_at DESC);
+
+
+--
+-- Name: ix_market_discovery_candidates_entity; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_market_discovery_candidates_entity ON public.market_discovery_candidates USING btree (entity_id) WHERE (entity_id IS NOT NULL);
+
+
+--
+-- Name: ix_market_discovery_candidates_instrument; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_market_discovery_candidates_instrument ON public.market_discovery_candidates USING btree (instrument_id) WHERE (instrument_id IS NOT NULL);
+
+
+--
+-- Name: ix_market_discovery_candidates_rank; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_market_discovery_candidates_rank ON public.market_discovery_candidates USING btree (snapshot_id, resolution_status, attention_score DESC);
+
+
+--
+-- Name: ix_market_discovery_snapshot_items_symbol; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_market_discovery_snapshot_items_symbol ON public.market_discovery_snapshot_items USING btree (symbol, snapshot_id);
+
+
+--
+-- Name: ix_market_discovery_snapshots_latest; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_market_discovery_snapshots_latest ON public.market_discovery_snapshots USING btree (source_id, observed_at DESC, snapshot_id DESC);
 
 
 --
@@ -10614,6 +11416,62 @@ CREATE TRIGGER trg_market_analysis_scan_runs_updated_at BEFORE INSERT OR UPDATE 
 
 
 --
+-- Name: market_discovery_candidates trg_market_discovery_candidates_created_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_market_discovery_candidates_created_at BEFORE INSERT ON public.market_discovery_candidates FOR EACH ROW EXECUTE FUNCTION public.trg_set_created_at();
+
+
+--
+-- Name: market_discovery_candidates trg_market_discovery_candidates_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_market_discovery_candidates_updated_at BEFORE INSERT OR UPDATE ON public.market_discovery_candidates FOR EACH ROW EXECUTE FUNCTION public.trg_set_updated_at();
+
+
+--
+-- Name: market_discovery_snapshot_items trg_market_discovery_snapshot_items_created_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_market_discovery_snapshot_items_created_at BEFORE INSERT ON public.market_discovery_snapshot_items FOR EACH ROW EXECUTE FUNCTION public.trg_set_created_at();
+
+
+--
+-- Name: market_discovery_snapshot_items trg_market_discovery_snapshot_items_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_market_discovery_snapshot_items_updated_at BEFORE INSERT OR UPDATE ON public.market_discovery_snapshot_items FOR EACH ROW EXECUTE FUNCTION public.trg_set_updated_at();
+
+
+--
+-- Name: market_discovery_snapshots trg_market_discovery_snapshots_created_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_market_discovery_snapshots_created_at BEFORE INSERT ON public.market_discovery_snapshots FOR EACH ROW EXECUTE FUNCTION public.trg_set_created_at();
+
+
+--
+-- Name: market_discovery_snapshots trg_market_discovery_snapshots_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_market_discovery_snapshots_updated_at BEFORE INSERT OR UPDATE ON public.market_discovery_snapshots FOR EACH ROW EXECUTE FUNCTION public.trg_set_updated_at();
+
+
+--
+-- Name: market_discovery_sources trg_market_discovery_sources_created_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_market_discovery_sources_created_at BEFORE INSERT ON public.market_discovery_sources FOR EACH ROW EXECUTE FUNCTION public.trg_set_created_at();
+
+
+--
+-- Name: market_discovery_sources trg_market_discovery_sources_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_market_discovery_sources_updated_at BEFORE INSERT OR UPDATE ON public.market_discovery_sources FOR EACH ROW EXECUTE FUNCTION public.trg_set_updated_at();
+
+
+--
 -- Name: market_universe_members trg_market_universe_members_created_at; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -11087,6 +11945,54 @@ ALTER TABLE ONLY public.market_analysis_scan_runs
 
 
 --
+-- Name: market_discovery_candidates market_discovery_candidates_entity_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.market_discovery_candidates
+    ADD CONSTRAINT market_discovery_candidates_entity_id_fkey FOREIGN KEY (entity_id) REFERENCES public.entities(entity_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: market_discovery_candidates market_discovery_candidates_instrument_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.market_discovery_candidates
+    ADD CONSTRAINT market_discovery_candidates_instrument_id_fkey FOREIGN KEY (instrument_id) REFERENCES public.instruments(instrument_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: market_discovery_candidates market_discovery_candidates_snapshot_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.market_discovery_candidates
+    ADD CONSTRAINT market_discovery_candidates_snapshot_id_fkey FOREIGN KEY (snapshot_id) REFERENCES public.market_discovery_snapshots(snapshot_id) ON DELETE CASCADE;
+
+
+--
+-- Name: market_discovery_candidates market_discovery_candidates_snapshot_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.market_discovery_candidates
+    ADD CONSTRAINT market_discovery_candidates_snapshot_item_id_fkey FOREIGN KEY (snapshot_item_id) REFERENCES public.market_discovery_snapshot_items(snapshot_item_id) ON DELETE CASCADE;
+
+
+--
+-- Name: market_discovery_snapshot_items market_discovery_snapshot_items_snapshot_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.market_discovery_snapshot_items
+    ADD CONSTRAINT market_discovery_snapshot_items_snapshot_id_fkey FOREIGN KEY (snapshot_id) REFERENCES public.market_discovery_snapshots(snapshot_id) ON DELETE CASCADE;
+
+
+--
+-- Name: market_discovery_snapshots market_discovery_snapshots_source_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.market_discovery_snapshots
+    ADD CONSTRAINT market_discovery_snapshots_source_id_fkey FOREIGN KEY (source_id) REFERENCES public.market_discovery_sources(source_id) ON DELETE RESTRICT;
+
+
+--
 -- Name: market_price_refresh_queue market_price_refresh_queue_instrument_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -11458,5 +12364,5 @@ ALTER TABLE ONLY public.watchlists
 -- PostgreSQL database dump complete
 --
 
-\unrestrict HGK7amaHlv6oEciSrI2WL6GHxryhOc3u3gqjgwcfOPgROTXyt5dF3tgcwdLrnLM
+\unrestrict jy98LjqTH7LkfsBnp0vba8fECb10uvlFaE8PBKQTru9quxJrMokBWU5kUgHdFwz
 
