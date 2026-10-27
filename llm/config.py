@@ -52,17 +52,17 @@ class LLMConfig:
     model: str
     base_url: str = ""
     api_key: str = ""
-    timeout: float = 60.0
+    timeout_seconds: float = 60.0
     max_retries: int = 4
     tokens_per_minute: int = 0
     requests_per_minute: int = 0
     requests_per_day: int = 0
     daily_reset_timezone: str = "America/Los_Angeles"
     rate_limit_safety_factor: float = 0.90
-    retry_max_delay: float = 120.0
-    think: bool = False
+    retry_max_seconds: float = 120.0
+    think_enabled: bool = False
     json_config: dict[str, Any] = field(default_factory=dict)
-    persistent_queue_enabled: bool = False
+    queue_enabled: bool = False
     queue_poll_seconds: float = 2.0
     queue_stale_seconds: int = 900
     queue_wait_timeout_seconds: float = 900.0
@@ -86,7 +86,7 @@ class LLMConfig:
         *,
         prefix: str,
         default_provider: str,
-        default_timeout: float,
+        default_timeout_seconds: float,
         default_max_retries: int = 4,
     ) -> "LLMConfig":
         p = prefix.strip().upper().rstrip("_")
@@ -97,7 +97,9 @@ class LLMConfig:
             model=str(settings.get(f"{p}_MODEL", "") or "").strip(),
             base_url=str(settings.get(f"{p}_BASE_URL", "") or "").strip().rstrip("/"),
             api_key=str(settings.get(f"{p}_API_KEY", "") or "").strip(),
-            timeout=float(settings.get(f"{p}_TIMEOUT", default_timeout)),
+            timeout_seconds=float(
+                settings.get(f"{p}_TIMEOUT_SECONDS", default_timeout_seconds)
+            ),
             max_retries=int(settings.get(f"{p}_MAX_RETRIES", default_max_retries)),
             tokens_per_minute=int(settings.get(f"{p}_TOKENS_PER_MINUTE", 0) or 0),
             requests_per_minute=int(settings.get(f"{p}_REQUESTS_PER_MINUTE", 0) or 0),
@@ -109,12 +111,10 @@ class LLMConfig:
             rate_limit_safety_factor=float(
                 settings.get(f"{p}_RATE_LIMIT_SAFETY_FACTOR", 0.90)
             ),
-            retry_max_delay=float(settings.get(f"{p}_RETRY_MAX_DELAY", 120.0)),
-            think=_get_bool(settings, f"{p}_THINK", False),
+            retry_max_seconds=float(settings.get(f"{p}_RETRY_MAX_SECONDS", 120.0)),
+            think_enabled=_get_bool(settings, f"{p}_THINK_ENABLED", False),
             json_config=_get_json_object(settings, f"{p}_JSON_CONFIG"),
-            persistent_queue_enabled=_get_bool(
-                settings, f"{p}_PERSISTENT_QUEUE_ENABLED", False
-            ),
+            queue_enabled=_get_bool(settings, f"{p}_QUEUE_ENABLED", False),
             queue_poll_seconds=float(settings.get(f"{p}_QUEUE_POLL_SECONDS", 2.0)),
             queue_stale_seconds=int(settings.get(f"{p}_QUEUE_STALE_SECONDS", 900)),
             queue_wait_timeout_seconds=float(
@@ -161,8 +161,8 @@ class LLMConfig:
             raise ValueError(f"Missing {prefix}_BASE_URL")
         if self.provider in {"gemini", "openai_compatible"} and not self.api_key:
             raise ValueError(f"Missing {prefix}_API_KEY")
-        if self.timeout <= 0:
-            raise ValueError(f"{prefix}_TIMEOUT must be > 0")
+        if self.timeout_seconds <= 0:
+            raise ValueError(f"{prefix}_TIMEOUT_SECONDS must be > 0")
         if self.max_retries < 0:
             raise ValueError(f"{prefix}_MAX_RETRIES must be >= 0")
         if (
@@ -174,8 +174,8 @@ class LLMConfig:
             raise ValueError(f"{prefix}_DAILY_RESET_TIMEZONE cannot be empty")
         if not (0 < self.rate_limit_safety_factor <= 1):
             raise ValueError(f"{prefix}_RATE_LIMIT_SAFETY_FACTOR must be in (0, 1]")
-        if self.retry_max_delay <= 0:
-            raise ValueError(f"{prefix}_RETRY_MAX_DELAY must be > 0")
+        if self.retry_max_seconds <= 0:
+            raise ValueError(f"{prefix}_RETRY_MAX_SECONDS must be > 0")
         if not isinstance(self.json_config, dict):
             raise ValueError(f"{prefix}_JSON_CONFIG must be a JSON object")
         invalid_json_keys = PROTECTED_JSON_CONFIG_KEYS & self.json_config.keys()

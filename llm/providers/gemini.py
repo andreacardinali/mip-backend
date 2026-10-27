@@ -1,26 +1,46 @@
+from typing import Any
+
 import httpx
 
 from http_client.retry import RetryPolicy, request_with_retry
 from llm.base import LLMProvider, LLMRequest, LLMResponse
+from llm.json_config import deep_merge_dicts, validate_protected_paths
 from llm.parsing import parse_json_object
+
+PROTECTED_PATHS = frozenset(
+    {
+        "contents",
+        "generationConfig.temperature",
+        "generationConfig.maxOutputTokens",
+        "generationConfig.responseMimeType",
+        "generationConfig.responseSchema",
+        "tools",
+    }
+)
 
 
 class GeminiProvider(LLMProvider):
     def __init__(
-        self, api_key: str, model: str, timeout: float = 60, max_retries: int = 4
+        self,
+        api_key: str,
+        model: str,
+        timeout: float = 60,
+        max_retries: int = 4,
+        json_config: dict[str, Any] | None = None,
     ) -> None:
         self.api_key = api_key
         self.model = model
         self.timeout = timeout
         self.retry_policy = RetryPolicy(max_retries=max_retries)
         self.max_retries = max_retries
+        self.json_config = dict(json_config or {})
 
     def generate_json(self, request: LLMRequest) -> LLMResponse:
         url = (
             "https://generativelanguage.googleapis.com/"
             f"v1beta/models/{self.model}:generateContent"
         )
-        body = {
+        standard_body: dict[str, Any] = {
             "contents": [{"role": "user", "parts": [{"text": request.prompt}]}],
             "generationConfig": {
                 "temperature": request.temperature,
@@ -29,10 +49,13 @@ class GeminiProvider(LLMProvider):
             },
         }
         if request.response_schema:
-            body["generationConfig"]["responseSchema"] = request.response_schema
+            standard_body["generationConfig"][
+                "responseSchema"
+            ] = request.response_schema
         if request.grounded_search:
-            body["tools"] = [{"google_search": {}}]
-
+            standard_body["tools"] = [{"google_search": {}}]
+        body = deep_merge_dicts(standard_body, self.json_config)
+        validate_protected_paths(body, standard_body, PROTECTED_PATHS)
         with httpx.Client(timeout=self.timeout) as client:
             response = request_with_retry(
                 client,
@@ -47,7 +70,6 @@ class GeminiProvider(LLMProvider):
                 json=body,
             )
             raw = response.json()
-
         candidate = (raw.get("candidates") or [None])[0]
         if not candidate:
             raise RuntimeError("Gemini returned no candidate")

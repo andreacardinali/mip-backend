@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict XlnKxVJ1P44qTgMtDQhqidziVYLhcjafcUsf8bM7lLZR6rIya5Q7uFH6m4deWeD
+\restrict 68n5XxaRgkJV89M8SkypWgbNdgLmmYCiWO4raAL9nX1edXr37bUAIufyo0G37oc
 
 -- Dumped from database version 18.6 (Debian 18.6-1.pgdg13+2)
 -- Dumped by pg_dump version 18.6 (Debian 18.6-1.pgdg13+2)
@@ -9205,75 +9205,139 @@ CREATE FUNCTION public.sp_upsert_filing(p_symbol text, p_filing_type text, p_cik
     LANGUAGE plpgsql
     AS $$
 DECLARE
-    v_entity_id UUID;
-    v_instrument_id UUID;
+    v_entity_id uuid;
+    v_cik_identity_type_id uuid;
+    v_cik_identity_id uuid;
+    v_normalized_cik text;
+    v_symbol text;
 BEGIN
+    v_symbol := nullif(upper(btrim(p_symbol)), '');
+    v_normalized_cik := nullif(regexp_replace(coalesce(p_cik, ''), '[^0-9]', '', 'g'), '');
 
     ------------------------------------------------------------------
-    -- Resolve instrument
+    -- Resolve the entity by CIK first. A SEC filing identifies the
+    -- issuer, but does not provide enough listing metadata to create a
+    -- complete instrument (exchange and currency are unavailable).
     ------------------------------------------------------------------
+    IF v_normalized_cik IS NOT NULL THEN
+        SELECT it.identity_type_id
+          INTO v_cik_identity_type_id
+          FROM public.identity_types it
+         WHERE upper(it.code) = 'CIK'
+           AND upper(it.target_kind) = 'ENTITY'
+         ORDER BY it.identity_type_id
+         LIMIT 1;
 
-    SELECT
-        i.instrument_id,
-        e.entity_id
-    INTO
-        v_instrument_id,
-        v_entity_id
-    FROM instruments i
-    JOIN entities e
-        ON e.entity_id = i.entity_id
-    WHERE i.symbol = p_symbol
-    LIMIT 1;
+        IF v_cik_identity_type_id IS NOT NULL THEN
+            SELECT ei.entity_id,
+                   identity_row.identity_id
+              INTO v_entity_id,
+                   v_cik_identity_id
+              FROM public.identities identity_row
+              JOIN public.entity_identities ei
+                ON ei.identity_id = identity_row.identity_id
+             WHERE identity_row.identity_type_id = v_cik_identity_type_id
+               AND identity_row.normalized_value = v_normalized_cik
+             ORDER BY ei.is_primary DESC,
+                      ei.verified_at DESC NULLS LAST,
+                      ei.created_at DESC
+             LIMIT 1;
+        END IF;
+    END IF;
 
     ------------------------------------------------------------------
-    -- Create entity if missing
+    -- Fall back to an existing instrument symbol only when the CIK did
+    -- not already identify the entity.
     ------------------------------------------------------------------
+    IF v_entity_id IS NULL AND v_symbol IS NOT NULL THEN
+        SELECT instrument.entity_id
+          INTO v_entity_id
+          FROM public.instruments instrument
+         WHERE upper(btrim(instrument.symbol)) = v_symbol
+         ORDER BY
+             (instrument.exchange IS NULL),
+             instrument.updated_at DESC NULLS LAST,
+             instrument.created_at DESC NULLS LAST,
+             instrument.instrument_id
+         LIMIT 1;
+    END IF;
 
+    ------------------------------------------------------------------
+    -- Create only the issuer entity when it is still unknown. Do not
+    -- create an incomplete instrument from a filing feed.
+    ------------------------------------------------------------------
     IF v_entity_id IS NULL THEN
-
-        INSERT INTO entities
-        (
+        INSERT INTO public.entities (
             name,
             entity_type
         )
-        VALUES
-        (
-            p_symbol,
+        VALUES (
+            coalesce(v_symbol, v_normalized_cik, 'UNKNOWN SEC ISSUER'),
             'COMPANY'
         )
         RETURNING entity_id
-        INTO v_entity_id;
-
+             INTO v_entity_id;
     END IF;
 
     ------------------------------------------------------------------
-    -- Create instrument if missing
+    -- Persist the CIK identity when the identity type exists and this
+    -- CIK is not yet linked. The explicit existence checks avoid
+    -- depending on undocumented conflict targets.
     ------------------------------------------------------------------
+    IF v_cik_identity_type_id IS NOT NULL
+       AND v_normalized_cik IS NOT NULL
+       AND v_cik_identity_id IS NULL THEN
+        SELECT identity_row.identity_id
+          INTO v_cik_identity_id
+          FROM public.identities identity_row
+         WHERE identity_row.identity_type_id = v_cik_identity_type_id
+           AND identity_row.normalized_value = v_normalized_cik
+         LIMIT 1;
 
-    IF v_instrument_id IS NULL THEN
+        IF v_cik_identity_id IS NULL THEN
+            INSERT INTO public.identities (
+                identity_type_id,
+                identity_value,
+                normalized_value
+            )
+            VALUES (
+                v_cik_identity_type_id,
+                coalesce(nullif(btrim(p_cik), ''), v_normalized_cik),
+                v_normalized_cik
+            )
+            RETURNING identity_id
+                 INTO v_cik_identity_id;
+        END IF;
 
-        INSERT INTO instruments
-        (
-            entity_id,
-            symbol,
-            instrument_type
-        )
-        VALUES
-        (
-            v_entity_id,
-            p_symbol,
-            'STOCK'
-        )
-        ON CONFLICT DO NOTHING;
-
+        IF NOT EXISTS (
+            SELECT 1
+              FROM public.entity_identities ei
+             WHERE ei.entity_id = v_entity_id
+               AND ei.identity_id = v_cik_identity_id
+        ) THEN
+            INSERT INTO public.entity_identities (
+                entity_id,
+                identity_id,
+                is_primary,
+                verified_at
+            )
+            VALUES (
+                v_entity_id,
+                v_cik_identity_id,
+                NOT EXISTS (
+                    SELECT 1
+                      FROM public.entity_identities existing_identity
+                     WHERE existing_identity.entity_id = v_entity_id
+                ),
+                now()
+            );
+        END IF;
     END IF;
 
     ------------------------------------------------------------------
-    -- Upsert filing
+    -- Upsert the filing at entity level.
     ------------------------------------------------------------------
-
-    INSERT INTO filings
-    (
+    INSERT INTO public.filings (
         entity_id,
         filing_type,
         filing_subtype,
@@ -9285,8 +9349,7 @@ BEGIN
         source,
         raw_payload
     )
-    VALUES
-    (
+    VALUES (
         v_entity_id,
         p_filing_type,
         p_filing_subtype,
@@ -9298,23 +9361,21 @@ BEGIN
         p_source,
         p_raw_payload
     )
-    ON CONFLICT
-    (
+    ON CONFLICT (
         cik,
         accepted_at,
         filing_type
     )
     DO UPDATE
-    SET
-        filing_subtype   = EXCLUDED.filing_subtype,
-        filing_date      = EXCLUDED.filing_date,
-        accession_number = EXCLUDED.accession_number,
-        title            = EXCLUDED.title,
-        source           = EXCLUDED.source,
-        raw_payload      = EXCLUDED.raw_payload;
+       SET entity_id        = EXCLUDED.entity_id,
+           filing_subtype   = EXCLUDED.filing_subtype,
+           filing_date      = EXCLUDED.filing_date,
+           accession_number = EXCLUDED.accession_number,
+           title            = EXCLUDED.title,
+           source           = EXCLUDED.source,
+           raw_payload      = EXCLUDED.raw_payload;
 
     RETURN v_entity_id;
-
 END;
 $$;
 
@@ -14627,5 +14688,5 @@ ALTER TABLE ONLY public.watchlists
 -- PostgreSQL database dump complete
 --
 
-\unrestrict XlnKxVJ1P44qTgMtDQhqidziVYLhcjafcUsf8bM7lLZR6rIya5Q7uFH6m4deWeD
+\unrestrict 68n5XxaRgkJV89M8SkypWgbNdgLmmYCiWO4raAL9nX1edXr37bUAIufyo0G37oc
 

@@ -35,40 +35,39 @@ class IntelligenceConfig:
 
     @classmethod
     def load(cls) -> "IntelligenceConfig":
+        p = "PORTFOLIO_INTELLIGENCE"
         config = cls(
             research_llm=LLMConfig.from_settings(
                 settings,
-                prefix="INTELLIGENCE_LLM",
+                prefix=f"{p}_LLM",
                 default_provider="gemini",
-                default_timeout=45.0,
+                default_timeout_seconds=45.0,
             ),
             validation_llm=LLMConfig.from_settings(
                 settings,
-                prefix="INTELLIGENCE_VALIDATION_LLM",
+                prefix=f"{p}_VALIDATION_LLM",
                 default_provider="ollama",
-                default_timeout=120.0,
+                default_timeout_seconds=120.0,
             ),
-            create_notifications=_b("INTELLIGENCE_CREATE_NOTIFICATIONS", False),
-            batch_size=_i("INTELLIGENCE_BATCH_SIZE", 4),
-            upcoming_window_days=_i("UPCOMING_CATALYST_WINDOW_DAYS", 7),
-            breaking_lookback_hours=_i("BREAKING_CATALYST_LOOKBACK_HOURS", 24),
-            daily_move_min_pct=_f("DAILY_MOVE_MIN_PCT", 3.0),
-            min_history_rows=_i("MIN_HISTORY_ROWS", 50),
-            history_range=settings.get("YAHOO_HISTORY_RANGE", "2y"),
-            history_interval=settings.get("YAHOO_HISTORY_INTERVAL", "1d"),
-            market_evidence_enabled=_b("INTELLIGENCE_MARKET_EVIDENCE_ENABLED", True),
-            news_limit=_i("INTELLIGENCE_NEWS_LIMIT", 20),
-            etf_holding_limit=_i("INTELLIGENCE_ETF_HOLDING_LIMIT", 25),
-            economic_event_limit=_i("INTELLIGENCE_ECONOMIC_EVENT_LIMIT", 50),
+            create_notifications=_b(f"{p}_NOTIFICATIONS_ENABLED", False),
+            batch_size=_i(f"{p}_BATCH_SIZE", 4),
+            upcoming_window_days=_i(f"{p}_UPCOMING_CATALYST_WINDOW_DAYS", 7),
+            breaking_lookback_hours=_i(f"{p}_BREAKING_CATALYST_LOOKBACK_HOURS", 24),
+            daily_move_min_pct=_f(f"{p}_DAILY_MOVE_MIN_PERCENT", 3.0),
+            min_history_rows=_i(f"{p}_MINIMUM_HISTORY_ROWS", 50),
+            history_range=str(settings.get(f"{p}_HISTORY_RANGE", "2y")),
+            history_interval=str(settings.get(f"{p}_HISTORY_INTERVAL", "1d")),
+            market_evidence_enabled=_b(f"{p}_MARKET_EVIDENCE_ENABLED", True),
+            news_limit=_i(f"{p}_NEWS_LIMIT", 20),
+            etf_holding_limit=_i(f"{p}_ETF_HOLDINGS_LIMIT", 25),
+            economic_event_limit=_i(f"{p}_ECONOMIC_EVENTS_LIMIT", 50),
         )
         if config.batch_size < 1:
-            raise ValueError("INTELLIGENCE_BATCH_SIZE must be >= 1")
+            raise ValueError(f"{p}_BATCH_SIZE must be >= 1")
         if not 1 <= config.upcoming_window_days <= 30:
-            raise ValueError("UPCOMING_CATALYST_WINDOW_DAYS must be between 1 and 30")
-        if not str(config.history_range or "").strip():
-            raise ValueError("YAHOO_HISTORY_RANGE cannot be empty")
-        if not str(config.history_interval or "").strip():
-            raise ValueError("YAHOO_HISTORY_INTERVAL cannot be empty")
+            raise ValueError(
+                f"{p}_UPCOMING_CATALYST_WINDOW_DAYS must be between 1 and 30"
+            )
         if (
             min(
                 config.news_limit, config.etf_holding_limit, config.economic_event_limit

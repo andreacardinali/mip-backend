@@ -9,37 +9,36 @@ from llm.providers.openai_compatible import OpenAICompatibleProvider
 
 def create_provider(config: LLMConfig) -> LLMProvider:
     config.validate()
-
     if config.provider == "gemini":
         provider: LLMProvider = GeminiProvider(
             api_key=config.api_key,
             model=config.model,
-            timeout=config.timeout,
+            timeout=config.timeout_seconds,
             max_retries=config.max_retries,
+            json_config=config.json_config,
         )
     elif config.provider == "ollama":
         provider = OllamaProvider(
             base_url=config.base_url,
             model=config.model,
-            timeout=config.timeout,
+            timeout=config.timeout_seconds,
             max_retries=config.max_retries,
-            think=config.think,
+            think=config.think_enabled,
+            json_config=config.json_config,
         )
     elif config.provider == "openai_compatible":
         provider = OpenAICompatibleProvider(
             base_url=config.base_url,
             api_key=config.api_key,
             model=config.model,
-            timeout=config.timeout,
+            timeout=config.timeout_seconds,
             max_retries=config.max_retries,
-            tokens_per_minute=(
-                0 if config.persistent_queue_enabled else config.tokens_per_minute
-            ),
+            tokens_per_minute=0 if config.queue_enabled else config.tokens_per_minute,
             requests_per_minute=(
-                0 if config.persistent_queue_enabled else config.requests_per_minute
+                0 if config.queue_enabled else config.requests_per_minute
             ),
             rate_limit_safety_factor=config.rate_limit_safety_factor,
-            retry_max_delay=config.retry_max_delay,
+            retry_max_delay=config.retry_max_seconds,
             json_config=config.json_config,
         )
     else:
@@ -47,7 +46,7 @@ def create_provider(config: LLMConfig) -> LLMProvider:
 
     from db import SessionLocal
 
-    if config.persistent_queue_enabled:
+    if config.queue_enabled:
         provider = PersistentQueuedProvider(
             provider,
             SessionLocal,
@@ -72,7 +71,6 @@ def create_provider(config: LLMConfig) -> LLMProvider:
                 abandoned_retention_days=config.queue_abandoned_retention_days,
             ),
         )
-
     if config.cache_enabled:
         provider = CachedLLMProvider(
             provider,
@@ -88,5 +86,4 @@ def create_provider(config: LLMConfig) -> LLMProvider:
                 claim_stale_seconds=config.cache_claim_stale_seconds,
             ),
         )
-
     return provider

@@ -23,7 +23,7 @@ def test_cache_settings_are_loaded():
         ),
         prefix="TEST",
         default_provider="ollama",
-        default_timeout=120,
+        default_timeout_seconds=120,
     )
     assert config.cache_enabled is True
     assert config.cache_ttl_seconds == 3600

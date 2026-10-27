@@ -1,10 +1,24 @@
 import json
+from typing import Any
 
 import httpx
 
 from http_client.retry import RetryPolicy, request_with_retry
 from llm.base import LLMProvider, LLMRequest, LLMResponse
+from llm.json_config import deep_merge_dicts, validate_protected_paths
 from llm.parsing import parse_json_object
+
+PROTECTED_PATHS = frozenset(
+    {
+        "model",
+        "stream",
+        "think",
+        "format",
+        "prompt",
+        "options.temperature",
+        "options.num_predict",
+    }
+)
 
 
 class OllamaProvider(LLMProvider):
@@ -15,6 +29,7 @@ class OllamaProvider(LLMProvider):
         timeout: float = 120,
         max_retries: int = 4,
         think: bool = False,
+        json_config: dict[str, Any] | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
@@ -22,18 +37,29 @@ class OllamaProvider(LLMProvider):
         self.retry_policy = RetryPolicy(max_retries=max_retries)
         self.max_retries = max_retries
         self.think = bool(think)
+        self.json_config = dict(json_config or {})
 
     def generate_json(self, request: LLMRequest) -> LLMResponse:
         response_format = request.response_schema or "json"
         prompt = request.prompt
-
         if request.response_schema is not None:
             prompt = (
-                f"{prompt}\n\n"
-                "Return JSON conforming exactly to this JSON Schema:\n"
+                f"{prompt}\n\nReturn JSON conforming exactly to this JSON Schema:\n"
                 f"{json.dumps(request.response_schema, separators=(',', ':'))}"
             )
-
+        standard_body: dict[str, Any] = {
+            "model": self.model,
+            "stream": False,
+            "think": self.think,
+            "format": response_format,
+            "prompt": prompt,
+            "options": {
+                "temperature": request.temperature,
+                "num_predict": request.max_tokens,
+            },
+        }
+        body = deep_merge_dicts(standard_body, self.json_config)
+        validate_protected_paths(body, standard_body, PROTECTED_PATHS)
         with httpx.Client(timeout=self.timeout) as client:
             response = request_with_retry(
                 client,
@@ -41,21 +67,7 @@ class OllamaProvider(LLMProvider):
                 f"{self.base_url}/api/generate",
                 policy=self.retry_policy,
                 retry_non_idempotent=True,
-                json={
-                    "model": self.model,
-                    "stream": False,
-                    "think": self.think,
-                    "format": response_format,
-                    "prompt": prompt,
-                    "options": {
-                        "temperature": request.temperature,
-                        "num_predict": request.max_tokens,
-                    },
-                },
+                json=body,
             )
             raw = response.json()
-
-        return LLMResponse(
-            data=parse_json_object(raw.get("response", "")),
-            raw=raw,
-        )
+        return LLMResponse(data=parse_json_object(raw.get("response", "")), raw=raw)

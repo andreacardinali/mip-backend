@@ -13,27 +13,29 @@ from market_analysis.llm_enrichment_repository import (
 from services.market_analysis_llm_enrichment import run_market_analysis_llm_enrichment
 
 logger = logging.getLogger(__name__)
+PREFIX = "MARKET_ANALYSIS_ENRICHMENT"
+LLM_PREFIX = f"{PREFIX}_LLM"
 
 
 def _compact_result(result: dict[str, Any]) -> dict[str, Any]:
     return {
-        "status": result.get("status"),
-        "selected": result.get("selected", 0),
-        "unique": result.get("unique", 0),
-        "enriched": result.get("enriched", 0),
-        "failed": result.get("failed", 0),
-        "prompt_version": result.get("prompt_version"),
-        "signal_ids": result.get("signal_ids", []),
+        key: result.get(key, [] if key == "signal_ids" else 0)
+        for key in (
+            "status",
+            "selected",
+            "unique",
+            "enriched",
+            "failed",
+            "prompt_id",
+            "signal_ids",
+        )
     }
 
 
-def _load_pending_candidates(
-    *, prompt_version: str, limit: int
-) -> list[dict[str, Any]]:
+def _load_pending_candidates(*, prompt_id: str, limit: int) -> list[dict[str, Any]]:
     return run_transactional(
         lambda db: MarketAnalysisLLMEnrichmentRepository(db).list_pending(
-            prompt_version=prompt_version,
-            limit=limit,
+            prompt_version=prompt_id, limit=limit
         )
     )
 
@@ -44,13 +46,12 @@ def _persist_single_enrichment(
     analysis: dict[str, Any],
     composite_score: float,
     *,
-    prompt_version: str,
+    prompt_id: str,
 ) -> bool:
-    signal_id = str(signal["signal_id"])
     return run_transactional(
         lambda db: MarketAnalysisLLMEnrichmentRepository(db).apply(
-            signal_id=signal_id,
-            prompt_version=prompt_version,
+            signal_id=str(signal["signal_id"]),
+            prompt_version=prompt_id,
             llm_score=enrichment.llm_score,
             llm_analysis=analysis,
             composite_score=composite_score,
@@ -61,38 +62,28 @@ def _persist_single_enrichment(
 def run() -> dict[str, Any]:
     config = LLMConfig.from_settings(
         settings,
-        prefix="MARKET_ANALYSIS_LLM",
+        prefix=LLM_PREFIX,
         default_provider="ollama",
-        default_timeout=120.0,
+        default_timeout_seconds=120.0,
     )
     provider = create_provider(config)
-    prompt_version = str(
-        settings.get("MARKET_ANALYSIS_LLM_PROMPT_VERSION", PROMPT_VERSION)
-    )
+    prompt_id = str(settings.get(f"{PREFIX}_PROMPT_ID", PROMPT_VERSION))
     candidates = _load_pending_candidates(
-        prompt_version=prompt_version,
-        limit=int(settings.get("MARKET_ANALYSIS_LLM_BATCH_SIZE", 25)),
+        prompt_id=prompt_id, limit=int(settings.get(f"{PREFIX}_BATCH_SIZE", 25))
     )
     result = run_market_analysis_llm_enrichment(
         provider=provider,
         candidates=candidates,
-        persist_enrichment=lambda signal, enrichment, analysis, composite: (
-            _persist_single_enrichment(
-                signal,
-                enrichment,
-                analysis,
-                composite,
-                prompt_version=prompt_version,
-            )
+        persist_enrichment=lambda signal, enrichment, analysis, composite: _persist_single_enrichment(
+            signal, enrichment, analysis, composite, prompt_id=prompt_id
         ),
-        prompt_version=prompt_version,
-        max_tokens=int(settings.get("MARKET_ANALYSIS_LLM_MAX_TOKENS", 1200)),
-        call_batch_size=int(settings.get("MARKET_ANALYSIS_LLM_CALL_BATCH_SIZE", 4)),
+        prompt_version=prompt_id,
+        max_tokens=int(settings.get(f"{PREFIX}_MAX_OUTPUT_TOKENS", 1200)),
+        call_batch_size=int(settings.get(f"{PREFIX}_CALL_BATCH_SIZE", 4)),
     )
     logger.info(
         "Market analysis LLM enrichment completed summary=%s", _compact_result(result)
     )
-    logger.debug("Market analysis LLM enrichment details=%s", result)
     return result
 
 
