@@ -29,19 +29,15 @@ def _compact_result(result: dict[str, Any]) -> dict[str, Any]:
             "failed",
             "enrichment_fingerprint",
             "signal_ids",
+            "workload",
         )
     }
 
 
-def _load_pending_candidates(
-    *,
-    contract_fingerprint: str,
-    limit: int,
-) -> list[dict[str, Any]]:
+def _load_pending_candidates(*, contract_fingerprint: str, limit: int):
     return run_transactional(
         lambda db: MarketAnalysisLLMEnrichmentRepository(db).list_pending(
-            enrichment_fingerprint=contract_fingerprint,
-            limit=limit,
+            enrichment_fingerprint=contract_fingerprint, limit=limit
         )
     )
 
@@ -93,8 +89,7 @@ def run() -> dict[str, Any]:
         call_batch_size=int(settings.get(f"{PREFIX}_LLM_REQUEST_MAX_SIGNALS", 4)),
     )
     logger.info(
-        "Market analysis LLM enrichment completed summary=%s",
-        _compact_result(result),
+        "Market analysis LLM enrichment completed summary=%s", _compact_result(result)
     )
     return result
 

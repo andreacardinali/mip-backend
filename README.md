@@ -1,3 +1,3 @@
-# Market Analysis runtime fingerprint fix
+# Market Analysis LLM request logging
 
-Completes the Phase 3 runtime migration. The worker and service now use `enrichment_fingerprint` end to end and no longer pass `prompt_id`, `prompt_version`, or `PROMPT_VERSION`.
+Adds explicit logs immediately before and after each provider call, including call number, mode, signal count, signal IDs, output-token limit and elapsed time. Batch failures log split sizes and error details before recursive retry.
