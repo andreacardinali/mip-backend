@@ -6,11 +6,11 @@ from typing import Any
 @dataclass(frozen=True, slots=True)
 class LLMRequest:
     prompt: str
+    prompt_fingerprint: str = ""
     temperature: float = 0.0
     max_tokens: int = 4096
     grounded_search: bool = False
     response_schema: dict[str, Any] | None = None
-    cache_namespace: str = ""
     cache_ttl_seconds: int | None = None
     cache_bypass: bool = False
 

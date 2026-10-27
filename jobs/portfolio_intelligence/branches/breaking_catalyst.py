@@ -44,6 +44,7 @@ class BreakingCatalystBranch:
                         execution_date=datetime.now(UTC).isoformat(),
                         candidates=json.dumps(payload, default=str),
                     ),
+                    prompt_fingerprint=template.fingerprint,
                     grounded_search=True,
                     max_tokens=8192,
                 )

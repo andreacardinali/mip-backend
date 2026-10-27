@@ -1,10 +1,26 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
+
+from llm.fingerprint import fingerprint
 
 
 @dataclass(frozen=True, slots=True)
 class PromptTemplate:
     name: str
     content: str
+    response_schema: dict[str, Any] | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def fingerprint(self) -> str:
+        return fingerprint(
+            {
+                "name": self.name,
+                "content": self.content,
+                "response_schema": self.response_schema,
+                "metadata": self.metadata,
+            }
+        )
 
     def render(self, **values: object) -> str:
         try:

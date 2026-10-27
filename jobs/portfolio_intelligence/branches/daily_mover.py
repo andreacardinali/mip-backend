@@ -29,7 +29,6 @@ class DailyMoverBranch:
         accepted = []
         collector = MarketEvidenceCollector(context.market_data, context.config)
         economic_events = collector.common_economic_events()
-
         for entity in entities:
             try:
                 bars = context.market_data.get_ohlcv(
@@ -50,7 +49,6 @@ class DailyMoverBranch:
                 or abs(snapshot.daily_change_pct) < context.config.daily_move_min_pct
             ):
                 continue
-
             observed = {
                 **entity.to_dict(),
                 **snapshot.to_dict(),
@@ -70,6 +68,7 @@ class DailyMoverBranch:
                     prompt=research_template.render(
                         observed=json.dumps(observed, default=str)
                     ),
+                    prompt_fingerprint=research_template.fingerprint,
                     grounded_search=True,
                     max_tokens=4096,
                 )
@@ -84,6 +83,7 @@ class DailyMoverBranch:
                             default=str,
                         ),
                     ),
+                    prompt_fingerprint=validation_template.fingerprint,
                     max_tokens=900,
                 )
             )
@@ -100,17 +100,13 @@ class DailyMoverBranch:
                     ),
                 }
             )
-
         result.accepted_count = len(accepted)
         diagnostics = NotificationDiagnostics()
         for item in accepted:
             observed_day = (
                 datetime.fromtimestamp(item["observedDate"], UTC).date().isoformat()
             )
-            notification_key = (
-                f"DAILY_MOVER|{item['symbol']}|{observed_day}|"
-                f"{round(item['dailyChangePct'], 1)}"
-            )
+            notification_key = f"DAILY_MOVER|{item['symbol']}|{observed_day}|{round(item['dailyChangePct'], 1)}"
             enqueue_result = context.notification_queue.enqueue(
                 user_id=item["user_id"],
                 notification_key=notification_key,

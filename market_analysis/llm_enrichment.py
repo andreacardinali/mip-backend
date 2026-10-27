@@ -8,8 +8,6 @@ from typing import Any
 
 from llm import LLMProvider, LLMRequest
 
-PROMPT_VERSION = "market-analysis-enrichment-v1"
-
 ENRICHMENT_PROPERTIES: dict[str, Any] = {
     "signal_id": {"type": "string"},
     "llm_score": {"type": "number", "minimum": 0, "maximum": 100},
@@ -72,7 +70,7 @@ def _clean_signal(signal: dict[str, Any]) -> dict[str, Any]:
     return {
         key: value
         for key, value in signal.items()
-        if key not in {"llm_analysis", "prompt_version"}
+        if key not in {"llm_analysis", "enrichment_fingerprint"}
     }
 
 

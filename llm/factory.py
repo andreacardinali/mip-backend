@@ -1,6 +1,7 @@
 from llm.base import LLMProvider
 from llm.cache import CachedLLMProvider, LLMCacheConfig, PostgresLLMCacheStore
 from llm.config import LLMConfig
+from llm.fingerprint import provider_config_fingerprint
 from llm.persistent_queue import PersistentQueueConfig, PersistentQueuedProvider
 from llm.providers.gemini import GeminiProvider
 from llm.providers.ollama import OllamaProvider
@@ -43,7 +44,6 @@ def create_provider(config: LLMConfig) -> LLMProvider:
         )
     else:
         raise ValueError(f"Unsupported LLM provider: {config.provider}")
-
     from db import SessionLocal
 
     if config.queue_enabled:
@@ -77,6 +77,13 @@ def create_provider(config: LLMConfig) -> LLMProvider:
             PostgresLLMCacheStore(SessionLocal),
             provider_name=config.provider,
             model=config.model,
+            provider_config_fingerprint=provider_config_fingerprint(
+                provider=config.provider,
+                model=config.model,
+                base_url=config.base_url,
+                json_config=config.json_config,
+                think_enabled=config.think_enabled,
+            ),
             config=LLMCacheConfig(
                 enabled=True,
                 ttl_seconds=config.cache_ttl_seconds,

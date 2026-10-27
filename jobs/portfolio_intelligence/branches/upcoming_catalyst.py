@@ -1,6 +1,4 @@
 import json
-import logging
-import time
 from datetime import date, timedelta
 
 from job_runtime.collections import batched, deduplicate_by
@@ -16,10 +14,7 @@ from jobs.portfolio_intelligence.repositories.catalysts import recent_catalysts
 from jobs.portfolio_intelligence.repositories.entities import load_candidates
 from jobs.portfolio_intelligence.scoring import upcoming_catalyst_severity
 from llm.base import LLMRequest
-from llm.rate_limit import estimate_tokens
 from notifications.diagnostics import NotificationDiagnostics
-
-logger = logging.getLogger(__name__)
 
 
 class UpcomingCatalystBranch:
@@ -38,123 +33,29 @@ class UpcomingCatalystBranch:
         accepted = []
         collector = MarketEvidenceCollector(context.market_data, context.config)
         economic_events = collector.common_economic_events()
-
-        for batch_index, batch in enumerate(
-            batched(
-                candidates,
-                context.config.batch_size,
-            ),
-            start=1,
-        ):
-            batch_symbols = [candidate.symbol for candidate in batch]
-
-            logger.info(
-                "Upcoming Catalyst batch started batch=%s symbols=%s",
-                batch_index,
-                batch_symbols,
-            )
-
+        for batch in batched(candidates, context.config.llm_request_max_candidates):
             payload = [
                 {
                     **candidate.to_dict(),
-                    "recentCatalysts": known.get(
-                        candidate.entity_id,
-                        [],
-                    ),
-                    "marketEvidence": (
-                        collector.for_upcoming(
-                            candidate,
-                            today,
-                            end,
-                            economic_events=(economic_events),
-                        ).to_dict()
-                    ),
+                    "recentCatalysts": known.get(candidate.entity_id, []),
+                    "marketEvidence": collector.for_upcoming(
+                        candidate, today, end, economic_events=economic_events
+                    ).to_dict(),
                 }
                 for candidate in batch
             ]
-
-            for candidate_payload in payload:
-                evidence = candidate_payload.get("marketEvidence") or {}
-
-                logger.debug(
-                    "Upcoming Catalyst candidate "
-                    "symbol=%s "
-                    "recent_catalysts=%s "
-                    "earnings=%s "
-                    "economic_events=%s "
-                    "etf_holdings=%s "
-                    "etf_countries=%s "
-                    "etf_sectors=%s",
-                    candidate_payload.get("symbol"),
-                    len(candidate_payload.get("recentCatalysts") or []),
-                    len(evidence.get("earnings") or []),
-                    len(evidence.get("economicEvents") or []),
-                    len(evidence.get("etfHoldings") or []),
-                    len(evidence.get("etfCountries") or []),
-                    len(evidence.get("etfSectors") or []),
+            response = context.research_llm.generate_json(
+                LLMRequest(
+                    prompt=template.render(
+                        execution_date=today.isoformat(),
+                        window_start=today.isoformat(),
+                        window_end=end.isoformat(),
+                        candidates=json.dumps(payload, default=str),
+                    ),
+                    prompt_fingerprint=template.fingerprint,
+                    grounded_search=True,
+                    max_tokens=4096,
                 )
-
-            prompt = template.render(
-                execution_date=today.isoformat(),
-                window_start=today.isoformat(),
-                window_end=end.isoformat(),
-                candidates=json.dumps(
-                    payload,
-                    default=str,
-                ),
-            )
-
-            estimated_tokens = estimate_tokens(
-                prompt,
-                4096,
-            )
-
-            logger.info(
-                "Upcoming Catalyst LLM request "
-                "batch=%s "
-                "symbols=%s "
-                "prompt_characters=%s "
-                "estimated_tokens=%s "
-                "max_tokens=%s",
-                batch_index,
-                batch_symbols,
-                len(prompt),
-                estimated_tokens,
-                4096,
-            )
-
-            llm_started = time.perf_counter()
-
-            try:
-                response = context.research_llm.generate_json(
-                    LLMRequest(
-                        prompt=prompt,
-                        grounded_search=True,
-                        max_tokens=4096,
-                    )
-                )
-            except Exception:
-                logger.exception(
-                    "Upcoming Catalyst LLM request "
-                    "failed "
-                    "batch=%s symbols=%s "
-                    "elapsed_seconds=%.3f",
-                    batch_index,
-                    batch_symbols,
-                    (time.perf_counter() - llm_started),
-                )
-                raise
-
-            logger.info(
-                "Upcoming Catalyst LLM request "
-                "completed "
-                "batch=%s symbols=%s "
-                "elapsed_seconds=%.3f "
-                "result_count=%s",
-                batch_index,
-                batch_symbols,
-                (time.perf_counter() - llm_started),
-                len(response.data.get("results") or []),
             )
             for source, row in matched_batch_rows(
                 batch, response.data, label="Upcoming"
@@ -171,11 +72,7 @@ class UpcomingCatalystBranch:
                     severity, score = upcoming_catalyst_severity(
                         days, source.allocation_pct
                     )
-                    event_key = (
-                        f"{source.entity_id}|"
-                        f"{event.event_type}|"
-                        f"{event.event_date.isoformat()}"
-                    )
+                    event_key = f"{source.entity_id}|{event.event_type}|{event.event_date.isoformat()}"
                     accepted.append(
                         {
                             **event.payload,
@@ -191,13 +88,8 @@ class UpcomingCatalystBranch:
                             "sources": response.sources,
                         }
                     )
-
         accepted = deduplicate_by(
-            accepted,
-            key=lambda item: (
-                item["user_id"],
-                item["eventKey"],
-            ),
+            accepted, key=lambda item: (item["user_id"], item["eventKey"])
         )
         result.accepted_count = len(accepted)
         diagnostics = NotificationDiagnostics()

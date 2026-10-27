@@ -186,7 +186,6 @@ class MarketAnalysisRepository:
         universe_id: str | None,
         candidate: SignalCandidate,
         scores: dict[str, float | None],
-        prompt_version: str | None = None,
         llm_analysis: dict[str, Any] | None = None,
     ) -> str:
         payload = candidate.to_payload()
@@ -195,7 +194,6 @@ class MarketAnalysisRepository:
                 "instrument_id": instrument_id,
                 "universe_id": universe_id,
                 "scores": scores,
-                "prompt_version": prompt_version,
                 "llm_analysis": llm_analysis,
             }
         )

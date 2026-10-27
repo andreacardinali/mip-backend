@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict tPycpfSjykwXgWFORqE8Zo263iVe3JSY5ife8tLyRxwDPl3krWZjLvkgbGtZY5V
+\restrict jybJnXq3dNsJcPQj6T0msy9X2IlAoSCUNJehWayxtF8r677gBtkXVFyZBncv6ek
 
 -- Dumped from database version 18.6 (Debian 18.6-1.pgdg13+2)
 -- Dumped by pg_dump version 18.6 (Debian 18.6-1.pgdg13+2)
@@ -4587,22 +4587,31 @@ $$;
 -- Name: sp_market_analysis_apply_llm_enrichment(uuid, character varying, numeric, jsonb, numeric); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.sp_market_analysis_apply_llm_enrichment(p_signal_id uuid, p_prompt_version character varying, p_llm_score numeric, p_llm_analysis jsonb, p_composite_score numeric DEFAULT NULL::numeric) RETURNS boolean
+CREATE FUNCTION public.sp_market_analysis_apply_llm_enrichment(p_signal_id uuid, p_enrichment_fingerprint character varying, p_llm_score numeric, p_llm_analysis jsonb, p_composite_score numeric DEFAULT NULL::numeric) RETURNS boolean
     LANGUAGE plpgsql
-    AS $$
+    AS $_$
 BEGIN
     IF p_signal_id IS NULL THEN
         RAISE EXCEPTION 'p_signal_id is required';
     END IF;
-    IF NULLIF(BTRIM(p_prompt_version), '') IS NULL THEN
-        RAISE EXCEPTION 'p_prompt_version cannot be empty';
+
+    IF NULLIF(BTRIM(p_enrichment_fingerprint), '') IS NULL THEN
+        RAISE EXCEPTION 'p_enrichment_fingerprint cannot be empty';
     END IF;
+
+    IF BTRIM(p_enrichment_fingerprint) !~ '^[0-9a-f]{64}$' THEN
+        RAISE EXCEPTION
+            'p_enrichment_fingerprint must be a lowercase SHA-256 hexadecimal value';
+    END IF;
+
     IF p_llm_score IS NULL OR p_llm_score < 0 OR p_llm_score > 100 THEN
         RAISE EXCEPTION 'p_llm_score must be between 0 and 100';
     END IF;
+
     IF p_llm_analysis IS NULL OR jsonb_typeof(p_llm_analysis) <> 'object' THEN
         RAISE EXCEPTION 'p_llm_analysis must be a JSON object';
     END IF;
+
     IF p_composite_score IS NOT NULL
        AND (p_composite_score < 0 OR p_composite_score > 100) THEN
         RAISE EXCEPTION 'p_composite_score must be between 0 and 100';
@@ -4612,13 +4621,13 @@ BEGIN
     SET llm_score = p_llm_score,
         composite_score = COALESCE(p_composite_score, composite_score),
         llm_analysis = p_llm_analysis,
-        prompt_version = BTRIM(p_prompt_version)
+        enrichment_fingerprint = BTRIM(p_enrichment_fingerprint)
     WHERE signal_id = p_signal_id
       AND status IN ('CANDIDATE', 'CONFIRMED');
 
     RETURN FOUND;
 END;
-$$;
+$_$;
 
 
 --
@@ -4679,16 +4688,21 @@ $$;
 -- Name: sp_market_analysis_list_pending_llm_enrichment(character varying, integer); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.sp_market_analysis_list_pending_llm_enrichment(p_prompt_version character varying DEFAULT 'market-analysis-enrichment-v1'::character varying, p_limit integer DEFAULT 25) RETURNS TABLE(signal_id uuid, instrument_id uuid, entity_id uuid, symbol character varying, exchange character varying, entity_name character varying, strategy_code character varying, timeframe character varying, direction character varying, signal_type character varying, trend character varying, status character varying, confidence numeric, technical_score numeric, financial_score numeric, catalyst_score numeric, reference_price numeric, invalidation_price numeric, target_price numeric, observed_at timestamp with time zone, evidence jsonb)
+CREATE FUNCTION public.sp_market_analysis_list_pending_llm_enrichment(p_enrichment_fingerprint character varying, p_limit integer DEFAULT 25) RETURNS TABLE(signal_id uuid, instrument_id uuid, entity_id uuid, symbol character varying, exchange character varying, entity_name character varying, strategy_code character varying, timeframe character varying, direction character varying, signal_type character varying, trend character varying, status character varying, confidence numeric, technical_score numeric, financial_score numeric, catalyst_score numeric, reference_price numeric, invalidation_price numeric, target_price numeric, observed_at timestamp with time zone, evidence jsonb)
     LANGUAGE plpgsql STABLE
-    AS $$
+    AS $_$
 BEGIN
     IF p_limit < 1 OR p_limit > 500 THEN
         RAISE EXCEPTION 'p_limit must be between 1 and 500';
     END IF;
 
-    IF NULLIF(BTRIM(p_prompt_version), '') IS NULL THEN
-        RAISE EXCEPTION 'p_prompt_version cannot be empty';
+    IF NULLIF(BTRIM(p_enrichment_fingerprint), '') IS NULL THEN
+        RAISE EXCEPTION 'p_enrichment_fingerprint cannot be empty';
+    END IF;
+
+    IF BTRIM(p_enrichment_fingerprint) !~ '^[0-9a-f]{64}$' THEN
+        RAISE EXCEPTION
+            'p_enrichment_fingerprint must be a lowercase SHA-256 hexadecimal value';
     END IF;
 
     RETURN QUERY
@@ -4722,7 +4736,8 @@ BEGIN
     WHERE s.status IN ('CANDIDATE', 'CONFIRMED')
       AND (
           s.llm_analysis IS NULL
-          OR s.prompt_version IS DISTINCT FROM p_prompt_version
+          OR s.enrichment_fingerprint IS DISTINCT FROM
+             BTRIM(p_enrichment_fingerprint)
       )
     ORDER BY
         COALESCE(s.composite_score, s.technical_score, 0) DESC,
@@ -4730,7 +4745,7 @@ BEGIN
         s.signal_id
     LIMIT p_limit;
 END;
-$$;
+$_$;
 
 
 --
@@ -5173,15 +5188,12 @@ BEGIN
         technical_score,
         financial_score,
         catalyst_score,
-        llm_score,
         composite_score,
         reference_price,
         invalidation_price,
         target_price,
         observed_at,
-        evidence,
-        llm_analysis,
-        prompt_version
+        evidence
     )
     VALUES
     (
@@ -5197,7 +5209,6 @@ BEGIN
         NULLIF(p_payload->'scores'->>'technical', '')::numeric,
         NULLIF(p_payload->'scores'->>'financial', '')::numeric,
         NULLIF(p_payload->'scores'->>'catalyst', '')::numeric,
-        NULLIF(p_payload->'scores'->>'llm', '')::numeric,
         NULLIF(p_payload->'scores'->>'composite', '')::numeric,
         (p_payload->>'reference_price')::numeric,
         NULLIF(p_payload->>'invalidation_price', '')::numeric,
@@ -5207,9 +5218,7 @@ BEGIN
             || jsonb_build_object(
                 'reasons',
                 COALESCE(p_payload->'reasons', '[]'::jsonb)
-            ),
-        p_payload->'llm_analysis',
-        NULLIF(BTRIM(p_payload->>'prompt_version'), '')
+            )
     )
     ON CONFLICT
     (
@@ -5227,15 +5236,15 @@ BEGIN
         technical_score = EXCLUDED.technical_score,
         financial_score = EXCLUDED.financial_score,
         catalyst_score = EXCLUDED.catalyst_score,
-        llm_score = EXCLUDED.llm_score,
+        llm_score = NULL,
         composite_score = EXCLUDED.composite_score,
         reference_price = EXCLUDED.reference_price,
         invalidation_price = EXCLUDED.invalidation_price,
         target_price = EXCLUDED.target_price,
         observed_at = EXCLUDED.observed_at,
         evidence = EXCLUDED.evidence,
-        llm_analysis = EXCLUDED.llm_analysis,
-        prompt_version = EXCLUDED.prompt_version
+        llm_analysis = NULL,
+        enrichment_fingerprint = NULL
     RETURNING signal_id INTO v_signal_id;
 
     RETURN v_signal_id;
@@ -11611,7 +11620,7 @@ CREATE TABLE public.trading_signals (
     close_reason text,
     evidence jsonb DEFAULT '{}'::jsonb NOT NULL,
     llm_analysis jsonb,
-    prompt_version character varying(100),
+    enrichment_fingerprint character varying(100),
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT ck_trading_signals_confidence CHECK (((confidence >= (0)::numeric) AND (confidence <= (1)::numeric))),
@@ -11619,6 +11628,13 @@ CREATE TABLE public.trading_signals (
     CONSTRAINT ck_trading_signals_scores CHECK ((((technical_score IS NULL) OR ((technical_score >= (0)::numeric) AND (technical_score <= (100)::numeric))) AND ((financial_score IS NULL) OR ((financial_score >= (0)::numeric) AND (financial_score <= (100)::numeric))) AND ((catalyst_score IS NULL) OR ((catalyst_score >= (0)::numeric) AND (catalyst_score <= (100)::numeric))) AND ((llm_score IS NULL) OR ((llm_score >= (0)::numeric) AND (llm_score <= (100)::numeric))) AND ((composite_score IS NULL) OR ((composite_score >= (0)::numeric) AND (composite_score <= (100)::numeric))))),
     CONSTRAINT ck_trading_signals_status CHECK (((status)::text = ANY ((ARRAY['CANDIDATE'::character varying, 'CONFIRMED'::character varying, 'INVALIDATED'::character varying, 'EXPIRED'::character varying, 'CLOSED'::character varying])::text[])))
 );
+
+
+--
+-- Name: COLUMN trading_signals.enrichment_fingerprint; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.trading_signals.enrichment_fingerprint IS 'SHA-256 fingerprint of the LLM enrichment contract applied to this signal.';
 
 
 --
@@ -14688,5 +14704,5 @@ ALTER TABLE ONLY public.watchlists
 -- PostgreSQL database dump complete
 --
 
-\unrestrict tPycpfSjykwXgWFORqE8Zo263iVe3JSY5ife8tLyRxwDPl3krWZjLvkgbGtZY5V
+\unrestrict jybJnXq3dNsJcPQj6T0msy9X2IlAoSCUNJehWayxtF8r677gBtkXVFyZBncv6ek
 

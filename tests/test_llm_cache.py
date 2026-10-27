@@ -1,11 +1,5 @@
 from llm.base import LLMProvider, LLMRequest, LLMResponse
-from llm.cache import (
-    CachedLLMProvider,
-    CacheLookup,
-    LLMCacheConfig,
-    build_cache_key,
-    canonical_request_payload,
-)
+from llm.cache import CachedLLMProvider, CacheLookup, LLMCacheConfig, identify_request
 
 
 class FakeProvider(LLMProvider):
@@ -39,50 +33,64 @@ class MemoryStore:
         self.claims.discard(kwargs["cache_key"])
 
 
-def test_exact_request_is_served_from_cache():
-    raw = FakeProvider()
-    cached = CachedLLMProvider(
+def _cached(raw, provider_fingerprint="provider-a"):
+    return CachedLLMProvider(
         raw,
         MemoryStore(),
         provider_name="ollama",
         model="qwen3:8b",
+        provider_config_fingerprint=provider_fingerprint,
         config=LLMCacheConfig(),
     )
-    request = LLMRequest(prompt="same", response_schema={"type": "object"})
+
+
+def test_exact_request_is_served_from_cache():
+    raw = FakeProvider()
+    cached = _cached(raw)
+    request = LLMRequest(
+        prompt="same",
+        prompt_fingerprint="contract-a",
+        response_schema={"type": "object"},
+    )
     assert cached.generate_json(request).data == {"value": 1}
     assert cached.generate_json(request).data == {"value": 1}
     assert raw.calls == 1
 
 
-def test_schema_model_namespace_and_prompt_change_key():
-    base = LLMRequest(prompt="x")
-    key = build_cache_key(canonical_request_payload(base, provider="ollama", model="a"))
-    assert key != build_cache_key(
-        canonical_request_payload(base, provider="ollama", model="b")
+def test_prompt_rendering_contract_and_provider_config_change_identity():
+    base = LLMRequest(prompt="x", prompt_fingerprint="contract-a")
+    first = identify_request(
+        base, provider="ollama", model="a", provider_config_fingerprint="provider-a"
     )
-    assert key != build_cache_key(
-        canonical_request_payload(
-            LLMRequest(prompt="x", cache_namespace="v2"), provider="ollama", model="a"
-        )
-    )
-    assert key != build_cache_key(
-        canonical_request_payload(
-            LLMRequest(prompt="x", response_schema={"type": "object"}),
+    assert (
+        first.request_fingerprint
+        != identify_request(
+            LLMRequest(prompt="y", prompt_fingerprint="contract-a"),
             provider="ollama",
             model="a",
-        )
+            provider_config_fingerprint="provider-a",
+        ).request_fingerprint
+    )
+    assert (
+        first.request_fingerprint
+        != identify_request(
+            LLMRequest(prompt="x", prompt_fingerprint="contract-b"),
+            provider="ollama",
+            model="a",
+            provider_config_fingerprint="provider-a",
+        ).request_fingerprint
+    )
+    assert (
+        first.request_fingerprint
+        != identify_request(
+            base, provider="ollama", model="a", provider_config_fingerprint="provider-b"
+        ).request_fingerprint
     )
 
 
 def test_bypass_calls_underlying_provider_every_time():
     raw = FakeProvider()
-    cached = CachedLLMProvider(
-        raw,
-        MemoryStore(),
-        provider_name="ollama",
-        model="qwen3:8b",
-        config=LLMCacheConfig(),
-    )
+    cached = _cached(raw)
     request = LLMRequest(prompt="same", cache_bypass=True)
     cached.generate_json(request)
     cached.generate_json(request)

@@ -7,17 +7,15 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from config.settings import settings
-from llm.base import LLMRequest
+from llm.base import LLMProvider, LLMRequest
 from llm.config import LLMConfig
 from llm.factory import create_provider
+from llm.fingerprint import fingerprint
+from prompting.repository import FileSystemPromptRepository
 
 logger = logging.getLogger(__name__)
-PROMPT_PATH = (
-    Path(__file__).resolve().parents[1]
-    / "jobs"
-    / "news_enrichment"
-    / "prompts"
-    / "news_entity_scoring.txt"
+PROMPTS = FileSystemPromptRepository(
+    Path(__file__).resolve().parents[1] / "jobs" / "news_enrichment" / "prompts"
 )
 RESPONSE_SCHEMA = {
     "type": "object",
@@ -99,25 +97,25 @@ def _batches(values, size):
 
 
 def _prompt(rows):
-    template = PROMPT_PATH.read_text(encoding="utf-8")
+    template = PROMPTS.get("news_entity_scoring")
     payload = [
         {
-            "news_entity_id": str(r["news_entity_id"]),
-            "entity_name": r.get("entity_name"),
-            "symbols": r.get("symbols") or [],
-            "title": r.get("title"),
-            "summary": r.get("summary"),
-            "source_name": r.get("source_name"),
+            "news_entity_id": str(row["news_entity_id"]),
+            "entity_name": row.get("entity_name"),
+            "symbols": row.get("symbols") or [],
+            "title": row.get("title"),
+            "summary": row.get("summary"),
+            "source_name": row.get("source_name"),
             "published_at": (
-                r["published_at"].isoformat()
-                if hasattr(r.get("published_at"), "isoformat")
-                else r.get("published_at")
+                row["published_at"].isoformat()
+                if hasattr(row.get("published_at"), "isoformat")
+                else row.get("published_at")
             ),
         }
-        for r in rows
+        for row in rows
     ]
-    return template.replace(
-        "{input_json}", json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    return template.render(
+        input_json=json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     )
 
 
@@ -155,15 +153,23 @@ def _persist_scores(db, scores):
     )
 
 
-def _score_batch(db, *, provider, rows, max_tokens, stats):
+def _score_batch(db, *, provider: LLMProvider, rows, max_tokens, stats):
     if not rows:
         return
-    expected = {str(r["news_entity_id"]) for r in rows}
+    expected = {str(row["news_entity_id"]) for row in rows}
     stats.llm_calls += 1
+    template = PROMPTS.get("news_entity_scoring")
+    contract_fingerprint = fingerprint(
+        {
+            "template": template.fingerprint,
+            "response_schema": RESPONSE_SCHEMA,
+        }
+    )
     try:
         response = provider.generate_json(
             LLMRequest(
                 prompt=_prompt(rows),
+                prompt_fingerprint=contract_fingerprint,
                 temperature=0,
                 max_tokens=max_tokens,
                 grounded_search=False,
@@ -186,13 +192,21 @@ def _score_batch(db, *, provider, rows, max_tokens, stats):
                 error,
             )
             return
-        mid = len(rows) // 2
+        midpoint = len(rows) // 2
         stats.split_batches += 1
         _score_batch(
-            db, provider=provider, rows=rows[:mid], max_tokens=max_tokens, stats=stats
+            db,
+            provider=provider,
+            rows=rows[:midpoint],
+            max_tokens=max_tokens,
+            stats=stats,
         )
         _score_batch(
-            db, provider=provider, rows=rows[mid:], max_tokens=max_tokens, stats=stats
+            db,
+            provider=provider,
+            rows=rows[midpoint:],
+            max_tokens=max_tokens,
+            stats=stats,
         )
 
 

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import time
@@ -11,6 +10,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import sessionmaker
 
 from llm.base import LLMProvider, LLMRequest, LLMResponse
+from llm.fingerprint import fingerprint
 
 logger = logging.getLogger(__name__)
 
@@ -25,22 +25,29 @@ class LLMCacheConfig:
     claim_stale_seconds: int = 900
 
     def validate(self) -> None:
-        if self.ttl_seconds <= 0:
-            raise ValueError("LLM cache ttl_seconds must be > 0")
-        if self.grounded_ttl_seconds <= 0:
-            raise ValueError("LLM cache grounded_ttl_seconds must be > 0")
-        if self.poll_seconds <= 0:
-            raise ValueError("LLM cache poll_seconds must be > 0")
-        if self.wait_timeout_seconds <= 0:
-            raise ValueError("LLM cache wait_timeout_seconds must be > 0")
-        if self.claim_stale_seconds <= 0:
-            raise ValueError("LLM cache claim_stale_seconds must be > 0")
+        for name, value in (
+            ("ttl_seconds", self.ttl_seconds),
+            ("grounded_ttl_seconds", self.grounded_ttl_seconds),
+            ("poll_seconds", self.poll_seconds),
+            ("wait_timeout_seconds", self.wait_timeout_seconds),
+            ("claim_stale_seconds", self.claim_stale_seconds),
+        ):
+            if value <= 0:
+                raise ValueError(f"LLM cache {name} must be > 0")
 
 
 @dataclass(frozen=True, slots=True)
 class CacheLookup:
     action: str
     response: LLMResponse | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class LLMRequestIdentity:
+    request_fingerprint: str
+    prompt_fingerprint: str
+    provider_config_fingerprint: str
+    payload: dict[str, Any]
 
 
 class LLMCacheStore(Protocol):
@@ -54,15 +61,9 @@ class LLMCacheStore(Protocol):
         ttl_seconds: int,
         claim_stale_seconds: int,
     ) -> CacheLookup: ...
-
     def complete(
-        self,
-        *,
-        cache_key: str,
-        response: LLMResponse,
-        ttl_seconds: int,
+        self, *, cache_key: str, response: LLMResponse, ttl_seconds: int
     ) -> None: ...
-
     def release(self, *, cache_key: str, error: str) -> None: ...
 
 
@@ -85,16 +86,13 @@ class PostgresLLMCacheStore:
                 db.execute(
                     text(
                         """
-                        SELECT *
-                        FROM public.sp_llm_claim_cached_response(
-                            CAST(:cache_key AS varchar),
-                            CAST(:provider AS varchar),
-                            CAST(:model AS varchar),
-                            CAST(:request_payload AS jsonb),
-                            CAST(:ttl_seconds AS integer),
-                            CAST(:claim_stale_seconds AS integer)
-                        )
-                        """
+                    SELECT * FROM public.sp_llm_claim_cached_response(
+                        CAST(:cache_key AS varchar), CAST(:provider AS varchar),
+                        CAST(:model AS varchar), CAST(:request_payload AS jsonb),
+                        CAST(:ttl_seconds AS integer),
+                        CAST(:claim_stale_seconds AS integer)
+                    )
+                """
                     ),
                     {
                         "cache_key": cache_key,
@@ -109,11 +107,9 @@ class PostgresLLMCacheStore:
                 .one()
             )
             db.commit()
-
         action = str(row["action"])
         if action != "HIT":
             return CacheLookup(action=action)
-
         return CacheLookup(
             action=action,
             response=LLMResponse(
@@ -125,25 +121,18 @@ class PostgresLLMCacheStore:
         )
 
     def complete(
-        self,
-        *,
-        cache_key: str,
-        response: LLMResponse,
-        ttl_seconds: int,
+        self, *, cache_key: str, response: LLMResponse, ttl_seconds: int
     ) -> None:
         with self.session_factory() as db:
             db.execute(
                 text(
                     """
                     SELECT public.sp_llm_complete_cached_response(
-                        CAST(:cache_key AS varchar),
-                        CAST(:response_data AS jsonb),
-                        CAST(:response_raw AS jsonb),
-                        CAST(:sources AS jsonb),
-                        CAST(:search_executed AS boolean),
-                        CAST(:ttl_seconds AS integer)
+                        CAST(:cache_key AS varchar), CAST(:response_data AS jsonb),
+                        CAST(:response_raw AS jsonb), CAST(:sources AS jsonb),
+                        CAST(:search_executed AS boolean), CAST(:ttl_seconds AS integer)
                     )
-                    """
+                """
                 ),
                 {
                     "cache_key": cache_key,
@@ -160,45 +149,47 @@ class PostgresLLMCacheStore:
         with self.session_factory() as db:
             db.execute(
                 text(
-                    """
-                    SELECT public.sp_llm_release_cached_response(
-                        CAST(:cache_key AS varchar),
-                        CAST(:error AS text)
-                    )
-                    """
+                    "SELECT public.sp_llm_release_cached_response(CAST(:cache_key AS varchar), CAST(:error AS text))"
                 ),
                 {"cache_key": cache_key, "error": error[:4000]},
             ).scalar_one()
             db.commit()
 
 
-def canonical_request_payload(
+def identify_request(
     request: LLMRequest,
     *,
     provider: str,
     model: str,
-) -> dict[str, Any]:
-    return {
-        "provider": provider,
-        "model": model,
-        "prompt": request.prompt,
-        "temperature": request.temperature,
-        "max_tokens": request.max_tokens,
-        "grounded_search": request.grounded_search,
-        "response_schema": request.response_schema,
-        "cache_namespace": request.cache_namespace,
-        "cache_format_version": 1,
+    provider_config_fingerprint: str,
+) -> LLMRequestIdentity:
+    prompt_identity = request.prompt_fingerprint or fingerprint(
+        {"rendered_prompt": request.prompt, "response_schema": request.response_schema}
+    )
+    payload = {
+        "provider": {
+            "name": provider,
+            "model": model,
+            "configuration_fingerprint": provider_config_fingerprint,
+        },
+        "prompt": {
+            "fingerprint": prompt_identity,
+            "rendered": request.prompt,
+        },
+        "generation": {
+            "temperature": request.temperature,
+            "max_tokens": request.max_tokens,
+            "grounded_search": request.grounded_search,
+            "response_schema": request.response_schema,
+        },
+        "cache_format": "llm-request",
     }
-
-
-def build_cache_key(payload: dict[str, Any]) -> str:
-    encoded = json.dumps(
-        payload,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+    return LLMRequestIdentity(
+        request_fingerprint=fingerprint(payload),
+        prompt_fingerprint=prompt_identity,
+        provider_config_fingerprint=provider_config_fingerprint,
+        payload=payload,
+    )
 
 
 class CachedLLMProvider(LLMProvider):
@@ -209,6 +200,7 @@ class CachedLLMProvider(LLMProvider):
         *,
         provider_name: str,
         model: str,
+        provider_config_fingerprint: str,
         config: LLMCacheConfig,
     ) -> None:
         config.validate()
@@ -216,19 +208,19 @@ class CachedLLMProvider(LLMProvider):
         self.store = store
         self.provider_name = provider_name
         self.model = model
+        self.provider_config_fingerprint = provider_config_fingerprint
         self.config = config
         self.max_retries = getattr(provider, "max_retries", 0)
 
     def generate_json(self, request: LLMRequest) -> LLMResponse:
         if not self.config.enabled or request.cache_bypass:
             return self.provider.generate_json(request)
-
-        payload = canonical_request_payload(
+        identity = identify_request(
             request,
             provider=self.provider_name,
             model=self.model,
+            provider_config_fingerprint=self.provider_config_fingerprint,
         )
-        cache_key = build_cache_key(payload)
         ttl_seconds = request.cache_ttl_seconds or (
             self.config.grounded_ttl_seconds
             if request.grounded_search
@@ -236,54 +228,38 @@ class CachedLLMProvider(LLMProvider):
         )
         if ttl_seconds <= 0:
             raise ValueError("LLM request cache_ttl_seconds must be > 0")
-
         deadline = time.monotonic() + self.config.wait_timeout_seconds
         while True:
             lookup = self.store.claim(
-                cache_key=cache_key,
+                cache_key=identity.request_fingerprint,
                 provider=self.provider_name,
                 model=self.model,
-                request_payload=payload,
+                request_payload=identity.payload,
                 ttl_seconds=ttl_seconds,
                 claim_stale_seconds=self.config.claim_stale_seconds,
             )
-
             if lookup.action == "HIT":
-                logger.info(
-                    "LLM cache hit cache_key=%s provider=%s model=%s",
-                    cache_key,
-                    self.provider_name,
-                    self.model,
-                )
                 if lookup.response is None:
                     raise RuntimeError("LLM cache returned HIT without a response")
                 return lookup.response
-
             if lookup.action == "CLAIM":
-                logger.info(
-                    "LLM cache miss claimed cache_key=%s provider=%s model=%s",
-                    cache_key,
-                    self.provider_name,
-                    self.model,
-                )
                 try:
                     response = self.provider.generate_json(request)
                     self.store.complete(
-                        cache_key=cache_key,
+                        cache_key=identity.request_fingerprint,
                         response=response,
                         ttl_seconds=ttl_seconds,
                     )
                     return response
                 except Exception as error:
                     self.store.release(
-                        cache_key=cache_key,
-                        error=str(error),
+                        cache_key=identity.request_fingerprint, error=str(error)
                     )
                     raise
-
             if lookup.action != "WAIT":
                 raise RuntimeError(f"Unknown LLM cache action: {lookup.action}")
-
             if time.monotonic() >= deadline:
-                raise TimeoutError(f"Timed out waiting for LLM cache key {cache_key}")
+                raise TimeoutError(
+                    f"Timed out waiting for LLM cache key {identity.request_fingerprint}"
+                )
             time.sleep(self.config.poll_seconds)

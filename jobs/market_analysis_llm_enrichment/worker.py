@@ -6,7 +6,8 @@ from typing import Any
 from config.settings import settings
 from job_runtime.database import run_transactional
 from llm import LLMConfig, create_provider
-from market_analysis.llm_enrichment import PROMPT_VERSION, SignalEnrichment
+from market_analysis.enrichment_contract import enrichment_fingerprint
+from market_analysis.llm_enrichment import SignalEnrichment
 from market_analysis.llm_enrichment_repository import (
     MarketAnalysisLLMEnrichmentRepository,
 )
@@ -26,16 +27,21 @@ def _compact_result(result: dict[str, Any]) -> dict[str, Any]:
             "unique",
             "enriched",
             "failed",
-            "prompt_id",
+            "enrichment_fingerprint",
             "signal_ids",
         )
     }
 
 
-def _load_pending_candidates(*, prompt_id: str, limit: int) -> list[dict[str, Any]]:
+def _load_pending_candidates(
+    *,
+    contract_fingerprint: str,
+    limit: int,
+) -> list[dict[str, Any]]:
     return run_transactional(
         lambda db: MarketAnalysisLLMEnrichmentRepository(db).list_pending(
-            prompt_version=prompt_id, limit=limit
+            enrichment_fingerprint=contract_fingerprint,
+            limit=limit,
         )
     )
 
@@ -46,12 +52,12 @@ def _persist_single_enrichment(
     analysis: dict[str, Any],
     composite_score: float,
     *,
-    prompt_id: str,
+    contract_fingerprint: str,
 ) -> bool:
     return run_transactional(
         lambda db: MarketAnalysisLLMEnrichmentRepository(db).apply(
             signal_id=str(signal["signal_id"]),
-            prompt_version=prompt_id,
+            enrichment_fingerprint=contract_fingerprint,
             llm_score=enrichment.llm_score,
             llm_analysis=analysis,
             composite_score=composite_score,
@@ -67,23 +73,28 @@ def run() -> dict[str, Any]:
         default_timeout_seconds=120.0,
     )
     provider = create_provider(config)
-    prompt_id = str(settings.get(f"{PREFIX}_PROMPT_ID", PROMPT_VERSION))
+    contract_fingerprint = enrichment_fingerprint()
     candidates = _load_pending_candidates(
-        prompt_id=prompt_id,
+        contract_fingerprint=contract_fingerprint,
         limit=int(settings.get(f"{PREFIX}_RUN_MAX_SIGNALS", 25)),
     )
     result = run_market_analysis_llm_enrichment(
         provider=provider,
         candidates=candidates,
         persist_enrichment=lambda signal, enrichment, analysis, composite: _persist_single_enrichment(
-            signal, enrichment, analysis, composite, prompt_id=prompt_id
+            signal,
+            enrichment,
+            analysis,
+            composite,
+            contract_fingerprint=contract_fingerprint,
         ),
-        prompt_version=prompt_id,
+        enrichment_fingerprint=contract_fingerprint,
         max_tokens=int(settings.get(f"{PREFIX}_LLM_REQUEST_MAX_OUTPUT_TOKENS", 1200)),
         call_batch_size=int(settings.get(f"{PREFIX}_LLM_REQUEST_MAX_SIGNALS", 4)),
     )
     logger.info(
-        "Market analysis LLM enrichment completed summary=%s", _compact_result(result)
+        "Market analysis LLM enrichment completed summary=%s",
+        _compact_result(result),
     )
     return result
 

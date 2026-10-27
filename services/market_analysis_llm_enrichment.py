@@ -6,7 +6,6 @@ from typing import Any
 
 from llm import LLMProvider
 from market_analysis.llm_enrichment import (
-    PROMPT_VERSION,
     SignalEnrichment,
     calculate_composite_score,
     enrich_signal,
@@ -63,7 +62,11 @@ def _enrich_resilient(
             return [], [{"signal_id": signal_id, "error": str(error)[:500]}]
 
     try:
-        enrichments = enrich_signals_batch(provider, signals, max_tokens=max_tokens)
+        enrichments = enrich_signals_batch(
+            provider,
+            signals,
+            max_tokens=max_tokens,
+        )
         return list(zip(signals, enrichments, strict=True)), []
     except Exception as error:
         midpoint = len(signals) // 2
@@ -92,11 +95,14 @@ def run_market_analysis_llm_enrichment(
     provider: LLMProvider,
     candidates: Sequence[dict[str, Any]],
     persist_enrichment: PersistEnrichment,
-    prompt_version: str = PROMPT_VERSION,
+    enrichment_fingerprint: str,
     max_tokens: int = 1200,
     call_batch_size: int = 4,
 ) -> dict[str, Any]:
     """Enrich signals in resilient provider batches and persist each result separately."""
+    if not enrichment_fingerprint:
+        raise ValueError("enrichment_fingerprint cannot be empty")
+
     unique, failures = _deduplicate_candidates(candidates)
     enriched: list[str] = []
     batch_size = max(1, int(call_batch_size))
@@ -113,12 +119,16 @@ def run_market_analysis_llm_enrichment(
             signal_id = str(signal["signal_id"])
             try:
                 analysis = enrichment.to_dict()
-                analysis["prompt_version"] = prompt_version
+                analysis["enrichment_fingerprint"] = enrichment_fingerprint
                 composite_score = calculate_composite_score(
-                    signal, enrichment.llm_score
+                    signal,
+                    enrichment.llm_score,
                 )
                 if not persist_enrichment(
-                    signal, enrichment, analysis, composite_score
+                    signal,
+                    enrichment,
+                    analysis,
+                    composite_score,
                 ):
                     raise RuntimeError("signal is no longer eligible for enrichment")
                 enriched.append(signal_id)
@@ -131,7 +141,8 @@ def run_market_analysis_llm_enrichment(
                 )
             except Exception as error:
                 logger.exception(
-                    "LLM enrichment persistence failed signal_id=%s", signal_id
+                    "LLM enrichment persistence failed signal_id=%s",
+                    signal_id,
                 )
                 failures.append({"signal_id": signal_id, "error": str(error)[:500]})
 
@@ -141,7 +152,7 @@ def run_market_analysis_llm_enrichment(
         "unique": len(unique),
         "enriched": len(enriched),
         "failed": len(failures),
-        "prompt_version": prompt_version,
+        "enrichment_fingerprint": enrichment_fingerprint,
         "signal_ids": enriched,
         "failures": failures,
     }
