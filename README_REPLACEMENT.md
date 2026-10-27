@@ -1,25 +1,7 @@
-# LLM thinking configurabile per prefisso
+# Run and LLM request limit naming
 
-File completi per replacement in-place dalla root di `mip-backend`.
+Portfolio Intelligence loads all candidates and uses the former `BATCH_SIZE` only in `batched(..., size)` when constructing research LLM requests. The canonical replacement is therefore:
 
-## Installazione
+`PORTFOLIO_INTELLIGENCE_LLM_REQUEST_MAX_CANDIDATES=4`
 
-```bash
-cd /opt/mip/mip-backend
-unzip -o mip_llm_think_full_files.zip
-python -m pytest -q tests/test_llm_think_config.py tests/test_ollama_structured_output.py
-```
-
-## Configurazione
-
-Il default e `false`, quindi non e necessario aggiungere variabili.
-
-```dotenv
-MARKET_ANALYSIS_LLM_THINK=false
-```
-
-Per abilitarlo solo in un consumer specifico:
-
-```dotenv
-PORTFOLIO_INTELLIGENCE_LLM_THINK=true
-```
+The package also applies the same convention to News Enrichment and Market Analysis Enrichment.

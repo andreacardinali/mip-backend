@@ -69,7 +69,8 @@ def run() -> dict[str, Any]:
     provider = create_provider(config)
     prompt_id = str(settings.get(f"{PREFIX}_PROMPT_ID", PROMPT_VERSION))
     candidates = _load_pending_candidates(
-        prompt_id=prompt_id, limit=int(settings.get(f"{PREFIX}_BATCH_SIZE", 25))
+        prompt_id=prompt_id,
+        limit=int(settings.get(f"{PREFIX}_RUN_MAX_SIGNALS", 25)),
     )
     result = run_market_analysis_llm_enrichment(
         provider=provider,
@@ -78,8 +79,8 @@ def run() -> dict[str, Any]:
             signal, enrichment, analysis, composite, prompt_id=prompt_id
         ),
         prompt_version=prompt_id,
-        max_tokens=int(settings.get(f"{PREFIX}_MAX_OUTPUT_TOKENS", 1200)),
-        call_batch_size=int(settings.get(f"{PREFIX}_CALL_BATCH_SIZE", 4)),
+        max_tokens=int(settings.get(f"{PREFIX}_LLM_REQUEST_MAX_OUTPUT_TOKENS", 1200)),
+        call_batch_size=int(settings.get(f"{PREFIX}_LLM_REQUEST_MAX_SIGNALS", 4)),
     )
     logger.info(
         "Market analysis LLM enrichment completed summary=%s", _compact_result(result)

@@ -27,8 +27,7 @@ class BreakingCatalystBranch:
         accepted = []
         collector = MarketEvidenceCollector(context.market_data, context.config)
         economic_events = collector.common_economic_events()
-
-        for batch in batched(candidates, context.config.batch_size):
+        for batch in batched(candidates, context.config.llm_request_max_candidates):
             payload = [
                 {
                     **item.to_dict(),
@@ -60,10 +59,7 @@ class BreakingCatalystBranch:
                         continue
                     if event.confidence < 60:
                         continue
-                    event_key = (
-                        f"{source.entity_id}|{event.event_type}|"
-                        f"{event.event_day}|{event.fingerprint}"
-                    )
+                    event_key = f"{source.entity_id}|{event.event_type}|{event.event_day}|{event.fingerprint}"
                     accepted.append(
                         {
                             **event.payload,
@@ -79,7 +75,6 @@ class BreakingCatalystBranch:
                             "relatedSymbols": source.related_symbols,
                         }
                     )
-
         accepted = deduplicate_by(
             accepted, key=lambda item: (item["user_id"], item["eventKey"])
         )

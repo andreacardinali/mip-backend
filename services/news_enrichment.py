@@ -197,9 +197,9 @@ def _score_batch(db, *, provider, rows, max_tokens, stats):
 
 
 def enrich_news(db: Session):
-    limit = _as_int("NEWS_ENRICHMENT_LIMIT", 200)
-    batch_size = _as_int("NEWS_ENRICHMENT_BATCH_SIZE", 4)
-    max_tokens = _as_int("NEWS_ENRICHMENT_MAX_OUTPUT_TOKENS", 8192)
+    limit = _as_int("NEWS_ENRICHMENT_RUN_MAX_ENTITIES", 200)
+    batch_size = _as_int("NEWS_ENRICHMENT_LLM_REQUEST_MAX_ENTITIES", 4)
+    max_tokens = _as_int("NEWS_ENRICHMENT_LLM_REQUEST_MAX_OUTPUT_TOKENS", 8192)
     config = LLMConfig.from_settings(
         settings,
         prefix="NEWS_ENRICHMENT_LLM",

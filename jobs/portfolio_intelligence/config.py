@@ -21,7 +21,7 @@ class IntelligenceConfig:
     research_llm: LLMConfig
     validation_llm: LLMConfig
     create_notifications: bool
-    batch_size: int
+    llm_request_max_candidates: int
     upcoming_window_days: int
     breaking_lookback_hours: int
     daily_move_min_pct: float
@@ -50,7 +50,7 @@ class IntelligenceConfig:
                 default_timeout_seconds=120.0,
             ),
             create_notifications=_b(f"{p}_NOTIFICATIONS_ENABLED", False),
-            batch_size=_i(f"{p}_BATCH_SIZE", 4),
+            llm_request_max_candidates=_i(f"{p}_LLM_REQUEST_MAX_CANDIDATES", 4),
             upcoming_window_days=_i(f"{p}_UPCOMING_CATALYST_WINDOW_DAYS", 7),
             breaking_lookback_hours=_i(f"{p}_BREAKING_CATALYST_LOOKBACK_HOURS", 24),
             daily_move_min_pct=_f(f"{p}_DAILY_MOVE_MIN_PERCENT", 3.0),
@@ -62,8 +62,8 @@ class IntelligenceConfig:
             etf_holding_limit=_i(f"{p}_ETF_HOLDINGS_LIMIT", 25),
             economic_event_limit=_i(f"{p}_ECONOMIC_EVENTS_LIMIT", 50),
         )
-        if config.batch_size < 1:
-            raise ValueError(f"{p}_BATCH_SIZE must be >= 1")
+        if config.llm_request_max_candidates < 1:
+            raise ValueError(f"{p}_LLM_REQUEST_MAX_CANDIDATES must be >= 1")
         if not 1 <= config.upcoming_window_days <= 30:
             raise ValueError(
                 f"{p}_UPCOMING_CATALYST_WINDOW_DAYS must be between 1 and 30"
