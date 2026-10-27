@@ -57,3 +57,20 @@ def test_fingerprint_changes():
         evaluate_alerts([rule()], [item(direction="BUY")])[0].fingerprint
         != evaluate_alerts([rule()], [item(direction="SELL")])[0].fingerprint
     )
+
+
+def test_ranked_candidate_normalizes_scores():
+    from alerts.service import _candidate
+
+    candidate = _candidate(
+        dict(
+            signal_id="signal-1", instrument_id="instrument-1", symbol="MSFT",
+            direction="BUY", composite_score=86, consensus_score=78,
+            conflict_score=12, strategy_count=3,
+        )
+    )
+    assert candidate.composite_score == 0.86
+    assert candidate.consensus_score == 0.78
+    assert candidate.conflict_score == 0.12
+    assert len(evaluate_alerts([rule(min_composite_score=0.8)], [candidate])) == 1
+    assert evaluate_alerts([rule(max_conflict_score=0.1)], [candidate]) == []

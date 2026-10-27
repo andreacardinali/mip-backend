@@ -6,7 +6,6 @@ from market_data.factory import market_data
 from services.currencies import get_currency_catalog
 from services.market_price_refresh import (
     enqueue_user_price_refreshes,
-    process_price_refresh_queue,
 )
 
 router = APIRouter()
@@ -29,7 +28,7 @@ def currencies(current_user: CurrentUser = Depends(get_current_user)):
         ) from error
 
 
-@router.post("/prices/refresh")
+@router.post("/prices/refresh", status_code=202)
 def refresh_user_prices(
     current_user: CurrentUser = Depends(get_current_user),
 ):
@@ -47,10 +46,8 @@ def refresh_user_prices(
     finally:
         db.close()
 
-    processing_result = process_price_refresh_queue()
     return {
-        "status": processing_result["status"],
+        "status": "QUEUED",
         "max_age_seconds": LIVE_PRICE_MAX_AGE_SECONDS,
         **enqueue_result,
-        **processing_result,
     }

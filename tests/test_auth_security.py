@@ -29,7 +29,7 @@ class GetCurrentUserTests(unittest.TestCase):
 
     @staticmethod
     def _call(token: str = "token"):
-        return asyncio.run(get_current_user(token))
+        return get_current_user(token)
 
     @patch("auth.security.SessionLocal")
     @patch("auth.security.jwt.decode")

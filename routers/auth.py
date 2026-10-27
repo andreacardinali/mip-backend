@@ -46,7 +46,7 @@ async def me(current_user: CurrentUser = Depends(get_current_user)):
 
 
 @router.put("/me/preferences")
-async def update_preferences(
+def update_preferences(
     payload: dict,
     current_user: CurrentUser = Depends(get_current_user),
 ):
@@ -68,27 +68,20 @@ async def update_preferences(
         row = db.execute(
             text(
                 """
-                UPDATE users
-                SET reporting_currency = :reporting_currency,
-                    updated_at = now()
-                WHERE user_id = :user_id
-                RETURNING
-                    user_id,
-                    username,
-                    email,
-                    is_active,
-                    reporting_currency
+                SELECT public.sp_update_user_preferences(
+                    CAST(:user_id AS uuid), CAST(:reporting_currency AS character(3))
+                )
                 """
             ),
             {
                 "user_id": current_user["user_id"],
                 "reporting_currency": reporting_currency,
             },
-        ).first()
+        ).scalar()
         if row is None:
             raise HTTPException(status_code=404, detail="User not found")
         db.commit()
-        return dict(row._mapping)
+        return dict(row)
     except HTTPException:
         db.rollback()
         raise

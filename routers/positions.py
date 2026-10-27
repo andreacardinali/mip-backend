@@ -1,9 +1,13 @@
+from decimal import Decimal, InvalidOperation
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
 from auth.security import CurrentUser, get_current_user
 from db import SessionLocal
+from market_data.factory import market_data
+from services.currencies import normalize_supported_currency
 
 router = APIRouter()
 PRICE_MAX_AGE_HOURS = 96
@@ -46,6 +50,23 @@ def upsert_position(
     if "instrument_id" not in payload:
         raise HTTPException(status_code=422, detail="instrument_id is required")
 
+    cost_amount = payload.get("cost_basis_amount")
+    cost_currency = None
+    if cost_amount is not None:
+        try:
+            cost_amount = Decimal(str(cost_amount))
+            if not cost_amount.is_finite() or cost_amount < 0:
+                raise ValueError("cost_basis_amount must be finite and non-negative")
+            cost_currency = normalize_supported_currency(
+                payload.get("cost_basis_currency"), market_data
+            )
+        except (ValueError, InvalidOperation) as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        except Exception as error:
+            raise HTTPException(
+                status_code=503, detail="Currency catalog is temporarily unavailable"
+            ) from error
+
     db = SessionLocal()
     try:
         position_id = db.execute(
@@ -74,6 +95,25 @@ def upsert_position(
                 "notes": payload.get("notes"),
             },
         ).scalar()
+        if "cost_basis_amount" in payload:
+            updated_position_id = db.execute(
+                text(
+                    """
+                    SELECT public.sp_set_position_cost_basis(
+                        CAST(:position_id AS uuid), CAST(:user_id AS uuid),
+                        CAST(:amount AS numeric), CAST(:currency AS character(3))
+                    )
+                    """
+                ),
+                {
+                    "position_id": str(position_id),
+                    "user_id": user_id,
+                    "amount": cost_amount,
+                    "currency": cost_currency,
+                },
+            ).scalar()
+            if updated_position_id is None:
+                raise HTTPException(status_code=404, detail="Position not found")
         db.commit()
         return {"position_id": str(position_id), "status": "saved"}
     except IntegrityError as error:

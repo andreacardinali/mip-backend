@@ -22,7 +22,7 @@ class CurrentUser(TypedDict):
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
 
-async def get_current_user(token: str = Depends(oauth2_scheme)) -> CurrentUser:
+def get_current_user(token: str = Depends(oauth2_scheme)) -> CurrentUser:
     try:
         uid = jwt.decode(
             token, settings.JWT_SECRET, algorithms=[settings.JWT_ALGORITHM]

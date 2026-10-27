@@ -1,5 +1,6 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 
 from auth.security import CurrentUser, get_current_user
 from db import SessionLocal
@@ -69,6 +70,16 @@ def upsert_watchlist_item(
         ).scalar()
         db.commit()
         return {"watchlist_item_id": str(item_id), "status": "saved"}
+    except DBAPIError as error:
+        db.rollback()
+        code = getattr(error.orig, "sqlstate", None) or getattr(
+            error.orig, "pgcode", None
+        )
+        if code == "23503":
+            raise HTTPException(
+                status_code=404, detail="Watchlist item not found or not accessible"
+            ) from error
+        raise
     except Exception:
         db.rollback()
         raise

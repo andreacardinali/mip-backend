@@ -9,25 +9,26 @@ from services.currencies import normalize_supported_currency
 router = APIRouter()
 
 
-def _get_pricing_state(db, portfolio_id, user_id):
-    positions = db.execute(
+def _get_pricing_states(db, user_id, portfolio_id=None):
+    rows = db.execute(
         text(
             """
-            SELECT p.last_price
-            FROM sp_get_positions(:portfolio_id, :user_id) p
+            SELECT * FROM public.sp_get_portfolio_pricing_states(
+                CAST(:user_id AS uuid), CAST(:portfolio_id AS uuid)
+            )
             """
         ),
         {"portfolio_id": portfolio_id, "user_id": user_id},
-    ).all()
-    pending_price_count = sum(
-        1 for position in positions if position.last_price is None
-    )
-    total_position_count = len(positions)
+    ).mappings()
     return {
-        "pricing_complete": pending_price_count == 0,
-        "pending_price_count": pending_price_count,
-        "priced_position_count": total_position_count - pending_price_count,
-        "total_position_count": total_position_count,
+        str(row["portfolio_id"]): {
+            "pricing_complete": row["pending_price_count"] == 0,
+            "pending_price_count": row["pending_price_count"],
+            "priced_position_count": row["total_position_count"] - row["pending_price_count"],
+            "total_position_count": row["total_position_count"],
+            "price_refresh_pending": row["price_refresh_pending"],
+        }
+        for row in rows
     }
 
 
@@ -64,7 +65,7 @@ def _apply_pricing_state(result, pricing_state, *, list_view=False):
 
 
 @router.get("/")
-async def get_portfolios(current_user: CurrentUser = Depends(get_current_user)):
+def get_portfolios(current_user: CurrentUser = Depends(get_current_user)):
     db = SessionLocal()
     try:
         user_id = current_user["user_id"]
@@ -72,10 +73,11 @@ async def get_portfolios(current_user: CurrentUser = Depends(get_current_user)):
             text("SELECT * FROM sp_get_portfolios(:user_id)"),
             {"user_id": user_id},
         )
+        pricing_states = _get_pricing_states(db, user_id)
         results = []
         for row in rows:
             result = dict(row._mapping)
-            pricing_state = _get_pricing_state(db, result["portfolio_id"], user_id)
+            pricing_state = pricing_states[str(result["portfolio_id"])]
             results.append(_apply_pricing_state(result, pricing_state, list_view=True))
         return results
     finally:
@@ -83,7 +85,7 @@ async def get_portfolios(current_user: CurrentUser = Depends(get_current_user)):
 
 
 @router.post("/upsert")
-async def upsert_portfolio(
+def upsert_portfolio(
     payload: dict, current_user: CurrentUser = Depends(get_current_user)
 ):
     try:
@@ -126,7 +128,7 @@ async def upsert_portfolio(
 
 
 @router.delete("/{portfolio_id}")
-async def delete_portfolio(
+def delete_portfolio(
     portfolio_id: str, current_user: CurrentUser = Depends(get_current_user)
 ):
     db = SessionLocal()
@@ -142,7 +144,7 @@ async def delete_portfolio(
 
 
 @router.get("/{portfolio_id}/summary")
-async def get_portfolio_summary(
+def get_portfolio_summary(
     portfolio_id: str, current_user: CurrentUser = Depends(get_current_user)
 ):
     db = SessionLocal()
@@ -156,7 +158,7 @@ async def get_portfolio_summary(
         if row is None:
             raise HTTPException(status_code=404, detail="Portfolio not found")
         result = dict(row._mapping)
-        pricing_state = _get_pricing_state(db, portfolio_id, user_id)
+        pricing_state = next(iter(_get_pricing_states(db, user_id, portfolio_id).values()))
         return _apply_pricing_state(result, pricing_state)
     finally:
         db.close()

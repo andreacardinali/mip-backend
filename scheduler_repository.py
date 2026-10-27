@@ -34,6 +34,18 @@ class SchedulerRepository:
             {"job_run_id": str(job_run_id)},
         )
 
+    def defer_manual_request(self, job_run_id: UUID) -> None:
+        self.db.execute(
+            text(
+                """
+                SELECT public.sp_scheduler_defer_job_run_request(
+                    CAST(:job_run_id AS uuid)
+                )
+                """
+            ),
+            {"job_run_id": str(job_run_id)},
+        )
+
     def fail_manual_request(self, job_run_id: UUID, error_message: str) -> None:
         self.db.execute(
             text(

@@ -29,6 +29,19 @@ class MarketScreenerRepository:
         ).scalar_one()
         return dict(value)
 
+    def list_alert_candidates(self, *, limit: int) -> list[dict[str, Any]]:
+        rows = self.db.execute(
+            text(
+                """
+                SELECT public.sp_market_screener_list_alert_candidates(
+                    CAST(:limit AS integer)
+                )
+                """
+            ),
+            {"limit": limit},
+        ).scalars()
+        return [dict(row) for row in rows]
+
     def apply_consensus(self, *, opportunities: list[dict[str, Any]]) -> dict[str, Any]:
         value = self.db.execute(
             text(

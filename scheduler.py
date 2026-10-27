@@ -12,7 +12,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy import text
 
 from config.settings import settings
-from db import SessionLocal
+from db import SessionLocal, engine
 from job_runtime.run_logging import (
     current_job_run_id,
     install_scheduler_run_log_handler,
@@ -36,6 +36,15 @@ SYNC_JOB_ID = "__scheduler_configuration_sync__"
 MANUAL_RUN_POLL_JOB_ID = "__scheduler_manual_run_poll__"
 
 
+def _try_job_lock(connection, job_id: str) -> bool:
+    return bool(
+        connection.execute(
+            text("SELECT public.sp_scheduler_try_job_lock(CAST(:job_id AS uuid))"),
+            {"job_id": str(UUID(job_id))},
+        ).scalar_one()
+    )
+
+
 def normalize_result(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
         return value
@@ -54,9 +63,17 @@ def execute_job(
     job_run_id = UUID(requested_job_run_id) if requested_job_run_id else uuid4()
     started_at = datetime.now(UTC)
     run_started = False
+    lock_connection = None
     log_token = current_job_run_id.set(job_run_id)
 
     try:
+        lock_connection = engine.connect()
+        if not _try_job_lock(lock_connection, job_id):
+            if manual_request:
+                repository.defer_manual_request(job_run_id)
+                db.commit()
+            logger.info("Job already running job_id=%s; manual=%s", job_id, manual_request)
+            return {"status": "SKIPPED", "reason": "already_running"}
         repository.start_run(
             job_run_id=job_run_id,
             job_id=job_uuid,
@@ -145,7 +162,11 @@ def execute_job(
         raise
     finally:
         current_job_run_id.reset(log_token)
-        db.close()
+        try:
+            db.close()
+        finally:
+            if lock_connection is not None:
+                lock_connection.close()
 
 
 def poll_manual_runs() -> None:
@@ -156,21 +177,27 @@ def poll_manual_runs() -> None:
         db.commit()
 
         for request in requests:
-            scheduler.add_job(
-                execute_job,
-                trigger="date",
-                run_date=datetime.now(scheduler.timezone),
-                args=[
-                    str(request["job_id"]),
-                    str(request["python_module"]),
-                    str(request["job_run_id"]),
-                    True,
-                ],
-                id=f"manual-{request['request_id']}",
-                name=f"Manual - {request['job_name']}",
-                max_instances=1,
-                coalesce=True,
-            )
+            try:
+                scheduler.add_job(
+                    execute_job,
+                    trigger="date",
+                    run_date=datetime.now(scheduler.timezone),
+                    args=[
+                        str(request["job_id"]),
+                        str(request["python_module"]),
+                        str(request["job_run_id"]),
+                        True,
+                    ],
+                    id=f"manual-{request['request_id']}",
+                    name=f"Manual - {request['job_name']}",
+                    max_instances=1,
+                    coalesce=True,
+                )
+            except Exception:
+                repository.defer_manual_request(UUID(str(request["job_run_id"])))
+                db.commit()
+                logger.exception("Unable to schedule manual request %s", request["request_id"])
+                continue
             logger.info(
                 "Manual job queued request_id=%s job_id=%s run_id=%s",
                 request["request_id"],
@@ -281,29 +308,27 @@ def _next_run_time(
 
 
 def recover_stale_runs() -> int:
-    db = SessionLocal()
+    recovered = 0
     try:
-        recovered = db.execute(
-            text(
-                """
-                SELECT public.sp_scheduler_fail_stale_runs(
-                    CAST(:stale_after AS interval)
-                )
-                """
-            ),
-            {"stale_after": "0 seconds"},
-        ).scalar_one()
-        db.commit()
-        logger.info("Recovered stale scheduler runs count=%s", recovered)
-        return int(recovered)
+        with engine.connect() as connection:
+            job_ids = connection.execute(
+                text("SELECT public.sp_scheduler_list_job_ids()")
+            ).scalars().all()
+        for job_id in job_ids:
+            with engine.connect() as connection:
+                result = connection.execute(
+                    text("SELECT public.sp_scheduler_recover_job_runs(CAST(:job_id AS uuid))"),
+                    {"job_id": str(job_id)},
+                ).scalar_one()
+                connection.commit()
+                recovered += result
+        logger.info("Recovered orphaned scheduler runs count=%s", recovered)
+        return recovered
     except Exception:
-        db.rollback()
         logger.exception(
             "Unable to recover stale scheduler runs during scheduler startup"
         )
-        return 0
-    finally:
-        db.close()
+        return recovered
 
 
 def sync_jobs() -> None:

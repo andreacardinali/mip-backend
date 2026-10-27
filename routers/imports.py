@@ -34,6 +34,19 @@ def _has_price(payload) -> bool:
     return isinstance(payload, dict) and payload.get("last_price") is not None
 
 
+def _matches_listing_hints(payload, hints: dict) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    aliases = {"exchange": "exchange_code", "currency": "currency_code", "instrument_type": "type"}
+    for key, requested in hints.items():
+        if not requested:
+            continue
+        actual = payload.get(key) or payload.get(aliases.get(key, key))
+        if str(actual or "").strip().upper() != str(requested).strip().upper():
+            return False
+    return True
+
+
 def _has_persisted_identity(payload) -> bool:
     return (
         isinstance(payload, dict)
@@ -92,10 +105,20 @@ def import_entity(
             if symbol_info and symbol_info.get("found")
             else None
         )
+        requested_hints = {
+            "exchange": requested_exchange,
+            "currency": requested_currency,
+            "isin": requested_isin,
+            "instrument_type": (
+                requested_type.value if requested_type != InstrumentType.UNKNOWN else None
+            ),
+        }
+        local_matches = _matches_listing_hints(local_payload, requested_hints)
 
         if (
             symbol_info
             and symbol_info.get("source") == "LOCAL"
+            and local_matches
             and _has_persisted_identity(local_payload)
             and _has_currency(local_payload)
             and _has_price(local_payload)
@@ -125,6 +148,7 @@ def import_entity(
             and not requested_isin
             and not requested_currency
             and not requested_exchange
+            and requested_type == InstrumentType.UNKNOWN
         ):
             profile_payload = dict(local_payload)
 
@@ -173,7 +197,7 @@ def import_entity(
                 else None
             )
 
-            if local_payload and instrument_id and entity_id:
+            if local_matches and instrument_id and entity_id:
                 job_id = _enqueue_missing_price(
                     db,
                     local_payload,

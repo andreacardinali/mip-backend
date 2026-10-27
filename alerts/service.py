@@ -18,9 +18,9 @@ def _candidate(r: dict[str, Any]) -> AlertCandidate:
         str(r["symbol"]),
         str(r.get("direction") or "NEUTRAL"),
         str(r["origin"]) if r.get("origin") else None,
-        float(r.get("composite_score") or 0),
-        float(r.get("consensus_score") or 0),
-        float(r.get("conflict_score") or 0),
+        float(r["composite_score"]) / 100,
+        float(r["consensus_score"]) / 100,
+        float(r["conflict_score"]) / 100,
         int(r.get("strategy_count") or 1),
         str(r["verdict"]) if r.get("verdict") else None,
         str(r["summary"]) if r.get("summary") else None,
@@ -41,7 +41,7 @@ def evaluate_and_enqueue_market_alerts(
             "matches": 0,
             "enqueued": 0,
         }
-    rows = MarketScreenerRepository(db).list_ranking_inputs(limit=max_candidates)
+    rows = MarketScreenerRepository(db).list_alert_candidates(limit=max_candidates)
     candidates = [_candidate(dict(r)) for r in rows]
     matches = evaluate_alerts(rules, candidates)
     queue = NotificationQueue(db, enabled=notifications_enabled)

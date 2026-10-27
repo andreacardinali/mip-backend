@@ -2397,8 +2397,7 @@ CREATE FUNCTION public.sp_enqueue_market_price_refresh(p_instrument_id uuid, p_s
         status =
             CASE
                 WHEN
-                    market_price_refresh_queue.status =
-                    'PROCESSING'
+                    market_price_refresh_queue.status IN ('PENDING', 'PROCESSING', 'RETRY')
                 THEN
                     market_price_refresh_queue.status
                 ELSE
@@ -2408,8 +2407,7 @@ CREATE FUNCTION public.sp_enqueue_market_price_refresh(p_instrument_id uuid, p_s
         attempt_count =
             CASE
                 WHEN
-                    market_price_refresh_queue.status =
-                    'PROCESSING'
+                    market_price_refresh_queue.status IN ('PENDING', 'PROCESSING', 'RETRY')
                 THEN
                     market_price_refresh_queue.attempt_count
                 ELSE
@@ -2419,8 +2417,7 @@ CREATE FUNCTION public.sp_enqueue_market_price_refresh(p_instrument_id uuid, p_s
         next_attempt_at =
             CASE
                 WHEN
-                    market_price_refresh_queue.status =
-                    'PROCESSING'
+                    market_price_refresh_queue.status IN ('PENDING', 'PROCESSING', 'RETRY')
                 THEN
                     market_price_refresh_queue.next_attempt_at
                 ELSE
@@ -2449,7 +2446,11 @@ CREATE FUNCTION public.sp_enqueue_market_price_refresh(p_instrument_id uuid, p_s
                     NULL
             END,
 
-        last_error = NULL,
+        last_error = CASE
+            WHEN market_price_refresh_queue.status IN ('PENDING', 'PROCESSING', 'RETRY')
+            THEN market_price_refresh_queue.last_error
+            ELSE NULL
+        END,
         completed_at = NULL,
         updated_at = now()
 
@@ -2834,7 +2835,11 @@ WITH portfolio_rows AS
         SUM(p.quantity)::numeric AS quantity,
         SUM(
             COALESCE(
-                p.quantity * i.last_price,
+                public.fx_convert(
+                    p.quantity * i.last_price,
+                    i.currency_code,
+                    u.reporting_currency
+                ),
                 0
             )
         )::numeric AS market_value
@@ -3002,7 +3007,11 @@ WITH user_entities AS (
         sum(p.quantity)::numeric AS quantity,
         sum(
             coalesce(
-                p.quantity * i.last_price,
+                public.fx_convert(
+                    p.quantity * i.last_price,
+                    i.currency_code,
+                    u.reporting_currency
+                ),
                 0
             )
         )::numeric AS market_value,
@@ -3173,6 +3182,141 @@ $$;
 -- Name: sp_get_portfolio_summary(uuid, uuid); Type: FUNCTION; Schema: public; Owner: -
 --
 
+CREATE FUNCTION public.sp_get_portfolio_pricing_states(p_user_id uuid, p_portfolio_id uuid DEFAULT NULL)
+RETURNS TABLE(portfolio_id uuid, total_position_count bigint, pending_price_count bigint, price_refresh_pending boolean)
+        LANGUAGE sql STABLE
+        AS $$
+        SELECT pf.portfolio_id,
+                     COUNT(pos.position_id),
+                     COUNT(pos.position_id) FILTER (WHERE i.last_price IS NULL),
+                     COALESCE(BOOL_OR(q.status IN ('PENDING', 'PROCESSING')), false)
+        FROM public.portfolios pf
+        LEFT JOIN public.positions pos ON pos.portfolio_id = pf.portfolio_id
+        LEFT JOIN public.instruments i ON i.instrument_id = pos.instrument_id
+        LEFT JOIN public.market_price_refresh_queue q ON q.instrument_id = pos.instrument_id
+        WHERE pf.user_id = p_user_id
+            AND (p_portfolio_id IS NULL OR pf.portfolio_id = p_portfolio_id)
+        GROUP BY pf.portfolio_id;
+$$;
+
+
+CREATE FUNCTION public.sp_set_position_cost_basis(p_position_id uuid, p_user_id uuid, p_amount numeric, p_currency character) RETURNS uuid
+    LANGUAGE sql
+    AS $$
+    WITH updated AS (
+        UPDATE public.positions pos
+        SET cost_basis_amount = p_amount, cost_basis_currency = p_currency
+        WHERE pos.position_id = p_position_id
+          AND EXISTS (
+              SELECT 1 FROM public.portfolios pf
+              WHERE pf.portfolio_id = pos.portfolio_id AND pf.user_id = p_user_id
+          )
+        RETURNING pos.position_id
+    )
+    SELECT position_id FROM updated;
+$$;
+
+
+CREATE FUNCTION public.sp_update_user_preferences(p_user_id uuid, p_reporting_currency character) RETURNS jsonb
+    LANGUAGE sql
+    AS $$
+    WITH updated AS (
+        UPDATE public.users
+        SET reporting_currency = p_reporting_currency, updated_at = now()
+        WHERE user_id = p_user_id
+        RETURNING user_id, username, email, is_active, reporting_currency
+    )
+    SELECT to_jsonb(updated) FROM updated;
+$$;
+
+
+CREATE FUNCTION public.sp_market_screener_list_alert_candidates(p_limit integer) RETURNS SETOF jsonb
+    LANGUAGE sql STABLE
+    AS $$
+    SELECT to_jsonb(candidate)
+    FROM (
+        SELECT signal_id, instrument_id, symbol, direction, origin,
+               composite_score, consensus_score, conflict_score,
+               strategy_count, verdict, summary, evidence
+        FROM public.market_screener_opportunities
+        WHERE active
+        ORDER BY ranking_position, opportunity_id
+        LIMIT p_limit
+    ) candidate;
+$$;
+
+
+CREATE FUNCTION public.sp_scheduler_try_job_lock(p_job_id uuid) RETURNS boolean
+    LANGUAGE sql
+    AS $$
+    SELECT pg_try_advisory_xact_lock(hashtextextended('mip.scheduler.' || p_job_id::text, 0));
+$$;
+
+
+CREATE FUNCTION public.sp_scheduler_list_job_ids() RETURNS SETOF uuid
+    LANGUAGE sql STABLE
+    AS $$
+    SELECT job_id FROM public.scheduler_jobs;
+$$;
+
+
+CREATE FUNCTION public.sp_scheduler_defer_job_run_request(p_job_run_id uuid) RETURNS void
+    LANGUAGE sql
+    AS $$
+    UPDATE public.scheduler_manual_run_requests
+    SET status = 'PENDING', claimed_at = NULL
+    WHERE job_run_id = p_job_run_id AND status = 'PROCESSING';
+$$;
+
+
+CREATE FUNCTION public.sp_scheduler_recover_job_runs(p_job_id uuid) RETURNS integer
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_recovered integer;
+BEGIN
+    IF NOT public.sp_scheduler_try_job_lock(p_job_id) THEN
+        RETURN 0;
+    END IF;
+
+    UPDATE public.scheduler_job_runs
+    SET status = 'FAILED', completed_at = now(),
+        error_message = 'Recovered orphaned run during scheduler startup'
+    WHERE job_id = p_job_id AND status = 'RUNNING';
+    GET DIAGNOSTICS v_recovered = ROW_COUNT;
+
+    UPDATE public.scheduler_manual_run_requests request
+    SET status = 'FAILED', completed_at = now(),
+        error_message = 'Recovered orphaned manual run'
+    WHERE job_id = p_job_id AND status = 'PROCESSING'
+      AND EXISTS (
+          SELECT 1 FROM public.scheduler_job_runs run
+          WHERE run.job_run_id = request.job_run_id
+      );
+
+    UPDATE public.scheduler_manual_run_requests
+    SET status = 'PENDING', claimed_at = NULL
+    WHERE job_id = p_job_id AND status = 'PROCESSING'
+      AND claimed_at < now() - interval '5 minutes';
+    RETURN v_recovered;
+END;
+$$;
+
+
+CREATE FUNCTION public.position_cost_basis(p_quantity numeric, p_avg_price numeric, p_listing_currency character, p_cost_amount numeric, p_cost_currency character, p_target_currency character) RETURNS numeric
+    LANGUAGE sql IMMUTABLE
+    AS $$
+    SELECT CASE
+        WHEN p_cost_amount IS NOT NULL
+         AND upper(btrim(p_cost_currency)) = upper(btrim(p_target_currency))
+        THEN p_cost_amount
+        WHEN upper(btrim(p_listing_currency)) = upper(btrim(p_target_currency))
+        THEN p_quantity * p_avg_price
+        ELSE NULL
+    END;
+$$;
+
+
 CREATE FUNCTION public.sp_get_portfolio_summary(p_portfolio_id uuid, p_user_id uuid) RETURNS TABLE(portfolio_currency character, reporting_currency character, invested_value_native numeric, portfolio_value_native numeric, profit_loss_native numeric, invested_value_reporting numeric, portfolio_value_reporting numeric, profit_loss_reporting numeric, profit_loss_pct numeric, positions_count bigint)
     LANGUAGE sql STABLE
     AS $$
@@ -3181,22 +3325,20 @@ WITH portfolio_data AS (
         pf.base_currency,
         u.reporting_currency,
         COUNT(pos.position_id) AS positions_count,
-        COALESCE(
-            SUM(
-                CASE
-                    WHEN pos.position_id IS NULL
-                      OR pos.avg_price IS NULL
-                      OR NULLIF(BTRIM(i.currency_code), '') IS NULL
-                    THEN 0
-                    ELSE public.fx_convert(
-                        pos.quantity * pos.avg_price,
-                        i.currency_code,
-                        pf.base_currency
-                    )
-                END
-            ),
-            0
-        )::numeric AS invested_value_native,
+        CASE WHEN COUNT(pos.position_id) = COUNT(public.position_cost_basis(
+            pos.quantity, pos.avg_price, i.currency_code,
+            pos.cost_basis_amount, pos.cost_basis_currency, pf.base_currency
+        )) THEN COALESCE(SUM(public.position_cost_basis(
+            pos.quantity, pos.avg_price, i.currency_code,
+            pos.cost_basis_amount, pos.cost_basis_currency, pf.base_currency
+        )), 0) ELSE NULL END::numeric AS invested_value_native,
+        CASE WHEN COUNT(pos.position_id) = COUNT(public.position_cost_basis(
+            pos.quantity, pos.avg_price, i.currency_code,
+            pos.cost_basis_amount, pos.cost_basis_currency, u.reporting_currency
+        )) THEN COALESCE(SUM(public.position_cost_basis(
+            pos.quantity, pos.avg_price, i.currency_code,
+            pos.cost_basis_amount, pos.cost_basis_currency, u.reporting_currency
+        )), 0) ELSE NULL END::numeric AS invested_value_reporting,
         COALESCE(
             SUM(
                 CASE
@@ -3231,6 +3373,7 @@ totals AS (
         base_currency,
         reporting_currency,
         invested_value_native,
+        invested_value_reporting,
         portfolio_value_native,
         portfolio_value_native - invested_value_native AS profit_loss_native,
         positions_count
@@ -3242,16 +3385,7 @@ SELECT
     invested_value_native,
     portfolio_value_native,
     profit_loss_native,
-    CASE
-        WHEN NULLIF(BTRIM(base_currency), '') IS NULL
-          OR NULLIF(BTRIM(reporting_currency), '') IS NULL
-        THEN NULL
-        ELSE public.fx_convert(
-            invested_value_native,
-            base_currency,
-            reporting_currency
-        )
-    END,
+    invested_value_reporting,
     CASE
         WHEN NULLIF(BTRIM(base_currency), '') IS NULL
           OR NULLIF(BTRIM(reporting_currency), '') IS NULL
@@ -3267,10 +3401,10 @@ SELECT
           OR NULLIF(BTRIM(reporting_currency), '') IS NULL
         THEN NULL
         ELSE public.fx_convert(
-            profit_loss_native,
+            portfolio_value_native,
             base_currency,
             reporting_currency
-        )
+        ) - invested_value_reporting
     END,
     CASE
         WHEN invested_value_native > 0
@@ -3312,16 +3446,13 @@ FROM portfolios pf
 LEFT JOIN LATERAL (
     SELECT
         COUNT(pos.position_id) AS positions_count,
-        COALESCE(SUM(
-            CASE
-                WHEN pos.avg_price IS NULL THEN 0
-                ELSE fx_convert(
-                    pos.quantity * pos.avg_price,
-                    i.currency_code,
-                    pf.base_currency
-                )
-            END
-        ), 0)::numeric AS invested_value,
+        CASE WHEN COUNT(pos.position_id) = COUNT(public.position_cost_basis(
+            pos.quantity, pos.avg_price, i.currency_code,
+            pos.cost_basis_amount, pos.cost_basis_currency, pf.base_currency
+        )) THEN COALESCE(SUM(public.position_cost_basis(
+            pos.quantity, pos.avg_price, i.currency_code,
+            pos.cost_basis_amount, pos.cost_basis_currency, pf.base_currency
+        )), 0) ELSE NULL END::numeric AS invested_value,
         COALESCE(SUM(
             CASE
                 WHEN i.last_price IS NULL THEN 0
@@ -3414,6 +3545,8 @@ CREATE FUNCTION public.sp_get_positions_with_pricing(p_portfolio_id uuid, p_user
     SELECT
         to_jsonb(p)
         || jsonb_build_object(
+            'cost_basis_amount', pos.cost_basis_amount,
+            'cost_basis_currency', pos.cost_basis_currency,
             'price_as_of', i.price_as_of,
             'price_age_hours',
                 CASE
@@ -3441,6 +3574,7 @@ CREATE FUNCTION public.sp_get_positions_with_pricing(p_portfolio_id uuid, p_user
             'price_refresh_error', q.last_error
         )
     FROM public.sp_get_positions(p_portfolio_id, p_user_id) p
+    JOIN public.positions pos ON pos.position_id = p.position_id
     JOIN public.instruments i
       ON i.instrument_id = p.instrument_id
     LEFT JOIN public.market_price_refresh_queue q
@@ -4094,8 +4228,13 @@ SELECT
 FROM watchlist_items wi
 JOIN entities e
     ON e.entity_id = wi.entity_id
-LEFT JOIN instruments i
-    ON i.entity_id = e.entity_id
+LEFT JOIN LATERAL (
+    SELECT listing.*
+    FROM instruments listing
+    WHERE listing.entity_id = e.entity_id
+    ORDER BY listing.instrument_id
+    LIMIT 1
+) i ON true
 WHERE wi.watchlist_id = p_watchlist_id
   AND EXISTS (
       SELECT 1
@@ -4149,9 +4288,7 @@ CREATE FUNCTION public.sp_get_watchlist_items_with_pricing(p_watchlist_id uuid, 
         )
     FROM public.sp_get_watchlist_items(p_watchlist_id, p_user_id) w
     LEFT JOIN public.instruments i
-      ON i.entity_id = w.entity_id
-     AND i.symbol = w.symbol
-     AND i.exchange IS NOT DISTINCT FROM w.exchange
+            ON i.instrument_id = w.instrument_id
     LEFT JOIN public.market_price_refresh_queue q
       ON q.instrument_id = i.instrument_id;
 $$;
@@ -9725,6 +9862,16 @@ BEGIN
     ELSE
         UPDATE public.positions
         SET
+                        cost_basis_amount = CASE
+                                WHEN quantity IS DISTINCT FROM p_quantity
+                                    OR avg_price IS DISTINCT FROM p_avg_price
+                                    OR instrument_id IS DISTINCT FROM p_instrument_id
+                                THEN NULL ELSE cost_basis_amount END,
+                        cost_basis_currency = CASE
+                                WHEN quantity IS DISTINCT FROM p_quantity
+                                    OR avg_price IS DISTINCT FROM p_avg_price
+                                    OR instrument_id IS DISTINCT FROM p_instrument_id
+                                THEN NULL ELSE cost_basis_currency END,
             instrument_id = p_instrument_id,
             quantity = p_quantity,
             avg_price = p_avg_price,
@@ -9977,14 +10124,20 @@ BEGIN
 	                p_target_price,
 	            notes = p_notes
 	        WHERE watchlist_item_id =
-	              p_watchlist_item_id;
+                  p_watchlist_item_id
+              AND watchlist_id = p_watchlist_id
+            RETURNING watchlist_item_id
+            INTO v_watchlist_item_id;
 	
-	        v_watchlist_item_id :=
-	            p_watchlist_item_id;
+            IF v_watchlist_item_id IS NULL THEN
+                RAISE EXCEPTION 'Watchlist item not found or not accessible'
+                    USING ERRCODE = '23503';
+            END IF;
 	
 	    END IF;
 	ELSE
-		RAISE EXCEPTION 'Watchlist not found';	
+        RAISE EXCEPTION 'Watchlist not found or not accessible'
+            USING ERRCODE = '23503';
 	END IF;
 
     RETURN v_watchlist_item_id;
@@ -11316,10 +11469,17 @@ CREATE TABLE public.positions (
     instrument_id uuid NOT NULL,
     quantity numeric(20,8) NOT NULL,
     avg_price numeric(20,8),
+    cost_basis_amount numeric(20,8),
+    cost_basis_currency character(3),
     opened_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    notes text
+    notes text,
+    CONSTRAINT ck_positions_cost_basis CHECK (
+        (cost_basis_amount IS NULL AND cost_basis_currency IS NULL)
+        OR (cost_basis_amount IS NOT NULL AND cost_basis_amount >= 0
+            AND cost_basis_currency IS NOT NULL)
+    )
 );
 
 
