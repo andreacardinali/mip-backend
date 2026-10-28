@@ -17,7 +17,32 @@ from market_time.normalization import TemporalNormalizationError, as_utc
 from market_time.repository import SQLExchangeHoursRepository
 from market_time.service import MarketTimeService
 from scripts.apply_market_time import migration_statements
-from scripts.apply_market_time_exchange_mappings import mapping_sql, validate_calendars
+from scripts.apply_market_time_exchange_mappings import (
+    mapping_sql,
+    validate_calendars,
+)
+
+pytestmark = [
+    pytest.mark.filterwarnings(
+        r"ignore:^Series\.values returning an ndarray that drops timezone information "
+        r"for DatetimeTZDtype is deprecated\.:Warning:^pandas\.core\.series$"
+    ),
+    pytest.mark.filterwarnings(
+        r"ignore:^DatetimeIndex\.weekday is deprecated and will be removed in a "
+        r"future version\.:Warning:^exchange_calendars\."
+        r"(exchange_calendar_xhkg|utils\.pandas_utils)$"
+    ),
+    pytest.mark.filterwarnings(
+        r"ignore:^The 'generic' unit for NumPy timedelta is deprecated, and will "
+        r"raise an error in the future\.:DeprecationWarning:"
+        r"^exchange_calendars\.exchange_calendar_xhkg$"
+    ),
+    pytest.mark.filterwarnings(
+        r"ignore:^The anyio\.abc\.BlockingPortal alias is deprecated, use "
+        r"anyio\.from_thread\.BlockingPortal instead\.:DeprecationWarning:"
+        r"^starlette\.testclient$"
+    ),
+]
 
 
 @pytest.fixture
