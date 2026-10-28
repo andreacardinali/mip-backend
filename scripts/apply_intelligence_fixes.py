@@ -61,7 +61,9 @@ def main() -> None:
 
     with engine.begin() as connection:
         for statement in statements:
-            connection.exec_driver_sql(statement)
+            connection.exec_driver_sql(
+                statement, execution_options={"no_parameters": True}
+            )
     print("Intelligence fixes applied successfully.")
 
 

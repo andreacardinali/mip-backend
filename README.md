@@ -22,6 +22,10 @@ from this checkout. The upgrade is transactional and safe to repeat; no legacy
 historical acquisition costs are guessed or backfilled. Keep this checkout with
 the deployment record because the migration reads its schema definitions.
 
+The runner executes DDL with `no_parameters=True`, preserving literal `%` markers
+inside PL/pgSQL without psycopg interpreting them as driver placeholders. A failed
+upgrade rolls back its transaction; rerun the corrected runner after a failure.
+
 Apply the migration before starting the updated backend. Restart the scheduler
 with the price-refresh dispatcher enabled: `/api/market-data/prices/refresh` now
 returns HTTP 202 after enqueueing work, rather than processing the global queue
