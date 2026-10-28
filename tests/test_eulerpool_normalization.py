@@ -28,8 +28,8 @@ from scripts.sync_exchange_holidays import acquire
             "reason=unexpected_payload_type payload_type=dict",
         ),
         (
-            {"json": [{"code": "XNYS"}, {"code": "secret-token"}]},
-            "reason=invalid_exchange_code row_index=1 code_type=str code_length=12",
+            {"json": [{"code": "secret-token"}]},
+            "reason=invalid_exchange_code row_index=0 code_type=str code_length=12",
         ),
         (
             {"json": [{"code": 123}]},
@@ -55,6 +55,59 @@ def test_holiday_catalog_parse_failures_have_safe_diagnostics(
     assert "secret-token" not in caplog.text
     assert "secret-token" not in str(failure.value)
     session_factory.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "invalid_code", ["ABCDE", "secret-token", 123, " XNY ", "ABCDE\nwarning"]
+)
+def test_holiday_job_skips_invalid_catalog_codes(invalid_code, caplog):
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json=[
+                {"code": "XNYS"},
+                {"code": invalid_code},
+                {"exchange_code": "XETR"},
+            ],
+        )
+
+    targets = [
+        {"exchange": "NYSE", "exchange_code": "XNYS"},
+        {"exchange": "XETR", "exchange_code": "XETR"},
+        {"exchange": "unsupported", "exchange_code": "ABCDE"},
+    ]
+    session_factory = Mock(side_effect=[MagicMock(), MagicMock()])
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler)) as client,
+        patch("jobs.eulerpool_exchange_holidays.acquire") as fetch,
+        patch("jobs.eulerpool_exchange_holidays.SQLHolidayRepository") as repository,
+    ):
+        provider = EulerpoolProvider("secret-token", client=client)
+        result = sync_holidays(provider, targets, session_factory)
+        catalog = provider.get_exchanges()
+        assert [item.code for item in catalog] == ["XNYS", "XETR"]
+        assert [call.args[1] for call in fetch.call_args_list] == ["XNYS", "XETR"]
+        assert repository.return_value.save.call_count == 2
+        assert not client.is_closed
+    assert result["status"] == "PARTIAL"
+    assert result["upserted"] == 2
+    assert result["failed"] == 1
+    assert result["exchanges"][2]["reason"] == "unresolved_exchange_mapping"
+    assert session_factory.call_count == 2
+    assert len(requests) == 1
+    assert "reason=invalid_exchange_code row_index=1" in caplog.text
+    assert "Exchange catalog entry skipped" in caplog.text
+    assert "secret-token" not in caplog.text
+    if isinstance(invalid_code, str):
+        expected_code = (
+            "[REDACTED]" if invalid_code == "secret-token" else invalid_code
+        )
+        assert f"raw_code={expected_code!r}" in caplog.text
+    else:
+        assert "raw_code=" not in caplog.text
 
 
 def test_exchange_catalog_normalization_and_cache():

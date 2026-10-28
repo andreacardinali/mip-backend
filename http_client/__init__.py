@@ -9,6 +9,7 @@ from http_client.retry import (
     RetryPolicy,
     create_http_client,
     get_http_status,
+    redact_text,
     request_with_retry,
 )
 
@@ -23,5 +24,6 @@ __all__ = [
     "RetryPolicy",
     "create_http_client",
     "get_http_status",
+    "redact_text",
     "request_with_retry",
 ]

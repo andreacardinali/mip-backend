@@ -70,6 +70,13 @@ def _redact_text(text: str, secrets: tuple[str, ...]) -> str:
     return SENSITIVE_ASSIGNMENT.sub(r"\1[REDACTED]", text)
 
 
+def redact_text(text: str, *, sensitive_values: tuple[str, ...] = ()) -> str:
+    secrets = {value for value in sensitive_values if value}
+    for value in tuple(secrets):
+        secrets.update({quote(value, safe=""), quote_plus(value)})
+    return _redact_text(text, tuple(sorted(secrets, key=len, reverse=True)))
+
+
 def _request_secrets(
     client: httpx.Client,
     url: str,

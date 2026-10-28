@@ -6,6 +6,7 @@ from http_client import (
     HttpStatusError,
     RetryPolicy,
     create_http_client,
+    redact_text,
     request_with_retry,
 )
 from market_data.capabilities import (
@@ -536,6 +537,7 @@ class EulerpoolProvider:
                 )
                 raise ValueError("Exchange catalog must be a list")
             exchanges = []
+            invalid_codes = 0
             for index, item in enumerate(payload):
                 if not isinstance(item, dict):
                     continue
@@ -545,15 +547,23 @@ class EulerpoolProvider:
                 try:
                     code = normalize_exchange_code(raw_code)
                 except ValueError:
-                    logger.error(
-                        "Exchange catalog parsing failed endpoint=/market/exchanges "
+                    invalid_codes += 1
+                    code_detail = ""
+                    if isinstance(raw_code, str):
+                        safe_code = redact_text(
+                            raw_code, sensitive_values=(self.api_key,)
+                        )
+                        code_detail = f" raw_code={safe_code!r}"
+                    logger.warning(
+                        "Exchange catalog entry skipped endpoint=/market/exchanges "
                         "reason=invalid_exchange_code row_index=%s code_type=%s "
-                        "code_length=%s",
+                        "code_length=%s%s",
                         index,
                         type(raw_code).__name__,
                         len(raw_code) if isinstance(raw_code, str) else None,
+                        code_detail,
                     )
-                    raise
+                    continue
                 exchanges.append(
                     ExchangeReference(
                         code=code,
@@ -563,6 +573,8 @@ class EulerpoolProvider:
                         source=self.name,
                     )
                 )
+            if invalid_codes and not exchanges:
+                raise ValueError("Exchange catalog contains no valid exchange codes")
             self._exchange_cache = exchanges
         return tuple(self._exchange_cache)
 
