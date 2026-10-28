@@ -102,7 +102,9 @@ class FMPProvider:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self._quota_guard = FMPQuotaGuard(self.api_key, quota_cooldown_seconds)
-        self.retry_policy = self._quota_guard.apply_to_policy(retry_policy or RetryPolicy())
+        self.retry_policy = self._quota_guard.apply_to_policy(
+            retry_policy or RetryPolicy()
+        )
         self._client = client
 
     def search(self, query, *, limit=20):

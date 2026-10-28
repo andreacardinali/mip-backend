@@ -89,7 +89,9 @@ def test_fmp_quota_stops_retries_and_blocks_new_instances(quota_clock, caplog):
 
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
         provider = FMPProvider(
-            "secret-api-key", client=client, retry_policy=RetryPolicy(max_retries=3),
+            "secret-api-key",
+            client=client,
+            retry_policy=RetryPolicy(max_retries=3),
             quota_cooldown_seconds=60,
         )
         with pytest.raises(ProviderRateLimitError) as error:
@@ -116,12 +118,19 @@ def test_fmp_normal_429_still_retries_without_suspension(quota_clock, payload):
 
     def handler(request):
         calls.append(request)
-        return httpx.Response(429, json=payload) if len(calls) == 1 else httpx.Response(200, json=[])
+        return (
+            httpx.Response(429, json=payload)
+            if len(calls) == 1
+            else httpx.Response(200, json=[])
+        )
 
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
         provider = FMPProvider(
-            "ordinary-key", client=client,
-            retry_policy=RetryPolicy(max_retries=1, base_delay_seconds=0, jitter_seconds=0),
+            "ordinary-key",
+            client=client,
+            retry_policy=RetryPolicy(
+                max_retries=1, base_delay_seconds=0, jitter_seconds=0
+            ),
         )
         assert provider.search("GOOG") == []
         assert provider.search("GOOG") == []
@@ -150,8 +159,11 @@ def test_fmp_keeps_caller_retry_filter(quota_clock):
 
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
         provider = FMPProvider(
-            "caller-filter-key", client=client,
-            retry_policy=RetryPolicy(max_retries=3, response_retry_filter=lambda _: False),
+            "caller-filter-key",
+            client=client,
+            retry_policy=RetryPolicy(
+                max_retries=3, response_retry_filter=lambda _: False
+            ),
         )
         with pytest.raises(fmp.ProviderTemporaryError):
             provider.search("GOOG")
@@ -171,10 +183,13 @@ def test_fmp_job_client_shares_cooldown_with_provider(quota_clock, monkeypatch):
 
     values = {"FMP_QUOTA_COOLDOWN_SECONDS": "30", "FMP_HTTP_MAX_RETRIES": "3"}
     monkeypatch.setattr(
-        job_client, "settings",
+        job_client,
+        "settings",
         SimpleNamespace(FMP_API_KEY="shared-key", get=values.get),
     )
-    with httpx.Client(transport=httpx.MockTransport(handler), base_url="https://example.test") as client:
+    with httpx.Client(
+        transport=httpx.MockTransport(handler), base_url="https://example.test"
+    ) as client:
         monkeypatch.setattr(job_client, "create_http_client", lambda **kwargs: client)
         jobs = job_client.FMPClient()
         with pytest.raises(httpx.HTTPStatusError) as error:
@@ -192,11 +207,14 @@ def test_fmp_job_client_shares_cooldown_with_provider(quota_clock, monkeypatch):
 
 
 def test_fmp_quota_activates_without_retryable_429(quota_clock):
-    with httpx.Client(transport=httpx.MockTransport(
-        lambda request: httpx.Response(429, json={"Error Message": "Limit Reach ."})
-    )) as client:
+    with httpx.Client(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(429, json={"Error Message": "Limit Reach ."})
+        )
+    ) as client:
         provider = FMPProvider(
-            "no-retry-key", client=client,
+            "no-retry-key",
+            client=client,
             retry_policy=RetryPolicy(retryable_status_codes=frozenset()),
         )
         with pytest.raises(ProviderRateLimitError):

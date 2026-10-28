@@ -43,8 +43,12 @@ def test_response_filter_stops_retry_and_preserves_status():
     with httpx.Client(transport=transport) as client:
         with pytest.raises(httpx.HTTPStatusError) as error:
             request_with_retry(
-                client, "GET", "https://example.test",
-                policy=RetryPolicy(max_retries=3, response_retry_filter=lambda _: False),
+                client,
+                "GET",
+                "https://example.test",
+                policy=RetryPolicy(
+                    max_retries=3, response_retry_filter=lambda _: False
+                ),
                 sleep=sleeps.append,
             )
     assert error.value.response.status_code == 429
