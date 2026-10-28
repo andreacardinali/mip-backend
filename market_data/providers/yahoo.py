@@ -120,8 +120,6 @@ class YahooProvider:
                     name=str(row.get("longname") or row.get("shortname") or symbol),
                     instrument_type=_instrument_type(row),
                     currency=row.get("currency") or None,
-                    exchange_code=row.get("exchange") or None,
-                    exchange_name=row.get("exchDisp") or None,
                     source=self.name,
                 )
             )

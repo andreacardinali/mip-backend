@@ -48,9 +48,36 @@ class YahooProviderSearchTest(unittest.TestCase):
         self.assertEqual(results[0].symbol, "1GOOGL.MI")
         self.assertEqual(results[0].name, "Alphabet Inc")
         self.assertEqual(results[0].currency, "EUR")
-        self.assertEqual(results[0].exchange_code, "MIL")
-        self.assertEqual(results[0].exchange_name, "Milan")
+        self.assertIsNone(results[0].exchange_code)
+        self.assertIsNone(results[0].exchange_name)
         self.assertEqual(results[0].source, "yahoo")
+
+    def test_search_does_not_export_unreliable_exchange_metadata(self):
+        def handler(request):
+            return httpx.Response(
+                200,
+                request=request,
+                json={
+                    "quotes": [
+                        {
+                            "symbol": "AAPL",
+                            "shortname": "Apple Inc",
+                            "currency": "USD",
+                            "exchange": "US",
+                            "exchDisp": "United States",
+                        }
+                    ]
+                },
+            )
+
+        with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+            result = YahooProvider(client=client).search("AAPL")[0]
+
+        self.assertIsNone(result.exchange_code)
+        self.assertIsNone(result.exchange_name)
+        self.assertIsNone(result.to_dict()["exchange"])
+        self.assertIsNone(result.to_dict()["exchangeFullName"])
+        self.assertEqual(result.currency, "USD")
 
     def test_search_returns_empty_list_for_empty_yahoo_result(self):
         def handler(request):
