@@ -23,6 +23,7 @@ from market_data.models import (
     PriceBar,
     PricePoint,
 )
+from market_time.holidays import normalize_exchange_code, normalize_holidays
 
 _PROFILE_TYPES = frozenset(
     {
@@ -511,44 +512,48 @@ class EulerpoolProvider:
             else None
         )
 
-    def _resolve_exchange(self, name):
-        if not name:
-            return None
+    def get_exchanges(self):
         if self._exchange_cache is None:
             payload = self._get("/market/exchanges")
+            if not isinstance(payload, list):
+                raise ValueError("Exchange catalog must be a list")
             self._exchange_cache = [
                 ExchangeReference(
-                    code=item["code"],
+                    code=normalize_exchange_code(
+                        item.get("exchange_code") or item["code"]
+                    ),
                     name=item.get("name"),
                     country_code=item.get("country"),
                     timezone=item.get("timezone"),
                     source=self.name,
                 )
                 for item in payload
-                if item.get("code")
+                if isinstance(item, dict)
+                and (item.get("exchange_code") or item.get("code"))
             ]
-        needle = name.strip().lower()
-        aliases = {
-            "milan": "xmil",
-            "nasdaq": "xnas",
-            "new york stock exchange": "xnys",
-            "frankfurt": "xfra",
-            "stuttgart": "xstu",
-            "xetra": "xetr",
-            "paris": "xpar",
-            "euronext paris": "xpar",
-            "london": "xlon",
-            "amsterdam": "xams",
-        }
-        code = aliases.get(needle)
-        for exchange in self._exchange_cache:
-            if (
-                exchange.code.lower() == needle
-                or (code and exchange.code.lower() == code)
-                or needle in (exchange.name or "").lower()
-            ):
-                return exchange
-        return None
+        return tuple(self._exchange_cache)
+
+    def get_exchange_holidays(self, exchange_code):
+        code = normalize_exchange_code(exchange_code)
+        payload = self._get(f"/market/holidays/{quote(code, safe='')}")
+        return normalize_holidays(code, payload, source=self.name)
+
+    def _resolve_exchange(self, name):
+        if not name:
+            return None
+        needle = name.strip().casefold()
+        exchanges = self.get_exchanges()
+        codes = [
+            exchange for exchange in exchanges if exchange.code.casefold() == needle
+        ]
+        if len(codes) == 1:
+            return codes[0]
+        matches = [
+            exchange
+            for exchange in exchanges
+            if (exchange.name or "").strip().casefold() == needle
+        ]
+        return matches[0] if not codes and len(matches) == 1 else None
 
     def _get(self, path, params=None):
         owns_client = self._client is None

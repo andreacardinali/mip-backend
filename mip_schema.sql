@@ -9421,6 +9421,80 @@ $$;
 -- Name: sp_upsert_exchange(character varying, character varying); Type: FUNCTION; Schema: public; Owner: -
 --
 
+CREATE FUNCTION public.sp_store_exchange_holidays(p_exchange text, p_exchange_code text, p_source text, p_provider_exchange text, p_as_of date, p_updated_at timestamp with time zone, p_fetched_at timestamp with time zone, p_payload jsonb) RETURNS uuid
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_system_id uuid;
+    v_count integer;
+    v_snapshot_id uuid;
+    v_payload jsonb;
+BEGIN
+    IF p_exchange_code !~ '^[A-Z0-9]{4}$' OR p_exchange_code IS NULL
+        OR p_provider_exchange IS NULL OR btrim(p_provider_exchange) = ''
+        OR p_source IS NULL OR p_as_of IS NULL OR p_updated_at IS NULL
+        OR p_fetched_at IS NULL OR p_payload IS NULL
+        OR jsonb_typeof(p_payload) IS DISTINCT FROM 'object' THEN
+        RAISE EXCEPTION 'Invalid holiday snapshot metadata';
+    END IF;
+    SELECT count(*) INTO v_count FROM public.external_systems
+    WHERE lower(code) = lower(p_source) AND active;
+    IF v_count <> 1 THEN
+        RAISE EXCEPTION 'Expected one active external system for %', p_source;
+    END IF;
+    SELECT system_id INTO v_system_id FROM public.external_systems
+    WHERE lower(code) = lower(p_source) AND active;
+    PERFORM 1 FROM public.exchanges WHERE exchange = p_exchange;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Existing exchange row required: %', p_exchange;
+    END IF;
+    LOCK TABLE public.exchange_source_mappings IN SHARE ROW EXCLUSIVE MODE;
+    IF EXISTS (
+        SELECT 1 FROM public.exchange_source_mappings
+        WHERE system_id = v_system_id AND exchange <> p_exchange
+            AND lower(source_exchange_code) IN
+                (lower(p_exchange_code), lower(p_provider_exchange))
+    ) THEN
+        RAISE EXCEPTION 'Provider exchange identity conflicts with existing mapping';
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM public.exchange_holiday_snapshots
+        WHERE (exchange_code = p_exchange_code AND exchange <> p_exchange)
+            OR (exchange = p_exchange AND exchange_code <> p_exchange_code)
+    ) THEN
+        RAISE EXCEPTION 'Canonical exchange code already belongs to another row';
+    END IF;
+    SELECT snapshot_id, raw_payload INTO v_snapshot_id, v_payload
+    FROM public.exchange_holiday_snapshots
+    WHERE exchange_code = p_exchange_code AND source = lower(p_source)
+        AND provider_updated_at = p_updated_at;
+    IF FOUND THEN
+        IF v_payload IS DISTINCT FROM p_payload THEN
+            RAISE EXCEPTION 'Provider changed payload without changing its version';
+        END IF;
+        RETURN v_snapshot_id;
+    END IF;
+    INSERT INTO public.exchange_holiday_snapshots
+        (exchange, exchange_code, source, provider_exchange, as_of,
+         provider_updated_at, fetched_at, raw_payload)
+    VALUES (p_exchange, p_exchange_code, lower(p_source), p_provider_exchange,
+            p_as_of, p_updated_at, p_fetched_at, p_payload)
+    RETURNING snapshot_id INTO v_snapshot_id;
+    INSERT INTO public.exchange_source_mappings
+        (exchange, system_id, source_exchange_code, source_exchange_name,
+         observed_at, raw_payload)
+    SELECT DISTINCT p_exchange, v_system_id, identifier, p_provider_exchange,
+        p_fetched_at, jsonb_build_object('exchange_code', p_exchange_code,
+            'provider_exchange', p_provider_exchange,
+            'endpoint', '/market/holidays/' || p_exchange_code,
+            'provider_updated_at', p_updated_at)
+    FROM unnest(ARRAY[p_exchange_code, p_provider_exchange]) AS identifier
+    ON CONFLICT (exchange, system_id, source_exchange_code) DO NOTHING;
+    RETURN v_snapshot_id;
+END;
+$$;
+
+
 CREATE FUNCTION public.sp_upsert_exchange(p_exchange character varying, p_exchange_full_name character varying) RETURNS void
     LANGUAGE plpgsql
     AS $$
@@ -10847,6 +10921,20 @@ CREATE TABLE public.exchanges (
 --
 -- Name: external_systems; Type: TABLE; Schema: public; Owner: -
 --
+
+CREATE TABLE public.exchange_holiday_snapshots (
+    snapshot_id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+    exchange character varying(20) NOT NULL,
+    exchange_code character varying(4) NOT NULL CHECK (exchange_code ~ '^[A-Z0-9]{4}$'),
+    source text NOT NULL,
+    provider_exchange text NOT NULL,
+    as_of date NOT NULL,
+    provider_updated_at timestamp with time zone NOT NULL,
+    fetched_at timestamp with time zone NOT NULL,
+    raw_payload jsonb NOT NULL CHECK (jsonb_typeof(raw_payload) = 'object'),
+    UNIQUE (exchange_code, source, provider_updated_at)
+);
+
 
 CREATE TABLE public.external_systems (
     system_id uuid DEFAULT gen_random_uuid() NOT NULL,
@@ -12333,6 +12421,11 @@ ALTER TABLE ONLY public.exchange_source_mappings
 
 ALTER TABLE ONLY public.exchanges
     ADD CONSTRAINT exchanges_pkey PRIMARY KEY (exchange);
+
+
+ALTER TABLE ONLY public.exchange_holiday_snapshots
+    ADD CONSTRAINT exchange_holiday_snapshots_exchange_fkey
+    FOREIGN KEY (exchange) REFERENCES public.exchanges(exchange);
 
 
 --

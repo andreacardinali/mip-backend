@@ -50,10 +50,61 @@ dependent objects (`RESTRICT`, never `CASCADE`). Resolve such blockers explicitl
 the runner does not convert columns or backfill history. Keep this checkout with
 the migration record, since function SQL is read from `mip_schema.sql`.
 
-After verifying exchange identifiers, populate `calendar_name` with the matching
-`exchange-calendars` identifier and `timezone_name` with its verified IANA zone.
-No mappings are inferred or seeded. Confirm actual holidays, early closes, breaks
-and DST against the installed calendar before consuming its status in other jobs.
+### Dynamic Exchange Acquisition
+
+The earlier eight-row `market_time_exchange_mappings.sql` proposal and its runner
+are superseded and must not be applied as part of this workflow.
+
+Eulerpool exchange resolution uses its live catalog, exact exchange codes first,
+then unique exact names. There is no name-to-calendar dictionary in this path.
+Holiday acquisition verifies the requested four-character `exchange_code` against
+that catalog and calls `/market/holidays/{exchange_code}`. Four-character syntax
+and provider membership do not independently certify an ISO MIC identity.
+
+The response label (for example `NYSE`) is provider evidence, not a new exchange
+identity. An optional `--exchange` explicitly links the canonical request code to
+an existing MIP row without renaming it, creating another row, or changing assets.
+This link must be reviewed by the operator; matching a catalog code alone does not
+prove that a legacy MIP row represents the same venue.
+
+`exchange_holiday_snapshots` retains original JSON and provider versions.
+`as_of` and holiday dates remain dates; `updated_at` and `fetched_at` are aware UTC
+instants stored as `timestamptz`. Adjusted opening/closing hours remain local times,
+not UTC instants. Conflicting closure flags, response identities and duplicate
+holiday dates are rejected. Null closure flags remain unknown.
+
+The existing `exchange_source_mappings` records the requested code and observed
+provider label with endpoint/version evidence. Ambiguous aliases or canonical-code
+links fail rather than overwrite existing mappings. Identical provider versions
+are idempotent; changed JSON for the same version is rejected. Both migration and
+acquisition are explicit commands, not scheduler jobs or API side effects:
+
+```powershell
+.\.venv\Scripts\python.exe -m scripts.apply_market_time_holidays
+.\.venv\Scripts\python.exe -m scripts.sync_exchange_holidays XNYS --exchange NYSE
+```
+
+Both commands above are dry-runs: no database or HTTP access. Before activation,
+review the schema SQL, ownership/grants, existing exchange mappings and backup.
+The schema migration requires existing `exchanges`, `external_systems` and
+`exchange_source_mappings` tables. It is a one-time migration and deliberately
+fails if its objects already exist. After review, explicit application is:
+
+```powershell
+.\.venv\Scripts\python.exe -m scripts.apply_market_time_holidays --apply
+.\.venv\Scripts\python.exe -m scripts.sync_exchange_holidays XNYS --exchange NYSE --apply
+```
+
+Acquisition requires `EULERPOOL_API_KEY` and exactly one active external-system
+row with code `eulerpool` (case-insensitive). All database writes use the stored
+function in a transaction. No external calls or migrations were executed during
+implementation. Validate the SQL on a test PostgreSQL database before production.
+
+Holiday snapshots are acquisition evidence only: `as_of` is not calendar coverage.
+They do not yet replace the session provider or assign `calendar_name`, IANA
+timezones or regular trading hours. Verified coverage and venue-specific calendar
+metadata are still required before deriving OPEN/CLOSED; unresolved venues keep
+returning UNKNOWN. News/catalyst behavior and historical timestamps are unchanged.
 
 FMP `acceptedDate` with an offset is converted to UTC. Naive filing timestamps are
 rejected unless `FMP_ACCEPTED_DATE_TIMEZONE` is set in the backend `.env` to a
