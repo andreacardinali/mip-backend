@@ -1,14 +1,141 @@
+import importlib
+import json
 from datetime import UTC, date, time
-from unittest.mock import Mock
+from pathlib import Path
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
+from jobs.eulerpool_exchange_holidays import sync_holidays
 from market_data.capabilities import InstrumentType
 from market_data.models import InstrumentReference
 from market_data.providers.eulerpool import EulerpoolProvider
 from market_time.repository import SQLHolidayRepository
 from scripts.apply_market_time_holidays import migration_statements
 from scripts.sync_exchange_holidays import acquire
+
+
+@pytest.mark.parametrize(
+    ("outcomes", "expected_status"),
+    [
+        ([Mock(), Mock()], "SUCCESS"),
+        ([ValueError("invalid response"), Mock()], "PARTIAL"),
+        ([ValueError("invalid response"), ValueError("invalid response")], "FAILED"),
+    ],
+)
+def test_holiday_job_isolates_exchange_failures(outcomes, expected_status):
+    targets = [
+        {"exchange": "NYSE", "exchange_code": "XNYS"},
+        {"exchange": "XETR", "exchange_code": "XETR"},
+    ]
+    sessions = [MagicMock(), MagicMock()]
+    session_factory = Mock(side_effect=sessions)
+    provider = Mock()
+    provider.get_exchanges.return_value = []
+    with (
+        patch(
+            "jobs.eulerpool_exchange_holidays.acquire", side_effect=outcomes
+        ) as fetch,
+        patch("jobs.eulerpool_exchange_holidays.SQLHolidayRepository") as repository,
+    ):
+        result = sync_holidays(provider, targets, session_factory)
+    successful = sum(not isinstance(outcome, Exception) for outcome in outcomes)
+    assert result["status"] == expected_status
+    assert result["eligible"] == 2
+    assert result["upserted"] == successful
+    assert result["failed"] == 2 - successful
+    assert fetch.call_count == 2
+    assert session_factory.call_count == successful
+    assert repository.return_value.save.call_count == successful
+    assert fetch.call_args_list[1].args == (provider, "XETR")
+    assert fetch.call_args_list[1].kwargs == {"catalog": []}
+    provider.get_exchanges.assert_called_once_with()
+    if successful:
+        assert repository.return_value.save.call_args.args == ("XETR", outcomes[1])
+
+
+def test_holiday_job_without_registered_exchanges_does_not_fetch():
+    provider = Mock()
+    session_factory = Mock()
+    result = sync_holidays(provider, [], session_factory)
+    assert result["status"] == "INCOMPLETE"
+    provider.get_exchanges.assert_not_called()
+    provider.get_exchange_holidays.assert_not_called()
+    session_factory.assert_not_called()
+
+
+def test_holiday_job_rolls_back_failed_save_and_continues():
+    targets = [
+        {"exchange": "NYSE", "exchange_code": "XNYS"},
+        {"exchange": "XETR", "exchange_code": "XETR"},
+    ]
+    sessions = [MagicMock(), MagicMock()]
+    provider = Mock()
+    provider.get_exchanges.return_value = []
+    with (
+        patch("jobs.eulerpool_exchange_holidays.acquire", return_value=Mock()),
+        patch("jobs.eulerpool_exchange_holidays.SQLHolidayRepository") as repository,
+    ):
+        repository.return_value.save.side_effect = [ValueError("secret-token"), "uuid"]
+        result = sync_holidays(provider, targets, Mock(side_effect=sessions))
+    assert result["status"] == "PARTIAL"
+    assert result["upserted"] == 1
+    assert "secret-token" not in str(result)
+    failed_db = sessions[0].__enter__.return_value
+    successful_db = sessions[1].__enter__.return_value
+    assert failed_db.begin.return_value.__exit__.call_args.args[0] is ValueError
+    assert successful_db.begin.return_value.__exit__.call_args.args[0] is None
+
+
+def test_holiday_job_catalog_failure_does_not_write():
+    provider = Mock()
+    provider.get_exchanges.side_effect = ValueError("secret-token")
+    session_factory = Mock()
+    with pytest.raises(RuntimeError, match="Unable to retrieve") as error:
+        sync_holidays(
+            provider,
+            [{"exchange": "NYSE", "exchange_code": "XNYS"}],
+            session_factory,
+        )
+    assert "secret-token" not in str(error.value)
+    session_factory.assert_not_called()
+
+
+def test_holiday_job_manifest():
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "jobs/eulerpool_exchange_holidays.job.json"
+    )
+    definition = json.loads(path.read_text(encoding="utf-8"))
+    assert definition["schema_version"] == 1
+    assert definition["job_key"] == "eulerpool_exchange_holidays"
+    assert definition["enabled_by_default"] is False
+    assert definition["trigger"] == {"type": "cron", "cron_expression": "30 6 * * *"}
+    assert callable(importlib.import_module(definition["python_module"]).run)
+
+
+def test_holiday_repository_lists_registered_codes():
+    db = Mock()
+    db.execute.return_value.scalar_one.return_value = 1
+    db.execute.return_value.mappings.return_value.all.return_value = [
+        {"exchange": "NYSE", "exchange_code": "XNYS"}
+    ]
+    assert SQLHolidayRepository(db).list_exchanges("Eulerpool") == [
+        {"exchange": "NYSE", "exchange_code": "XNYS"}
+    ]
+    query, params = db.execute.call_args.args
+    assert "SELECT DISTINCT exchange, exchange_code" in str(query)
+    assert "exchange_holiday_snapshots" in str(query)
+    assert params == {"source": "eulerpool"}
+
+
+@pytest.mark.parametrize("active_systems", [0, 2])
+def test_holiday_repository_rejects_missing_or_ambiguous_system(active_systems):
+    db = Mock()
+    db.execute.return_value.scalar_one.return_value = active_systems
+    with pytest.raises(ValueError, match="exactly one active"):
+        SQLHolidayRepository(db).list_exchanges("eulerpool")
+    assert db.execute.call_count == 1
 
 
 class Response:

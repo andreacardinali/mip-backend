@@ -76,8 +76,8 @@ holiday dates are rejected. Null closure flags remain unknown.
 The existing `exchange_source_mappings` records the requested code and observed
 provider label with endpoint/version evidence. Ambiguous aliases or canonical-code
 links fail rather than overwrite existing mappings. Identical provider versions
-are idempotent; changed JSON for the same version is rejected. Both migration and
-acquisition are explicit commands, not scheduler jobs or API side effects:
+are idempotent; changed JSON for the same version is rejected. Migration and initial
+acquisition are explicit commands, not API side effects:
 
 ```powershell
 .\.venv\Scripts\python.exe -m scripts.apply_market_time_holidays
@@ -99,6 +99,22 @@ Acquisition requires `EULERPOOL_API_KEY` and exactly one active external-system
 row with code `eulerpool` (case-insensitive). All database writes use the stored
 function in a transaction. No external calls or migrations were executed during
 implementation. Validate the SQL on a test PostgreSQL database before production.
+
+The `eulerpool_exchange_holidays` scheduler job refreshes existing canonical links
+from `exchange_holiday_snapshots`, not unverified legacy aliases. Bootstrap at
+scheduler startup discovers its manifest and registers it disabled by default.
+After the initial acquisition, enable it through the existing scheduler controls.
+Its daily cron is `30 6 * * *`, interpreted in `SCHEDULER_TIMEZONE` (default
+`Europe/Rome`), not necessarily UTC. No additional schema migration is required.
+
+Each run retrieves one live catalog and requires a unique matching code for each
+registered exchange. Each snapshot is stored in a separate transaction; a failed
+exchange does not prevent the others from updating. Results include per-exchange
+outcomes and `eligible`, `upserted`, `failed` counters. `upserted` counts successful
+stores, including idempotent existing snapshots. Results are `SUCCESS`, `PARTIAL`
+or `FAILED`; an empty registered set returns `INCOMPLETE` without HTTP requests.
+Catalog, configuration and target-selection failures fail the whole run. The job
+does not create exchange rows, infer new mappings, or change calendar metadata.
 
 Holiday snapshots are acquisition evidence only: `as_of` is not calendar coverage.
 They do not yet replace the session provider or assign `calendar_name`, IANA

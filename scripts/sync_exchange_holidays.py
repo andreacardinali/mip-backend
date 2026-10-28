@@ -5,9 +5,10 @@ import argparse
 from market_time.holidays import normalize_exchange_code
 
 
-def acquire(provider, exchange_code):
+def acquire(provider, exchange_code, *, catalog=None):
     code = normalize_exchange_code(exchange_code)
-    matches = [item for item in provider.get_exchanges() if item.code == code]
+    exchanges = provider.get_exchanges() if catalog is None else catalog
+    matches = [item for item in exchanges if item.code == code]
     if len(matches) != 1:
         raise ValueError("Requested code must identify exactly one catalog exchange")
     return provider.get_exchange_holidays(code)

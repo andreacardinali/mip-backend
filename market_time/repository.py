@@ -30,6 +30,30 @@ class SQLHolidayRepository:
     def __init__(self, db: Session):
         self.db = db
 
+    def list_exchanges(self, source: str) -> list[dict[str, str]]:
+        active_systems = self.db.execute(
+            text(
+                "SELECT count(*) FROM public.external_systems "
+                "WHERE lower(code) = :source AND active"
+            ),
+            {"source": source.lower()},
+        ).scalar_one()
+        if active_systems != 1:
+            raise ValueError("Expected exactly one active external system")
+        rows = (
+            self.db.execute(
+                text(
+                    "SELECT DISTINCT exchange, exchange_code "
+                    "FROM public.exchange_holiday_snapshots "
+                    "WHERE source = :source ORDER BY exchange_code, exchange"
+                ),
+                {"source": source.lower()},
+            )
+            .mappings()
+            .all()
+        )
+        return [dict(row) for row in rows]
+
     def save(self, exchange: str, snapshot: HolidaySnapshot):
         return self.db.execute(
             text(
