@@ -28,9 +28,8 @@ def test_telegram_sends_chunks_and_preserves_injected_client():
 
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
         provider = TelegramClient(
-            TelegramConfig(BOT_TOKEN, "chat", message_thread_id=7, parse_mode="HTML"),
+            TelegramConfig(BOT_TOKEN, "chat", chunk_size=4, parse_mode="HTML"),
             client=client,
-            max_message_length=4,
         )
         results = provider.send("abcdefgh")
         assert [result.message_id for result in results] == [1, 2]
@@ -46,7 +45,7 @@ def test_telegram_sends_chunks_and_preserves_injected_client():
         "chat_id": "chat",
         "text": "abcd",
         "disable_web_page_preview": True,
-        "message_thread_id": 7,
+        "disable_notification": False,
         "parse_mode": "HTML",
     }
 
@@ -76,7 +75,7 @@ def test_telegram_preserves_json_delivery_errors_without_retry(status):
     ("body", "message"),
     [
         ({"ok": False, "description": "denied"}, "denied"),
-        ({"ok": True, "result": {}}, "missing message_id"),
+        ({"ok": True, "result": {}}, "does not contain message_id"),
     ],
 )
 def test_telegram_preserves_application_errors(body, message):
