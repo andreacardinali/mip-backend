@@ -34,7 +34,7 @@ def _broken_level(snapshot, is_long: bool, threshold: float) -> bool:
 @dataclass(frozen=True, slots=True)
 class SmcChochStrategy:
     code: str = "SMC_CHOCH"
-    breakout_threshold: float = 0.001
+    breakout_threshold: float = 0.0005
 
     def evaluate(self, snapshot, *, timeframe, observed_at):
         marker = snapshot.change_of_character
@@ -65,7 +65,7 @@ class SmcChochStrategy:
 @dataclass(frozen=True, slots=True)
 class SmcBosStrategy:
     code: str = "SMC_BOS"
-    breakout_threshold: float = 0.001
+    breakout_threshold: float = 0.0005
 
     def evaluate(self, snapshot, *, timeframe, observed_at):
         marker = snapshot.break_of_structure
@@ -81,7 +81,7 @@ class SmcBosStrategy:
         invalidation = (
             snapshot.bullish_order_block or snapshot.swing_low
             if is_long
-            else snapshot.bearish_order_block or snapshot.swing_high
+            else snapshot.bearish_order_block_top or snapshot.swing_high
         )
         return build_candidate(
             code=self.code,

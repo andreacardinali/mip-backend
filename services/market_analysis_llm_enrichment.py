@@ -146,7 +146,7 @@ def run_market_analysis_llm_enrichment(
     persist_enrichment: PersistEnrichment,
     enrichment_fingerprint: str,
     max_tokens: int = 1200,
-    call_batch_size: int = 4,
+    call_batch_size: int = 1,
 ) -> dict[str, Any]:
     if not enrichment_fingerprint:
         raise ValueError("enrichment_fingerprint cannot be empty")

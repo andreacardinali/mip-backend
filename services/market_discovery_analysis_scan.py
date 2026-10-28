@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from market_analysis.lifecycle import reconcile_persisted_signals
+from market_analysis.lifecycle import expire_evaluated_signals, reconcile_persisted_signals
 from market_analysis.quant_prefilter import (
     QuantPrefilterConfig,
     prefilter_evaluated_signals,
+    score_evaluated_signal,
 )
 from market_analysis.repository import MarketAnalysisRepository
 from market_analysis.scan import ScanConfig, ScanMember, scan_members
@@ -108,11 +109,19 @@ def run_market_discovery_analysis_scan(
             config=quant_config,
         )
 
+        selected_candidates = {id(item.evaluated) for item in quant_results}
         signal_ids: list[str] = []
-        for ranked in quant_results:
-            evaluated = ranked.evaluated
+        for evaluated in scan_result.candidates:
+            quant_score, quant_breakdown = score_evaluated_signal(
+                evaluated, config=quant_config
+            )
             context = context_by_instrument[evaluated.member.instrument_id]
             evidence = dict(evaluated.candidate.evidence)
+            evidence["quant"] = {
+                "score": quant_score,
+                "breakdown": quant_breakdown,
+                "llm_eligible": id(evaluated) in selected_candidates,
+            }
             evidence["market_discovery"] = {
                 "candidate_id": str(context["candidate_id"]),
                 "snapshot_id": str(context["snapshot_id"]),
@@ -120,8 +129,8 @@ def run_market_discovery_analysis_scan(
                 "attention_score": float(context["attention_score"]),
                 "universe_codes": context["universe_codes"],
                 "attention_evidence": context["attention_evidence"],
-                "quant_score": ranked.quant_score,
-                "quant_breakdown": ranked.breakdown,
+                "quant_score": quant_score,
+                "quant_breakdown": quant_breakdown,
             }
             candidate = evaluated.candidate.__class__(
                 strategy_code=evaluated.candidate.strategy_code,
@@ -138,7 +147,7 @@ def run_market_discovery_analysis_scan(
                 target_price=evaluated.candidate.target_price,
             )
             scores = evaluated.scores.to_dict()
-            scores["quant"] = ranked.quant_score
+            scores["quant"] = quant_score
             scores["attention"] = float(context["attention_score"])
             signal_ids.append(
                 repository.upsert_signal(
@@ -154,6 +163,7 @@ def run_market_discovery_analysis_scan(
             signal_ids,
             stability_minutes=30,
         )
+        expired_signals = expire_evaluated_signals(db, scan_result, signal_ids)
 
         for failure in scan_result.failures:
             repository.record_scan_failure(
@@ -170,7 +180,7 @@ def run_market_discovery_analysis_scan(
             if item.reason.value == "INSUFFICIENT_HISTORY"
         ]
         summary = {
-            "status": "SUCCESS",
+            "status": "PARTIAL" if scan_result.failures else "SUCCESS",
             "run_id": run_id,
             "eligible_candidates": len(rows),
             "processed": scan_result.processed,
@@ -178,6 +188,7 @@ def run_market_discovery_analysis_scan(
             "quant_candidates": len(quant_results),
             "persisted_signals": len(signal_ids),
             "lifecycle_events": len(lifecycle_events),
+            "expired_signals": expired_signals,
             "failures": len(scan_result.failures),
             "failed_symbols": [item.symbol for item in scan_result.failures],
             "skipped": len(scan_result.skipped),

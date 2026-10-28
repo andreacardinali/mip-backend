@@ -66,6 +66,16 @@ class MarketAnalysisTests(unittest.TestCase):
                 "bearishOrderBlock",
                 "dropFromHighPct",
                 "riseFromLowPct",
+                "ema50",
+                "bbLower",
+                "bbUpper",
+                "smcBias",
+                "bullishOrderBlockTop",
+                "bearishOrderBlockTop",
+                "bullishFairValueGap",
+                "bullishFairValueGapTop",
+                "bearishFairValueGap",
+                "bearishFairValueGapTop",
             },
         )
         self.assertEqual(payload["observedDate"], 201)

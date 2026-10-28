@@ -24,6 +24,13 @@ FUNCTION_NAMES = (
     "sp_get_portfolios",
     "sp_upsert_position",
     "sp_enqueue_market_price_refresh",
+    "sp_market_analysis_expire_evaluated_signals",
+    "sp_market_analysis_reconcile_signal_lifecycle",
+    "sp_market_analysis_upsert_signal",
+    "sp_market_analysis_list_pending_llm_enrichment",
+    "sp_market_screener_list_ranking_inputs",
+    "sp_market_discovery_build_candidates",
+    "sp_market_discovery_list_scan_candidates",
 )
 
 
@@ -33,7 +40,7 @@ def migration_statements(schema: str) -> list[str]:
     )
     statements = [preflight_path.read_text(encoding="utf-8")]
     for name in FUNCTION_NAMES:
-        pattern = rf"^CREATE FUNCTION public\.{re.escape(name)}\(.*?^\$\$;"
+        pattern = rf"^CREATE FUNCTION public\.{re.escape(name)}\(.*?^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$;"
         matches = re.findall(pattern, schema, flags=re.MULTILINE | re.DOTALL)
         if len(matches) != 1:
             raise ValueError(f"Expected exactly one pg_dump definition for {name}")

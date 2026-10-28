@@ -4691,6 +4691,48 @@ END;$$;
 -- Name: sp_market_analysis_finish_scan_run(uuid, character varying, jsonb); Type: FUNCTION; Schema: public; Owner: -
 --
 
+CREATE FUNCTION public.sp_market_analysis_expire_evaluated_signals(p_scopes jsonb, p_signal_ids uuid[], p_stability_minutes integer DEFAULT 30) RETURNS integer
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_signal record;
+    v_count integer := 0;
+BEGIN
+    IF jsonb_typeof(p_scopes) IS DISTINCT FROM 'array' THEN
+        RAISE EXCEPTION 'Evaluation scopes must be an array';
+    END IF;
+    FOR v_signal IN
+        SELECT s.*, evaluation.observed_at AS evaluation_time
+        FROM public.trading_signals s
+        JOIN (
+            SELECT instrument_id, strategy_code, timeframe, max(observed_at) AS observed_at
+            FROM jsonb_to_recordset(p_scopes) AS scope(
+                instrument_id uuid, strategy_code varchar, timeframe varchar, observed_at timestamptz
+            )
+            GROUP BY instrument_id, strategy_code, timeframe
+        ) evaluation USING (instrument_id, strategy_code, timeframe)
+        WHERE s.status IN ('CANDIDATE', 'CONFIRMED')
+          AND NOT (s.signal_id = ANY(COALESCE(p_signal_ids, ARRAY[]::uuid[])))
+          AND s.observed_at < evaluation.observed_at - make_interval(mins => GREATEST(p_stability_minutes, 0))
+        FOR UPDATE OF s
+    LOOP
+        INSERT INTO public.market_analysis_signal_events(
+            signal_id, instrument_id, strategy_code, timeframe,
+            previous_status, new_status, previous_direction, new_direction,
+            event_type, reason, observed_at, payload
+        ) VALUES (
+            v_signal.signal_id, v_signal.instrument_id, v_signal.strategy_code, v_signal.timeframe,
+            v_signal.status, 'EXPIRED', v_signal.direction, v_signal.direction,
+            'EXPIRED', 'absent from successfully evaluated scope', v_signal.evaluation_time, '{}'::jsonb
+        );
+        UPDATE public.trading_signals SET status = 'EXPIRED'
+        WHERE signal_id = v_signal.signal_id;
+        v_count := v_count + 1;
+    END LOOP;
+    RETURN v_count;
+END;
+$$;
+
 CREATE FUNCTION public.sp_market_analysis_finish_scan_run(p_run_id uuid, p_status character varying, p_summary jsonb DEFAULT '{}'::jsonb) RETURNS boolean
     LANGUAGE plpgsql
     AS $$
@@ -4775,6 +4817,8 @@ BEGIN
     JOIN public.entities AS e
       ON e.entity_id = i.entity_id
     WHERE s.status IN ('CANDIDATE', 'CONFIRMED')
+            AND s.strategy_code <> 'SWING_EXIT'
+            AND COALESCE(s.evidence #> '{quant,llm_eligible}', 'true'::jsonb) = 'true'::jsonb
       AND (
           s.llm_analysis IS NULL
           OR s.enrichment_fingerprint IS DISTINCT FROM
@@ -4850,6 +4894,8 @@ DECLARE
     v_signal record;
     v_previous record;
     v_generation record;
+    v_closed record;
+    v_closed_count integer := 0;
     v_status varchar;
     v_event_type varchar;
     v_event_id uuid;
@@ -4858,10 +4904,41 @@ BEGIN
     SELECT signal.*
     INTO v_signal
     FROM public.trading_signals signal
-    WHERE signal.signal_id = p_signal_id;
+    WHERE signal.signal_id = p_signal_id
+    FOR UPDATE;
 
     IF NOT FOUND THEN
         RAISE EXCEPTION 'Signal not found: %', p_signal_id;
+    END IF;
+
+    IF v_signal.strategy_code = 'SWING_EXIT' THEN
+        IF v_signal.status = 'CLOSED' THEN
+            RETURN jsonb_build_object('signal_id', p_signal_id, 'status', 'CLOSED', 'event_type', 'UNCHANGED');
+        END IF;
+        FOR v_closed IN
+            SELECT signal.* FROM public.trading_signals signal
+            WHERE signal.instrument_id = v_signal.instrument_id
+              AND signal.timeframe = v_signal.timeframe
+              AND signal.direction = 'LONG'
+              AND signal.status IN ('CANDIDATE', 'CONFIRMED')
+              AND signal.observed_at <= v_signal.observed_at
+            ORDER BY signal.signal_id
+            FOR UPDATE
+        LOOP
+            INSERT INTO public.market_analysis_signal_events (
+                signal_id, instrument_id, strategy_code, timeframe,
+                previous_status, new_status, previous_direction, new_direction,
+                event_type, observed_at, reason, payload
+            ) VALUES (
+                v_closed.signal_id, v_closed.instrument_id, v_closed.strategy_code, v_closed.timeframe,
+                v_closed.status, 'CLOSED', v_closed.direction, v_closed.direction,
+                'CLOSED', v_signal.observed_at, 'SWING_EXIT',
+                jsonb_build_object('exit_signal_id', p_signal_id)
+            );
+            UPDATE public.trading_signals SET status = 'CLOSED' WHERE signal_id = v_closed.signal_id;
+            v_closed_count := v_closed_count + 1;
+        END LOOP;
+        RETURN jsonb_build_object('signal_id', p_signal_id, 'status', 'CLOSED', 'event_type', 'CLOSED', 'closed_signals', v_closed_count);
     END IF;
 
     SELECT event.*
@@ -4883,7 +4960,9 @@ BEGIN
     ORDER BY event.created_at DESC, event.signal_event_id DESC
     LIMIT 1;
 
-    IF v_previous.signal_event_id IS NULL THEN
+     IF v_previous.signal_event_id IS NULL
+         OR (v_previous.new_status IN ('EXPIRED', 'CLOSED') AND v_signal.observed_at > v_previous.observed_at)
+     THEN
         v_status := 'CANDIDATE';
         v_event_type := 'CREATED';
 
@@ -5215,6 +5294,19 @@ BEGIN
         RAISE EXCEPTION 'p_payload must be a JSON object';
     END IF;
 
+    IF UPPER(BTRIM(p_payload->>'strategy_code')) = 'SWING_EXIT' THEN
+        SELECT signal_id INTO v_signal_id FROM public.trading_signals
+        WHERE instrument_id = (p_payload->>'instrument_id')::uuid
+          AND strategy_code = 'SWING_EXIT'
+          AND timeframe = UPPER(BTRIM(p_payload->>'timeframe'))
+          AND observed_at = (p_payload->>'observed_at')::timestamptz
+          AND status = 'CLOSED'
+        ORDER BY signal_id LIMIT 1;
+        IF FOUND THEN
+            RETURN v_signal_id;
+        END IF;
+    END IF;
+
     INSERT INTO public.trading_signals
     (
         instrument_id,
@@ -5286,8 +5378,25 @@ BEGIN
         evidence = EXCLUDED.evidence,
         llm_analysis = NULL,
         enrichment_fingerprint = NULL
+    WHERE (trading_signals.observed_at, trading_signals.evidence, trading_signals.reference_price,
+           trading_signals.technical_score, trading_signals.financial_score, trading_signals.catalyst_score,
+           trading_signals.invalidation_price, trading_signals.target_price, trading_signals.confidence,
+           trading_signals.signal_type, trading_signals.trend, trading_signals.universe_id)
+          IS DISTINCT FROM
+          (EXCLUDED.observed_at, EXCLUDED.evidence, EXCLUDED.reference_price,
+           EXCLUDED.technical_score, EXCLUDED.financial_score, EXCLUDED.catalyst_score,
+           EXCLUDED.invalidation_price, EXCLUDED.target_price, EXCLUDED.confidence,
+           EXCLUDED.signal_type, EXCLUDED.trend, EXCLUDED.universe_id)
     RETURNING signal_id INTO v_signal_id;
 
+    IF v_signal_id IS NULL THEN
+        SELECT signal_id INTO v_signal_id FROM public.trading_signals
+        WHERE instrument_id = (p_payload->>'instrument_id')::uuid
+          AND strategy_code = UPPER(BTRIM(p_payload->>'strategy_code'))
+          AND timeframe = UPPER(BTRIM(p_payload->>'timeframe'))
+          AND direction = UPPER(BTRIM(p_payload->>'direction'))
+          AND status IN ('CANDIDATE', 'CONFIRMED');
+    END IF;
     RETURN v_signal_id;
 END;
 $$;
@@ -5519,7 +5628,45 @@ DECLARE
     v_ambiguous integer;
     v_unresolved integer;
     v_rejected integer;
+    v_summary jsonb;
+    v_snapshot_results jsonb := '[]'::jsonb;
 BEGIN
+    IF p_snapshot_id IS NULL THEN
+        FOR v_snapshot_id IN
+            SELECT DISTINCT ON (source.source_type) s.snapshot_id
+            FROM public.market_discovery_snapshots s
+            JOIN public.market_discovery_sources source ON source.source_id = s.source_id
+            WHERE source.is_enabled
+            ORDER BY source.source_type, s.observed_at DESC, s.snapshot_id DESC
+        LOOP
+            v_summary := public.sp_market_discovery_build_candidates(v_snapshot_id);
+            v_snapshot_results := v_snapshot_results || jsonb_build_array(v_summary);
+        END LOOP;
+
+        IF jsonb_array_length(v_snapshot_results) = 0 THEN
+            RAISE EXCEPTION 'No market discovery snapshot is available';
+        END IF;
+
+        SELECT
+            SUM((summary->>'total')::integer),
+            SUM((summary->>'resolved')::integer),
+            SUM((summary->>'core')::integer),
+            SUM((summary->>'discovery')::integer),
+            SUM((summary->>'ambiguous')::integer),
+            SUM((summary->>'unresolved')::integer),
+            SUM((summary->>'rejected')::integer)
+        INTO v_total, v_resolved, v_core, v_discovery, v_ambiguous, v_unresolved, v_rejected
+        FROM jsonb_array_elements(v_snapshot_results) AS results(summary);
+
+        RETURN jsonb_build_object(
+            'snapshots', v_snapshot_results,
+            'total', v_total, 'resolved', v_resolved,
+            'core', v_core, 'discovery', v_discovery,
+            'ambiguous', v_ambiguous, 'unresolved', v_unresolved,
+            'rejected', v_rejected
+        );
+    END IF;
+
     SELECT COALESCE(
         p_snapshot_id,
         (
@@ -5547,18 +5694,24 @@ BEGIN
     WHERE c.snapshot_id = v_snapshot_id;
 
     WITH snapshot_context AS (
-        SELECT s.snapshot_id, GREATEST(s.returned_count, 1) AS returned_count
+        SELECT s.snapshot_id, GREATEST(s.returned_count, 1) AS returned_count,
+               source.source_type, source.provider_code
         FROM public.market_discovery_snapshots s
+        JOIN public.market_discovery_sources source ON source.source_id = s.source_id
         WHERE s.snapshot_id = v_snapshot_id
     ),
     item_scores AS (
         SELECT
             i.*,
+            sc.source_type,
+            sc.provider_code,
             LEAST(
-                35.0,
+                CASE WHEN sc.source_type IN ('GAINERS', 'LOSERS', 'MOST_ACTIVE')
+                    THEN 100.0 ELSE 35.0 END,
                 GREATEST(
                     0.0,
-                    35.0 * (
+                    CASE WHEN sc.source_type IN ('GAINERS', 'LOSERS', 'MOST_ACTIVE')
+                        THEN 100.0 ELSE 35.0 END * (
                         1.0 - (
                             GREATEST(COALESCE(i.rank, sc.returned_count), 1) - 1
                         )::numeric / GREATEST(sc.returned_count - 1, 1)
@@ -5712,6 +5865,10 @@ BEGIN
         ),
         COALESCE(memberships.universe_codes, '[]'::jsonb),
         jsonb_build_object(
+            'source_type', scores.source_type,
+            'provider_code', scores.provider_code,
+            'source_score', scores.score,
+            'source_payload', scores.raw_payload,
             'rank', scores.rank,
             'previous_rank', scores.previous_rank,
             'rank_improvement', CASE
@@ -5980,26 +6137,22 @@ $$;
 CREATE FUNCTION public.sp_market_discovery_list_scan_candidates(p_snapshot_id uuid DEFAULT NULL::uuid, p_core_min_attention_score numeric DEFAULT 20, p_discovery_min_attention_score numeric DEFAULT 40, p_core_limit integer DEFAULT 100, p_discovery_limit integer DEFAULT 25) RETURNS TABLE(candidate_id uuid, snapshot_id uuid, instrument_id uuid, entity_id uuid, symbol character varying, exchange text, currency_code text, isin text, universe_id uuid, origin character varying, attention_score numeric, universe_codes jsonb, attention_evidence jsonb)
     LANGUAGE sql STABLE
     AS $$
-WITH selected_snapshot AS (
-    SELECT COALESCE(
-        p_snapshot_id,
-        (
-            SELECT s.snapshot_id
-            FROM public.market_discovery_snapshots s
-            ORDER BY s.observed_at DESC, s.snapshot_id DESC
-            LIMIT 1
-        )
-    ) AS snapshot_id
+WITH latest_snapshots AS (
+    SELECT DISTINCT ON (source.source_type) s.snapshot_id
+    FROM public.market_discovery_snapshots s
+    JOIN public.market_discovery_sources source ON source.source_id = s.source_id
+    WHERE source.is_enabled
+    ORDER BY source.source_type, s.observed_at DESC, s.snapshot_id DESC
 ),
-eligible AS (
-    SELECT
-        c.*,
-        ROW_NUMBER() OVER (
-            PARTITION BY c.origin
-            ORDER BY c.attention_score DESC, c.symbol
-        ) AS origin_position
+selected_snapshots AS (
+    SELECT p_snapshot_id AS snapshot_id WHERE p_snapshot_id IS NOT NULL
+    UNION ALL
+    SELECT snapshot_id FROM latest_snapshots WHERE p_snapshot_id IS NULL
+),
+eligible_candidates AS (
+    SELECT c.*
     FROM public.market_discovery_candidates c
-    JOIN selected_snapshot selected
+    JOIN selected_snapshots selected
       ON selected.snapshot_id = c.snapshot_id
     WHERE c.resolution_status = 'RESOLVED'
       AND (
@@ -6008,27 +6161,36 @@ eligible AS (
           (c.origin = 'DISCOVERY' AND c.attention_score >= COALESCE(p_discovery_min_attention_score, 0))
       )
 ),
+deduplicated AS (
+    SELECT DISTINCT ON (instrument_id)
+        *
+    FROM eligible_candidates
+    ORDER BY
+        instrument_id,
+        CASE origin WHEN 'CORE' THEN 0 ELSE 1 END,
+        attention_score DESC,
+        symbol,
+        candidate_id
+),
+eligible AS (
+    SELECT d.*,
+        ROW_NUMBER() OVER (
+            PARTITION BY d.origin
+            ORDER BY d.attention_score DESC, d.symbol, d.instrument_id
+        ) AS origin_position
+    FROM deduplicated d
+),
 limited AS (
     SELECT *
     FROM eligible
     WHERE (origin = 'CORE' AND origin_position <= GREATEST(p_core_limit, 0))
        OR (origin = 'DISCOVERY' AND origin_position <= GREATEST(p_discovery_limit, 0))
 ),
-deduplicated AS (
-    SELECT DISTINCT ON (instrument_id)
-        *
-    FROM limited
-    ORDER BY
-        instrument_id,
-        CASE origin WHEN 'CORE' THEN 0 ELSE 1 END,
-        attention_score DESC,
-        symbol
-),
 preferred_universe AS (
     SELECT
         d.candidate_id,
         membership.universe_id
-    FROM deduplicated d
+    FROM limited d
     LEFT JOIN LATERAL (
         SELECT um.universe_id
         FROM public.market_universe_members um
@@ -6055,7 +6217,7 @@ SELECT
     d.attention_score,
     d.universe_codes,
     d.attention_evidence
-FROM deduplicated d
+FROM limited d
 JOIN public.instruments i
   ON i.instrument_id = d.instrument_id
 LEFT JOIN preferred_universe preferred
@@ -6527,10 +6689,13 @@ CREATE FUNCTION public.sp_market_screener_list_ranking_inputs(p_limit integer) R
             d.attention_score
         ) AS attention_score,
         s.technical_score,
+        COALESCE(
+            CASE WHEN jsonb_typeof(s.evidence #> '{quant,score}') = 'number'
+                 THEN (s.evidence #>> '{quant,score}')::numeric END,
         CASE
             WHEN jsonb_typeof(s.evidence #> '{market_discovery,quant_score}') = 'number'
             THEN (s.evidence #>> '{market_discovery,quant_score}')::numeric
-        END AS quant_score,
+        END) AS quant_score,
         s.llm_score,
         nullif(s.llm_analysis ->> 'verdict', '')::character varying AS verdict,
         nullif(s.llm_analysis ->> 'summary', '')::text AS summary,
@@ -6546,6 +6711,7 @@ CREATE FUNCTION public.sp_market_screener_list_ranking_inputs(p_limit integer) R
         WHERE c.instrument_id = s.instrument_id
     ) d ON true
     WHERE s.status IN ('CANDIDATE', 'CONFIRMED')
+            AND s.strategy_code <> 'SWING_EXIT'
     ORDER BY s.observed_at DESC, s.signal_id
     LIMIT greatest(coalesce(p_limit, 200), 1);
 $$;

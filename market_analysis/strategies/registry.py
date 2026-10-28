@@ -11,6 +11,7 @@ from market_analysis.strategies.smart_money_structure import (
     SmcChochStrategy,
 )
 from market_analysis.strategies.supertrend import SupertrendStrategy
+from market_analysis.strategies.swing import CallEntryStrategy, SwingExitStrategy
 from market_analysis.strategies.trend_pullback import TrendPullbackStrategy
 
 
@@ -41,6 +42,8 @@ class StrategyRegistry:
             unknown = sorted(allowed - {code.upper() for code in self.codes})
             if unknown:
                 raise ValueError("unknown enabled strategies: " + ", ".join(unknown))
+        if snapshot.rsi is None or snapshot.rsi <= 0:
+            return ()
         candidates = []
         for strategy in self.strategies:
             if allowed is not None and strategy.code.upper() not in allowed:
@@ -53,12 +56,16 @@ class StrategyRegistry:
         return tuple(candidates)
 
 
-default_registry = StrategyRegistry(
-    (
+def create_registry(*, smc_threshold=0.0005, minimum_drop_pct=0.0):
+    return StrategyRegistry((
         TrendPullbackStrategy(),
         SupertrendStrategy(),
-        DeepOversoldStrategy(),
-        SmcChochStrategy(),
-        SmcBosStrategy(),
-    )
-)
+        DeepOversoldStrategy(minimum_drop_pct=minimum_drop_pct),
+        SmcChochStrategy(breakout_threshold=smc_threshold),
+        SmcBosStrategy(breakout_threshold=smc_threshold),
+        CallEntryStrategy(),
+        SwingExitStrategy(),
+    ))
+
+
+default_registry = create_registry()

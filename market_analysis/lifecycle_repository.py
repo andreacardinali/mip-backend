@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from sqlalchemy import text
 
 
@@ -15,6 +17,17 @@ class SignalLifecycleRepository:
             {"id": signal_id, "minutes": stability_minutes},
         ).scalar_one()
         return dict(value)
+
+    def expire_evaluated(self, scopes: list[dict], signal_ids: list[str], stability_minutes: int = 30) -> int:
+        if not scopes:
+            return 0
+        return int(self.db.execute(
+            text(
+                "SELECT public.sp_market_analysis_expire_evaluated_signals("
+                "CAST(:scopes AS jsonb),CAST(:signal_ids AS uuid[]),CAST(:minutes AS integer))"
+            ),
+            {"scopes": json.dumps(scopes), "signal_ids": signal_ids, "minutes": stability_minutes},
+        ).scalar_one())
 
     def expire_missing(self, observed_before, stability_minutes: int = 30) -> int:
         return int(

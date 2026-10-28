@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from html.parser import HTMLParser
 
 import httpx
 
@@ -16,6 +15,7 @@ from market_sources.exceptions import (
     SourceRateLimitError,
     SourceTemporaryError,
 )
+from market_sources.html_tables import HTMLTableParser
 from market_sources.models import UniverseMember, UniverseSnapshot
 
 
@@ -50,38 +50,6 @@ UNIVERSE_DEFINITIONS = {
         ("ICB Subsector",),
     ),
 }
-
-
-class _WikiTableParser(HTMLParser):
-    def __init__(self):
-        super().__init__(convert_charrefs=True)
-        self.tables = []
-        self._table = self._row = self._cell = None
-
-    def handle_starttag(self, tag, attrs):
-        if tag == "table":
-            self._table = []
-        elif tag == "tr" and self._table is not None:
-            self._row = []
-        elif tag in {"th", "td"} and self._row is not None:
-            self._cell = []
-
-    def handle_data(self, data):
-        if self._cell is not None:
-            self._cell.append(data)
-
-    def handle_endtag(self, tag):
-        if tag in {"th", "td"} and self._cell is not None and self._row is not None:
-            self._row.append(" ".join("".join(self._cell).split()))
-            self._cell = None
-        elif tag == "tr" and self._row is not None and self._table is not None:
-            if self._row:
-                self._table.append(self._row)
-            self._row = None
-        elif tag == "table" and self._table is not None:
-            if self._table:
-                self.tables.append(self._table)
-            self._table = None
 
 
 class WikipediaUniverseProvider:
@@ -159,7 +127,7 @@ class WikipediaUniverseProvider:
 
 
 def parse_universe_members(html, definition):
-    parser = _WikiTableParser()
+    parser = HTMLTableParser()
     parser.feed(html)
     table = _select_table(parser.tables, definition.symbol_column)
     header = table[0]

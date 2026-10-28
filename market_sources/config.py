@@ -10,7 +10,13 @@ class SettingsReader(Protocol):
 
 DEFAULT_ORDERS = {
     MarketSourceCapability.UNIVERSE_MEMBERS: ("wikipedia",),
-    MarketSourceCapability.DISCOVERY: ("apewisdom",),
+    MarketSourceCapability.DISCOVERY: (
+        "apewisdom",
+        "yahoo_movers",
+        "yahoo_movers_html",
+        "finviz_movers",
+        "stockanalysis_movers",
+    ),
 }
 
 

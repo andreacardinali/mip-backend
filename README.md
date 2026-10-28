@@ -2,6 +2,51 @@
 
 Adds explicit logs immediately before and after each provider call, including call number, mode, signal count, signal IDs, output-token limit and elapsed time. Batch failures log split sizes and error details before recursive retry.
 
+## Centralized market data
+
+Screener price and candle acquisition uses `market_data` and its configured
+providers. The analysis scan requests history through `get_ohlcv`; legacy
+Yahoo / Yahoo HTML / Finviz price and candle acquisition is not restored.
+
+`market_sources` remains separate for universe membership (Wikipedia) and
+discovery: `REDDIT_TRENDING` through ApeWisdom, and `GAINERS`, `LOSERS` and
+`MOST_ACTIVE` through Yahoo JSON with Yahoo HTML, Finviz and StockAnalysis
+fallbacks. These providers return candidate symbols and ranking metadata,
+not price history or indicator inputs. Order is configurable through
+`MARKET_SOURCES_DISCOVERY_ORDER`; individual movers providers accept
+`<PROVIDER_NAME>_USER_AGENT` and `<PROVIDER_NAME>_HTTP_TIMEOUT` settings.
+
+Offline coverage lives in `tests/test_market_analysis_scan.py`,
+`tests/test_market_data_routing.py`, `tests/test_market_sources_discovery_routing.py`
+and `tests/test_wikipedia_provider.py`. No database migration or job activation
+is needed for this separation.
+
+### Multi-category discovery refresh
+
+The discovery refresh job now requests Reddit trending, gainers, losers and most
+active candidates independently. Configure each category through
+`MARKET_DISCOVERY_<CATEGORY>_ENABLED` (default `true`) and
+`MARKET_DISCOVERY_<CATEGORY>_LIMIT` (default `100`, range `1` to `100`), where
+`<CATEGORY>` is `REDDIT_TRENDING`, `GAINERS`, `LOSERS` or `MOST_ACTIVE`.
+`MARKET_DISCOVERY_RETENTION_DAYS` defaults to `90`. These values use the centralized
+settings loader. Successful snapshots commit independently; category failures
+produce a `PARTIAL` result when other categories succeed.
+
+The resolver and scan default to the latest snapshot per enabled discovery source
+category, across providers. An explicit `snapshot_id` still selects only that
+snapshot. If a refresh fails, its category can retain an older snapshot until
+retention removes it. Disabling a refresh category stops acquisition, but does not
+disable previously persisted source records. Scan candidates are deduplicated by
+instrument before applying CORE/DISCOVERY limits. Movers use normalized rank on a
+0-100 attention scale; Reddit retains its social scoring. Provider metadata is
+preserved for traceability, not used to acquire prices or calculate indicators.
+
+Unlike provider routing alone, this resolver/scan update requires replacing
+`sp_market_discovery_build_candidates` and
+`sp_market_discovery_list_scan_candidates` in an existing PostgreSQL database.
+Both definitions are included in the upgrade runner below. No migration or job
+activation is performed automatically.
+
 ## Intelligence fixes: database upgrade
 
 Editing `mip_schema.sql` does not upgrade an existing database. Back up the database

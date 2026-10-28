@@ -69,7 +69,8 @@ def run() -> dict[str, Any]:
         default_timeout_seconds=120.0,
     )
     provider = create_provider(config)
-    contract_fingerprint = enrichment_fingerprint()
+    max_tokens = int(settings.get(f"{PREFIX}_LLM_REQUEST_MAX_OUTPUT_TOKENS", 1200))
+    contract_fingerprint = enrichment_fingerprint(config=config, max_tokens=max_tokens)
     candidates = _load_pending_candidates(
         contract_fingerprint=contract_fingerprint,
         limit=int(settings.get(f"{PREFIX}_RUN_MAX_SIGNALS", 25)),
@@ -85,8 +86,8 @@ def run() -> dict[str, Any]:
             contract_fingerprint=contract_fingerprint,
         ),
         enrichment_fingerprint=contract_fingerprint,
-        max_tokens=int(settings.get(f"{PREFIX}_LLM_REQUEST_MAX_OUTPUT_TOKENS", 1200)),
-        call_batch_size=int(settings.get(f"{PREFIX}_LLM_REQUEST_MAX_SIGNALS", 4)),
+        max_tokens=max_tokens,
+        call_batch_size=int(settings.get(f"{PREFIX}_LLM_REQUEST_MAX_SIGNALS", 1)),
     )
     logger.info(
         "Market analysis LLM enrichment completed summary=%s", _compact_result(result)

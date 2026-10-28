@@ -6,6 +6,7 @@ from market_sources.exceptions import (
     InvalidSourceResponseError,
     SourceCapabilityUnavailableError,
     SourceNotFoundError,
+    SourceRateLimitError,
     SourceTemporaryError,
 )
 
@@ -64,6 +65,7 @@ class MarketSourceService:
                 SourceCapabilityUnavailableError,
                 SourceNotFoundError,
                 InvalidSourceResponseError,
+                SourceRateLimitError,
                 SourceTemporaryError,
             ) as error:
                 failures.append((provider.name, error))

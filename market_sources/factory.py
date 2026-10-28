@@ -2,6 +2,11 @@ from config.settings import settings
 from http_client.retry import RetryPolicy
 from market_sources.config import MarketSourceConfig
 from market_sources.discovery.providers.apewisdom import ApeWisdomDiscoveryProvider
+from market_sources.discovery.providers.movers import (
+    HTML_MOVERS_URLS,
+    HTMLMoversDiscoveryProvider,
+    YahooMoversDiscoveryProvider,
+)
 from market_sources.registry import SourceProviderRegistry
 from market_sources.service import MarketSourceService
 from market_sources.universe.providers.wikipedia import WikipediaUniverseProvider
@@ -39,6 +44,24 @@ def create_market_source_service(config=None):
             retry_policy=retry_policy,
         ),
     ]
+    for name in ("yahoo_movers", *HTML_MOVERS_URLS):
+        kwargs = {
+            "user_agent": str(
+                settings.get(
+                    f"{name.upper()}_USER_AGENT",
+                    "MIP/1.0 (https://github.com/andreacardinali/mip-backend)",
+                )
+            ),
+            "timeout": float(
+                settings.get(f"{name.upper()}_HTTP_TIMEOUT", config.http_timeout)
+            ),
+            "retry_policy": retry_policy,
+        }
+        providers.append(
+            YahooMoversDiscoveryProvider(**kwargs)
+            if name == "yahoo_movers"
+            else HTMLMoversDiscoveryProvider(name=name, **kwargs)
+        )
     return MarketSourceService(SourceProviderRegistry(providers), config)
 
 

@@ -1,4 +1,6 @@
 from llm.base import LLMResponse
+from llm.config import LLMConfig
+from market_analysis.enrichment_contract import enrichment_fingerprint
 from market_analysis.llm_enrichment import (
     calculate_composite_score,
     enrich_signal,
@@ -80,3 +82,12 @@ def test_composite_score_renormalizes_missing_components():
         60,
     )
     assert score == 77.5
+
+
+def test_enrichment_identity_changes_with_model_not_credentials():
+    first = LLMConfig(provider="ollama", model="model-a", base_url="http://localhost:11434")
+    second = LLMConfig(provider="ollama", model="model-b", base_url=first.base_url)
+    rotated = LLMConfig(provider="ollama", model=first.model, base_url=first.base_url, api_key="test-credential")
+    assert enrichment_fingerprint(config=first) != enrichment_fingerprint(config=second)
+    assert enrichment_fingerprint(config=first) == enrichment_fingerprint(config=rotated)
+    assert enrichment_fingerprint(config=first, max_tokens=500) != enrichment_fingerprint(config=first)

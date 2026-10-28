@@ -136,6 +136,8 @@ def prefilter_evaluated_signals(
 ):
     results = []
     for evaluated in evaluated_signals:
+        if evaluated.candidate.strategy_code.upper() == "SWING_EXIT":
+            continue
         quant_score, breakdown = score_evaluated_signal(evaluated, config=config)
         if quant_score >= config.minimum_score:
             results.append(QuantPrefilterResult(evaluated, quant_score, breakdown))
@@ -146,4 +148,13 @@ def prefilter_evaluated_signals(
             x.evaluated.candidate.strategy_code,
         )
     )
-    return tuple(results[: config.limit])
+    selected_instruments = set()
+    selected = []
+    for result in results:
+        instrument_id = result.evaluated.member.instrument_id
+        if instrument_id not in selected_instruments:
+            if len(selected_instruments) >= config.limit:
+                continue
+            selected_instruments.add(instrument_id)
+        selected.append(result)
+    return tuple(selected)

@@ -1,6 +1,7 @@
 import logging
 from typing import Any
 
+from config.settings import settings
 from job_runtime.database import run_transactional
 from market_analysis.quant_prefilter import QuantPrefilterConfig
 from market_analysis.scan import ScanConfig
@@ -40,12 +41,7 @@ def _compact_result(result: dict[str, Any]) -> dict[str, Any]:
 
 
 def run() -> dict[str, Any]:
-    scan_config = ScanConfig(
-        period=MARKET_ANALYSIS_PERIOD,
-        interval=MARKET_ANALYSIS_INTERVAL,
-        minimum_bars=MARKET_ANALYSIS_MINIMUM_BARS,
-        timeframe=MARKET_ANALYSIS_TIMEFRAME,
-    )
+    scan_config = ScanConfig.from_settings(settings)
     quant_config = QuantPrefilterConfig(
         minimum_score=MARKET_ANALYSIS_QUANT_MIN_SCORE,
         limit=MARKET_ANALYSIS_QUANT_CANDIDATE_LIMIT,

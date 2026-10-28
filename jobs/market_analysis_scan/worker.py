@@ -17,12 +17,7 @@ logger = logging.getLogger(__name__)
 
 def run() -> dict:
     universe_code = str(settings.get("MARKET_ANALYSIS_UNIVERSE", "NASDAQ100"))
-    config = ScanConfig(
-        period=MARKET_ANALYSIS_PERIOD,
-        interval=MARKET_ANALYSIS_INTERVAL,
-        minimum_bars=MARKET_ANALYSIS_MINIMUM_BARS,
-        timeframe=MARKET_ANALYSIS_TIMEFRAME,
-    )
+    config = ScanConfig.from_settings(settings)
     result = run_transactional(
         lambda db: run_market_analysis_scan(
             db,

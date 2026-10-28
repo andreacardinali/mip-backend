@@ -61,6 +61,11 @@ class TechnicalSnapshot:
     bollinger_upper: float | None = None
     bullish_fair_value_gap: float | None = None
     bearish_fair_value_gap: float | None = None
+    smc_bias: int = 0
+    bullish_order_block_top: float | None = None
+    bearish_order_block_top: float | None = None
+    bullish_fair_value_gap_top: float | None = None
+    bearish_fair_value_gap_top: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -83,6 +88,16 @@ class TechnicalSnapshot:
             "bearishOrderBlock": self.bearish_order_block,
             "dropFromHighPct": self.drop_from_high_pct,
             "riseFromLowPct": self.rise_from_low_pct,
+            "ema50": self.ema_50,
+            "bbLower": self.bollinger_lower,
+            "bbUpper": self.bollinger_upper,
+            "smcBias": self.smc_bias,
+            "bullishOrderBlockTop": self.bullish_order_block_top,
+            "bearishOrderBlockTop": self.bearish_order_block_top,
+            "bullishFairValueGap": self.bullish_fair_value_gap,
+            "bullishFairValueGapTop": self.bullish_fair_value_gap_top,
+            "bearishFairValueGap": self.bearish_fair_value_gap,
+            "bearishFairValueGapTop": self.bearish_fair_value_gap_top,
         }
 
 

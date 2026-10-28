@@ -35,20 +35,17 @@ def generate_trend_pullback_candidate(
     timeframe: str = "1D",
     observed_at: datetime | None = None,
 ) -> SignalCandidate | None:
-    """Generate a conservative deterministic trend-pullback candidate.
-
-    The first implementation intentionally requires complete long-term moving
-    averages and RSI. It emits no signal when the evidence is incomplete.
-    """
-    if snapshot.sma_50 is None or snapshot.sma_200 is None or snapshot.rsi is None:
+    """Generate a deterministic trend-pullback candidate."""
+    if snapshot.sma_50 is None or snapshot.rsi is None or snapshot.rsi <= 0:
         return None
 
     trend = classify_trend(snapshot)
     timestamp = observed_at or datetime.fromtimestamp(snapshot.observed_timestamp, UTC)
 
     if (
-        trend in {TrendType.STRONG_BULLISH, TrendType.BULLISH}
-        and 35 <= snapshot.rsi <= 55
+        snapshot.market_price > snapshot.sma_50
+        and snapshot.rsi < 70
+        and (snapshot.sma_200 is None or snapshot.sma_50 > snapshot.sma_200)
     ):
         confidence = min(1.0, 0.55 + max(0.0, 55.0 - snapshot.rsi) / 100.0)
         return SignalCandidate(
@@ -60,13 +57,14 @@ def generate_trend_pullback_candidate(
             reference_price=snapshot.market_price,
             observed_at=timestamp,
             confidence=confidence,
-            reasons=("price_above_sma_200", "rsi_pullback_window"),
+            reasons=("price_above_sma_50", "rsi_below_70"),
             evidence={"technical": snapshot.to_dict()},
         )
 
     if (
-        trend in {TrendType.STRONG_BEARISH, TrendType.BEARISH}
-        and 45 <= snapshot.rsi <= 65
+        snapshot.market_price < snapshot.sma_50
+        and snapshot.rsi > 30
+        and (snapshot.sma_200 is None or snapshot.sma_50 < snapshot.sma_200)
     ):
         confidence = min(1.0, 0.55 + max(0.0, snapshot.rsi - 45.0) / 100.0)
         return SignalCandidate(
@@ -78,7 +76,7 @@ def generate_trend_pullback_candidate(
             reference_price=snapshot.market_price,
             observed_at=timestamp,
             confidence=confidence,
-            reasons=("price_below_sma_200", "rsi_rebound_window"),
+            reasons=("price_below_sma_50", "rsi_above_30"),
             evidence={"technical": snapshot.to_dict()},
         )
 
