@@ -1,10 +1,8 @@
 import logging
 from typing import Any
 
-import httpx
-
 from config.settings import settings
-from http_client.retry import RetryPolicy, request_with_retry
+from http_client import RetryPolicy, create_http_client, request_with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +20,7 @@ class FMPClient:
             max_retries=self.max_retries,
             base_delay_seconds=self.retry_delay,
         )
-        self._client = httpx.Client(
+        self._client = create_http_client(
             base_url=self.base_url,
             timeout=self.timeout,
             headers={"Accept": "application/json", "User-Agent": "mip-scheduler/1.0"},

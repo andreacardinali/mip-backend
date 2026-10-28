@@ -1,8 +1,8 @@
 from datetime import UTC, datetime
 
-import httpx
 import pytest
 
+from http_client import testing as httpx
 from market_sources.capabilities import (
     MarketSourceCapability,
     SourceProviderCapabilities,

@@ -1,7 +1,6 @@
 import unittest
 
-import httpx
-
+from http_client import testing as httpx
 from http_client.retry import RetryPolicy
 from market_data.capabilities import InstrumentType, MarketDataCapability
 from market_data.exceptions import InvalidProviderResponseError

@@ -5,9 +5,9 @@ from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
 from uuid import UUID
 
-import httpx
 import pytest
 
+from http_client import testing as httpx
 from jobs.eulerpool_exchange_holidays import sync_holidays
 from market_data.capabilities import InstrumentType
 from market_data.exceptions import InstrumentNotFoundError

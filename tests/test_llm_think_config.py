@@ -1,7 +1,6 @@
 import json
 
-import httpx
-
+from http_client import testing as httpx
 from llm.base import LLMRequest
 from llm.config import LLMConfig
 from llm.providers import ollama as module

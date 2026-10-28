@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-import httpx
 import pytest
 
+from http_client import testing as httpx
 from http_client.retry import RetryPolicy
 from market_sources.discovery.providers import apewisdom as module
 from market_sources.discovery.providers.apewisdom import (

@@ -1,10 +1,10 @@
 import json
 import logging
 
-import httpx
 import pytest
 
 from http_client import HttpStatusError, get_http_status
+from http_client import testing as httpx
 
 telegram = pytest.importorskip(
     "notifications.providers.telegram", exc_type=ModuleNotFoundError

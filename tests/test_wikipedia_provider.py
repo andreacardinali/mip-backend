@@ -1,5 +1,4 @@
-import httpx
-
+from http_client import testing as httpx
 from market_sources.universe.providers.wikipedia import (
     UNIVERSE_DEFINITIONS,
     WikipediaUniverseProvider,

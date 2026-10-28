@@ -16,6 +16,7 @@ MIGRATED_PROVIDER_PATHS = (
     "market_data/providers/fmp.py",
     "market_data/providers/yahoo.py",
     "notifications/providers/telegram.py",
+    "jobs/fmp/client.py",
 )
 
 FORBIDDEN_HTTP_METHODS = {
@@ -102,4 +103,20 @@ def test_migrated_providers_use_only_shared_http_module() -> None:
             elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
                 if _is_direct_http_call(node.func):
                     violations.append(f"{path}:{node.lineno}:{node.func.attr}")
+    assert violations == [], ", ".join(violations)
+
+
+def test_tests_use_only_shared_http_module() -> None:
+    violations = []
+    for path in Path("tests").rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                modules = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                modules = [node.module or ""]
+            else:
+                continue
+            if any(module.split(".")[0] in HTTP_MODULE_NAMES for module in modules):
+                violations.append(f"{path}:{node.lineno}:import")
     assert violations == [], ", ".join(violations)

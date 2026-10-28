@@ -2,9 +2,9 @@ import logging
 import traceback
 import unittest
 
-import httpx
 import pytest
 
+from http_client import testing as httpx
 from http_client.retry import (
     RetryDelayStrategy,
     RetryPolicy,

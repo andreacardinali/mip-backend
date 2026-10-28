@@ -1,5 +1,4 @@
-import httpx
-
+from http_client import testing as httpx
 from market_data.capabilities import InstrumentType
 from market_data.exceptions import InstrumentNotFoundError
 from market_data.models import InstrumentReference

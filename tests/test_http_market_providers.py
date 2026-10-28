@@ -1,6 +1,9 @@
-import httpx
+from types import SimpleNamespace
+
 import pytest
 
+from http_client import create_http_client
+from http_client import testing as httpx
 from http_client.retry import RetryPolicy
 from market_data.capabilities import InstrumentType
 from market_data.exceptions import (
@@ -14,6 +17,54 @@ from market_data.providers.ghostfolio import GhostfolioProvider
 
 def _client(handler):
     return httpx.Client(transport=httpx.MockTransport(handler))
+
+
+def test_fmp_job_uses_shared_factory_and_closes_client(monkeypatch):
+    from jobs.fmp import client as module
+
+    requests = []
+    clients = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json=[{"symbol": "AAPL"}, None])
+
+    def create_client(**kwargs):
+        client = create_http_client(transport=httpx.MockTransport(handler), **kwargs)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(module, "create_http_client", create_client)
+    monkeypatch.setattr(
+        module,
+        "settings",
+        SimpleNamespace(
+            FMP_API_KEY="job-secret",
+            get={
+                "FMP_BASE_URL": "https://fmp.test/stable/",
+                "FMP_HTTP_TIMEOUT": "12",
+                "FMP_HTTP_MAX_RETRIES": "0",
+            }.get,
+        ),
+    )
+    with module.FMPClient() as client:
+        assert client.earnings_calendar("2026-01-01", "2026-01-02") == [
+            {"symbol": "AAPL"}
+        ]
+        assert not clients[0].is_closed
+
+    assert clients[0].is_closed
+    assert clients[0].timeout.read == 12
+    assert len(requests) == 1
+    assert requests[0].method == "GET"
+    assert requests[0].url.path == "/stable/earnings-calendar"
+    assert dict(requests[0].url.params) == {
+        "from": "2026-01-01",
+        "to": "2026-01-02",
+        "apikey": "job-secret",
+    }
+    assert requests[0].headers["Accept"] == "application/json"
+    assert requests[0].headers["User-Agent"] == "mip-scheduler/1.0"
 
 
 def test_fmp_retries_get_and_normalizes_profile():

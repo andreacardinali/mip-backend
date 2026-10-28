@@ -1,7 +1,6 @@
 import unittest
 
-import httpx
-
+from http_client import testing as httpx
 from llm.rate_limit import LLMRateLimiter, estimate_tokens
 from llm.retry_hints import llm_response_delay
 

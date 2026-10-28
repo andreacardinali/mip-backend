@@ -1,5 +1,4 @@
-import httpx
-
+from http_client import testing as httpx
 from market_data.capabilities import InstrumentType, MarketDataCapability
 from market_data.providers.yahoo import YahooProvider
 

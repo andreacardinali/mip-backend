@@ -1,7 +1,6 @@
 import unittest
 
-import httpx
-
+from http_client import testing as httpx
 from http_client.retry import RetryPolicy, request_with_retry
 
 

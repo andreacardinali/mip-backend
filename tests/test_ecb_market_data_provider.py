@@ -1,7 +1,6 @@
 from decimal import Decimal
 
-import httpx
-
+from http_client import testing as httpx
 from http_client.retry import RetryPolicy
 from market_data.capabilities import MarketDataCapability
 from market_data.providers.ecb import EcbProvider
