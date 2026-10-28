@@ -42,18 +42,28 @@ class ScanConfig:
             interval=str(settings.get("MARKET_ANALYSIS_INTERVAL", "1d")),
             minimum_bars=int(settings.get("MARKET_ANALYSIS_MINIMUM_BARS", 200)),
             timeframe=str(settings.get("MARKET_ANALYSIS_TIMEFRAME", "1D")),
-            enabled_strategies=tuple(value.strip().upper() for value in strategies.split(",") if value.strip()) or None,
+            enabled_strategies=tuple(
+                value.strip().upper()
+                for value in strategies.split(",")
+                if value.strip()
+            )
+            or None,
             technical_config=TechnicalConfig(
                 supertrend_period=int(settings.get("SUPERTREND_ATR_LENGTH", 10)),
                 supertrend_factor=float(settings.get("SUPERTREND_FACTOR", 3)),
-                supertrend_use_rma=str(settings.get("SUPERTREND_USE_RMA", "true")).lower() in {"true", "1", "yes"},
+                supertrend_use_rma=str(
+                    settings.get("SUPERTREND_USE_RMA", "true")
+                ).lower()
+                in {"true", "1", "yes"},
                 swing_length=int(settings.get("SMC_SWING_LENGTH", 50)),
                 order_block_lookback=int(settings.get("SMC_OB_LOOKBACK", 10)),
                 fvg_threshold=float(settings.get("SMC_FVG_THRESHOLD", 0.0001)),
                 high_lookback=int(settings.get("MARKET_ANALYSIS_HIGH_LOOKBACK", 126)),
             ),
             smc_threshold=float(settings.get("SMC_SIGNAL_THRESHOLD", 0.0005)),
-            minimum_drop_pct=float(settings.get("MARKET_ANALYSIS_OVERSOLD_MIN_DROP", 0)),
+            minimum_drop_pct=float(
+                settings.get("MARKET_ANALYSIS_OVERSOLD_MIN_DROP", 0)
+            ),
         )
 
 
@@ -153,7 +163,9 @@ def _evaluate(member, bars, config):
     score = build_score_breakdown(technical=score_technical_snapshot(snapshot))
     return tuple(
         EvaluatedSignal(member, x, score)
-        for x in create_registry(smc_threshold=config.smc_threshold, minimum_drop_pct=config.minimum_drop_pct).evaluate(
+        for x in create_registry(
+            smc_threshold=config.smc_threshold, minimum_drop_pct=config.minimum_drop_pct
+        ).evaluate(
             snapshot,
             timeframe=config.timeframe,
             observed_at=observed,
@@ -238,6 +250,9 @@ def scan_members(members, *, market_data_service, config):
         )
     )
     return ScanResult(
-        len(members), tuple(candidates), tuple(failures), tuple(skipped),
+        len(members),
+        tuple(candidates),
+        tuple(failures),
+        tuple(skipped),
         tuple(evaluations),
     )

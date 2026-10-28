@@ -13,7 +13,9 @@ def reconcile_persisted_signals(
     ]
 
 
-def expire_evaluated_signals(db, result: ScanResult, signal_ids: list[str], stability_minutes: int = 30) -> int:
+def expire_evaluated_signals(
+    db, result: ScanResult, signal_ids: list[str], stability_minutes: int = 30
+) -> int:
     scopes = [
         {
             "instrument_id": evaluation.instrument_id,
@@ -24,4 +26,6 @@ def expire_evaluated_signals(db, result: ScanResult, signal_ids: list[str], stab
         for evaluation in result.evaluations
         for strategy in evaluation.strategy_codes
     ]
-    return SignalLifecycleRepository(db).expire_evaluated(scopes, signal_ids, stability_minutes)
+    return SignalLifecycleRepository(db).expire_evaluated(
+        scopes, signal_ids, stability_minutes
+    )

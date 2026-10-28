@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from market_analysis.lifecycle import expire_evaluated_signals, reconcile_persisted_signals
+from market_analysis.lifecycle import (
+    expire_evaluated_signals,
+    reconcile_persisted_signals,
+)
 from market_analysis.quant_prefilter import (
     QuantPrefilterConfig,
     prefilter_evaluated_signals,

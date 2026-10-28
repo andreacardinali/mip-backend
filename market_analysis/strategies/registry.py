@@ -57,15 +57,17 @@ class StrategyRegistry:
 
 
 def create_registry(*, smc_threshold=0.0005, minimum_drop_pct=0.0):
-    return StrategyRegistry((
-        TrendPullbackStrategy(),
-        SupertrendStrategy(),
-        DeepOversoldStrategy(minimum_drop_pct=minimum_drop_pct),
-        SmcChochStrategy(breakout_threshold=smc_threshold),
-        SmcBosStrategy(breakout_threshold=smc_threshold),
-        CallEntryStrategy(),
-        SwingExitStrategy(),
-    ))
+    return StrategyRegistry(
+        (
+            TrendPullbackStrategy(),
+            SupertrendStrategy(),
+            DeepOversoldStrategy(minimum_drop_pct=minimum_drop_pct),
+            SmcChochStrategy(breakout_threshold=smc_threshold),
+            SmcBosStrategy(breakout_threshold=smc_threshold),
+            CallEntryStrategy(),
+            SwingExitStrategy(),
+        )
+    )
 
 
 default_registry = create_registry()

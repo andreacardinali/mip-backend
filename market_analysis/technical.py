@@ -17,7 +17,15 @@ class TechnicalConfig:
     high_lookback: int = 126
 
     def __post_init__(self):
-        if min(self.supertrend_period, self.swing_length, self.order_block_lookback, self.high_lookback) < 1:
+        if (
+            min(
+                self.supertrend_period,
+                self.swing_length,
+                self.order_block_lookback,
+                self.high_lookback,
+            )
+            < 1
+        ):
             raise ValueError("indicator periods must be positive")
         if not math.isfinite(self.supertrend_factor) or self.supertrend_factor <= 0:
             raise ValueError("supertrend factor must be finite and positive")
@@ -116,7 +124,7 @@ def supertrend(bars, period=10, factor=3.0, use_rma=True):
         if use_rma:
             current_atr += (ranges[index] - current_atr) / period
         else:
-            current_atr = sma(ranges[:index + 1], period)
+            current_atr = sma(ranges[: index + 1], period)
             if current_atr is None:
                 continue
         middle = (bars[index].high + bars[index].low) / 2
@@ -124,11 +132,27 @@ def supertrend(bars, period=10, factor=3.0, use_rma=True):
         basic_lower = middle - factor * current_atr
         previous_close = bars[index - 1].close
         previous_upper, previous_lower = upper, lower
-        lower = max(basic_lower, lower) if lower is not None and previous_close > lower else basic_lower
-        upper = min(basic_upper, upper) if upper is not None and previous_close < upper else basic_upper
-        if direction == -1 and previous_upper is not None and bars[index].close > previous_upper:
+        lower = (
+            max(basic_lower, lower)
+            if lower is not None and previous_close > lower
+            else basic_lower
+        )
+        upper = (
+            min(basic_upper, upper)
+            if upper is not None and previous_close < upper
+            else basic_upper
+        )
+        if (
+            direction == -1
+            and previous_upper is not None
+            and bars[index].close > previous_upper
+        ):
             direction = 1
-        elif direction == 1 and previous_lower is not None and bars[index].close < previous_lower:
+        elif (
+            direction == 1
+            and previous_lower is not None
+            and bars[index].close < previous_lower
+        ):
             direction = -1
         trend = lower if direction == 1 else upper
     return trend, direction
@@ -141,7 +165,7 @@ def structure_snapshot(bars, *, config: TechnicalConfig):
         previous_high, previous_low = high, low
         if index >= config.swing_length:
             delayed = bars[index - config.swing_length]
-            following = bars[index - config.swing_length + 1:index + 1]
+            following = bars[index - config.swing_length + 1 : index + 1]
             if delayed.high > max(bar.high for bar in following):
                 high = delayed.high
             if delayed.low < min(bar.low for bar in following):
@@ -150,9 +174,17 @@ def structure_snapshot(bars, *, config: TechnicalConfig):
         if not index:
             continue
         previous = bars[index - 1]
-        bullish_cross = high is not None and current.close > high and not (previous_high is not None and previous.close > previous_high)
-        bearish_cross = low is not None and current.close < low and not (previous_low is not None and previous.close < previous_low)
-        window = bars[max(0, index - config.order_block_lookback):index + 1]
+        bullish_cross = (
+            high is not None
+            and current.close > high
+            and not (previous_high is not None and previous.close > previous_high)
+        )
+        bearish_cross = (
+            low is not None
+            and current.close < low
+            and not (previous_low is not None and previous.close < previous_low)
+        )
+        window = bars[max(0, index - config.order_block_lookback) : index + 1]
         if bullish_cross:
             choch, bos = (1, 0) if bias <= 0 else (0, 1)
             bias = 1
@@ -164,19 +196,31 @@ def structure_snapshot(bars, *, config: TechnicalConfig):
             block = max(window, key=lambda bar: bar.high)
             bearish_bottom, bearish_top = block.low, block.high
     return {
-        "swing_high": high, "swing_low": low, "change_of_character": choch,
-        "break_of_structure": bos, "smc_bias": bias,
-        "bullish_order_block": bullish_bottom, "bullish_order_block_top": bullish_top,
-        "bearish_order_block": bearish_bottom, "bearish_order_block_top": bearish_top,
+        "swing_high": high,
+        "swing_low": low,
+        "change_of_character": choch,
+        "break_of_structure": bos,
+        "smc_bias": bias,
+        "bullish_order_block": bullish_bottom,
+        "bullish_order_block_top": bullish_top,
+        "bearish_order_block": bearish_bottom,
+        "bearish_order_block_top": bearish_top,
     }
 
 
 def market_structure(bars, lookback=50):
     result = structure_snapshot(bars, config=TechnicalConfig(swing_length=lookback))
-    return tuple(result[name] for name in (
-        "swing_high", "swing_low", "change_of_character", "break_of_structure",
-        "bullish_order_block", "bearish_order_block",
-    ))
+    return tuple(
+        result[name]
+        for name in (
+            "swing_high",
+            "swing_low",
+            "change_of_character",
+            "break_of_structure",
+            "bullish_order_block",
+            "bearish_order_block",
+        )
+    )
 
 
 def gap_snapshot(bars, threshold=0.0001):
@@ -184,13 +228,23 @@ def gap_snapshot(bars, threshold=0.0001):
     for index in range(2, len(bars)):
         first, current = bars[index - 2], bars[index]
         delta = (current.close - current.open) / current.open
-        if first.high < current.low and current.close > first.high and delta > threshold:
+        if (
+            first.high < current.low
+            and current.close > first.high
+            and delta > threshold
+        ):
             bullish_bottom, bullish_top = first.high, current.low
-        if first.low > current.high and current.close < first.low and -delta > threshold:
+        if (
+            first.low > current.high
+            and current.close < first.low
+            and -delta > threshold
+        ):
             bearish_bottom, bearish_top = current.high, first.low
     return {
-        "bullish_fair_value_gap": bullish_bottom, "bullish_fair_value_gap_top": bullish_top,
-        "bearish_fair_value_gap": bearish_bottom, "bearish_fair_value_gap_top": bearish_top,
+        "bullish_fair_value_gap": bullish_bottom,
+        "bullish_fair_value_gap_top": bullish_top,
+        "bearish_fair_value_gap": bearish_bottom,
+        "bearish_fair_value_gap_top": bearish_top,
     }
 
 
@@ -199,7 +253,9 @@ def fair_value_gaps(bars):
     return result["bullish_fair_value_gap"], result["bearish_fair_value_gap"]
 
 
-def analyze_price_bars(bars: Sequence[PriceBar], *, config: TechnicalConfig | None = None):
+def analyze_price_bars(
+    bars: Sequence[PriceBar], *, config: TechnicalConfig | None = None
+):
     if len(bars) < 2:
         return None
     config = config or TechnicalConfig()
@@ -207,18 +263,29 @@ def analyze_price_bars(bars: Sequence[PriceBar], *, config: TechnicalConfig | No
     if len({bar.timestamp for bar in bars}) != len(bars):
         raise ValueError("duplicate price bar timestamps")
     for bar in bars:
-        if not all(math.isfinite(value) for value in (bar.open, bar.high, bar.low, bar.close)) or bar.open <= 0 or bar.close <= 0 or bar.high < bar.low:
+        if (
+            not all(
+                math.isfinite(value)
+                for value in (bar.open, bar.high, bar.low, bar.close)
+            )
+            or bar.open <= 0
+            or bar.close <= 0
+            or bar.high < bar.low
+        ):
             raise ValueError("invalid OHLC price bar")
     closes = [bar.close for bar in bars]
     current = closes[-1]
     previous = closes[-2]
     structure = structure_snapshot(bars, config=config)
     supertrend_value, supertrend_direction = supertrend(
-        bars, config.supertrend_period, config.supertrend_factor, config.supertrend_use_rma
+        bars,
+        config.supertrend_period,
+        config.supertrend_factor,
+        config.supertrend_use_rma,
     )
     bollinger_lower, bollinger_upper, bollinger_width = bollinger_bands(closes)
     gaps = gap_snapshot(bars, config.fvg_threshold)
-    recent = bars[-config.high_lookback:]
+    recent = bars[-config.high_lookback :]
     period_high = max(value.high for value in recent)
     period_low = min(value.low for value in recent)
     return TechnicalSnapshot(

@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict Oz1y8nCT0UwhFQ8fdTG7PIqVZX461URmIfpaVdELhUsRkNwAeA6WvfOq0r5bIFX
+\restrict rg735Y3UubzlBGbIE2qABZ2HUNqj7UXt5JnP2gZUZrg42ios40ZDklQd0gOSxYe
 
 -- Dumped from database version 18.6 (Debian 18.6-1.pgdg13+2)
 -- Dumped by pg_dump version 18.6 (Debian 18.6-1.pgdg13+2)
@@ -4688,7 +4688,7 @@ END;$$;
 
 
 --
--- Name: sp_market_analysis_finish_scan_run(uuid, character varying, jsonb); Type: FUNCTION; Schema: public; Owner: -
+-- Name: sp_market_analysis_expire_evaluated_signals(jsonb, uuid[], integer); Type: FUNCTION; Schema: public; Owner: -
 --
 
 CREATE FUNCTION public.sp_market_analysis_expire_evaluated_signals(p_scopes jsonb, p_signal_ids uuid[], p_stability_minutes integer DEFAULT 30) RETURNS integer
@@ -4732,6 +4732,11 @@ BEGIN
     RETURN v_count;
 END;
 $$;
+
+
+--
+-- Name: sp_market_analysis_finish_scan_run(uuid, character varying, jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
 
 CREATE FUNCTION public.sp_market_analysis_finish_scan_run(p_run_id uuid, p_status character varying, p_summary jsonb DEFAULT '{}'::jsonb) RETURNS boolean
     LANGUAGE plpgsql
@@ -15061,5 +15066,5 @@ ALTER TABLE ONLY public.watchlists
 -- PostgreSQL database dump complete
 --
 
-\unrestrict Oz1y8nCT0UwhFQ8fdTG7PIqVZX461URmIfpaVdELhUsRkNwAeA6WvfOq0r5bIFX
+\unrestrict rg735Y3UubzlBGbIE2qABZ2HUNqj7UXt5JnP2gZUZrg42ios40ZDklQd0gOSxYe
 

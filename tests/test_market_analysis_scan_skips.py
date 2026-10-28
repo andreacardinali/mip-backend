@@ -46,7 +46,9 @@ def test_successful_no_signal_scan_records_only_evaluated_scope(monkeypatch):
             if request.instrument.symbol == "FAIL":
                 raise ValueError("provider unavailable")
             return [
-                PriceBar(timestamp=timestamp, open=100, high=101, low=99, close=100, volume=1)
+                PriceBar(
+                    timestamp=timestamp, open=100, high=101, low=99, close=100, volume=1
+                )
                 for timestamp in (200000, 100000)
             ]
 
@@ -69,7 +71,9 @@ def test_successful_no_signal_scan_records_only_evaluated_scope(monkeypatch):
             captured.extend(scopes)
             return 1
 
-    monkeypatch.setattr("market_analysis.lifecycle.SignalLifecycleRepository", Repository)
+    monkeypatch.setattr(
+        "market_analysis.lifecycle.SignalLifecycleRepository", Repository
+    )
     assert expire_evaluated_signals(object(), result, []) == 1
     assert len(captured) == 1
     assert captured[0]["instrument_id"] == "good"

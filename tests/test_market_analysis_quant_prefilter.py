@@ -68,9 +68,22 @@ def test_quant_prefilter_sorts_and_limits() -> None:
 
 def test_budget_is_per_instrument_and_preserves_selected_strategies():
     first = _evaluated("AAA", 0.9)
-    second = replace(first, candidate=replace(first.candidate, strategy_code="SUPERTREND", confidence=0.1))
-    exit_signal = replace(first, candidate=replace(first.candidate, strategy_code="SWING_EXIT"))
-    results = prefilter_evaluated_signals([first, second, exit_signal, _evaluated("BBB", 0.5)], config=QuantPrefilterConfig(limit=1))
+    second = replace(
+        first,
+        candidate=replace(first.candidate, strategy_code="SUPERTREND", confidence=0.1),
+    )
+    exit_signal = replace(
+        first, candidate=replace(first.candidate, strategy_code="SWING_EXIT")
+    )
+    results = prefilter_evaluated_signals(
+        [first, second, exit_signal, _evaluated("BBB", 0.5)],
+        config=QuantPrefilterConfig(limit=1),
+    )
     assert len(results) == 2
-    assert {result.evaluated.candidate.strategy_code for result in results} == {"TREND_PULLBACK", "SUPERTREND"}
-    assert {result.evaluated.member.instrument_id for result in results} == {first.member.instrument_id}
+    assert {result.evaluated.candidate.strategy_code for result in results} == {
+        "TREND_PULLBACK",
+        "SUPERTREND",
+    }
+    assert {result.evaluated.member.instrument_id for result in results} == {
+        first.member.instrument_id
+    }

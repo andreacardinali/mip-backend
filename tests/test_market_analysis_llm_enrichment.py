@@ -85,9 +85,20 @@ def test_composite_score_renormalizes_missing_components():
 
 
 def test_enrichment_identity_changes_with_model_not_credentials():
-    first = LLMConfig(provider="ollama", model="model-a", base_url="http://localhost:11434")
+    first = LLMConfig(
+        provider="ollama", model="model-a", base_url="http://localhost:11434"
+    )
     second = LLMConfig(provider="ollama", model="model-b", base_url=first.base_url)
-    rotated = LLMConfig(provider="ollama", model=first.model, base_url=first.base_url, api_key="test-credential")
+    rotated = LLMConfig(
+        provider="ollama",
+        model=first.model,
+        base_url=first.base_url,
+        api_key="test-credential",
+    )
     assert enrichment_fingerprint(config=first) != enrichment_fingerprint(config=second)
-    assert enrichment_fingerprint(config=first) == enrichment_fingerprint(config=rotated)
-    assert enrichment_fingerprint(config=first, max_tokens=500) != enrichment_fingerprint(config=first)
+    assert enrichment_fingerprint(config=first) == enrichment_fingerprint(
+        config=rotated
+    )
+    assert enrichment_fingerprint(
+        config=first, max_tokens=500
+    ) != enrichment_fingerprint(config=first)

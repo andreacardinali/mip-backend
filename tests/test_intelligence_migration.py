@@ -26,25 +26,46 @@ def test_migration_rejects_missing_definition():
 
 
 def test_swing_exit_and_quant_selection_are_in_migration():
-    schema = (Path(__file__).resolve().parents[1] / "mip_schema.sql").read_text(encoding="utf-8")
+    schema = (Path(__file__).resolve().parents[1] / "mip_schema.sql").read_text(
+        encoding="utf-8"
+    )
     statements = migration_statements(schema)
-    lifecycle = next(sql for sql in statements if "CREATE OR REPLACE FUNCTION public.sp_market_analysis_reconcile_signal_lifecycle(" in sql)
+    lifecycle = next(
+        sql
+        for sql in statements
+        if "CREATE OR REPLACE FUNCTION public.sp_market_analysis_reconcile_signal_lifecycle("
+        in sql
+    )
     assert "signal.direction = 'LONG'" in lifecycle
     assert "signal.observed_at <= v_signal.observed_at" in lifecycle
     assert "SET status = 'CLOSED'" in lifecycle
-    enrichment = next(sql for sql in statements if "CREATE OR REPLACE FUNCTION public.sp_market_analysis_list_pending_llm_enrichment(" in sql)
+    enrichment = next(
+        sql
+        for sql in statements
+        if "CREATE OR REPLACE FUNCTION public.sp_market_analysis_list_pending_llm_enrichment("
+        in sql
+    )
     assert "{quant,llm_eligible}" in enrichment
     assert "s.strategy_code <> 'SWING_EXIT'" in enrichment
-    upsert = next(sql for sql in statements if "CREATE OR REPLACE FUNCTION public.sp_market_analysis_upsert_signal(" in sql)
+    upsert = next(
+        sql
+        for sql in statements
+        if "CREATE OR REPLACE FUNCTION public.sp_market_analysis_upsert_signal(" in sql
+    )
     assert "IS DISTINCT FROM" in upsert
     assert "IF v_signal_id IS NULL THEN" in upsert
 
 
 def test_scoped_expiry_migration_preserves_unobserved_instruments_and_current_signals():
-    schema = (Path(__file__).resolve().parents[1] / "mip_schema.sql").read_text(encoding="utf-8")
+    schema = (Path(__file__).resolve().parents[1] / "mip_schema.sql").read_text(
+        encoding="utf-8"
+    )
     statement = next(
-        sql for sql in migration_statements(schema)
-        if sql.startswith("CREATE OR REPLACE FUNCTION public.sp_market_analysis_expire_evaluated_signals(")
+        sql
+        for sql in migration_statements(schema)
+        if sql.startswith(
+            "CREATE OR REPLACE FUNCTION public.sp_market_analysis_expire_evaluated_signals("
+        )
     )
     assert "jsonb_to_recordset(p_scopes)" in statement
     assert "USING (instrument_id, strategy_code, timeframe)" in statement

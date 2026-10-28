@@ -52,10 +52,16 @@ def test_no_eligible_candidates_returns_skipped(monkeypatch):
 def test_quant_exclusion_does_not_prevent_signal_persistence(monkeypatch):
     persisted = []
     context = {
-        "instrument_id": "instrument", "entity_id": "entity", "symbol": "AAPL",
-        "universe_id": None, "candidate_id": "candidate", "snapshot_id": "snapshot",
-        "origin": "DISCOVERY", "attention_score": 50,
-        "universe_codes": [], "attention_evidence": {},
+        "instrument_id": "instrument",
+        "entity_id": "entity",
+        "symbol": "AAPL",
+        "universe_id": None,
+        "candidate_id": "candidate",
+        "snapshot_id": "snapshot",
+        "origin": "DISCOVERY",
+        "attention_score": 50,
+        "universe_codes": [],
+        "attention_evidence": {},
     }
 
     class DiscoveryRepository:
@@ -83,11 +89,18 @@ def test_quant_exclusion_does_not_prevent_signal_persistence(monkeypatch):
             pass
 
     candidate = SimpleNamespace(
-        strategy_code="TREND_PULLBACK", timeframe="1D",
+        strategy_code="TREND_PULLBACK",
+        timeframe="1D",
         direction=SimpleNamespace(value="LONG"),
-        signal_type=SimpleNamespace(value="BUY"), trend="BULLISH",
-        reference_price=100, observed_at=None, confidence=0.7,
-        reasons=(), evidence={}, invalidation_price=None, target_price=None,
+        signal_type=SimpleNamespace(value="BUY"),
+        trend="BULLISH",
+        reference_price=100,
+        observed_at=None,
+        confidence=0.7,
+        reasons=(),
+        evidence={},
+        invalidation_price=None,
+        target_price=None,
     )
     evaluated = SimpleNamespace(
         member=ScanMember("", "instrument", "entity", "AAPL"),
@@ -99,7 +112,8 @@ def test_quant_exclusion_does_not_prevent_signal_persistence(monkeypatch):
         DiscoveryRepository,
     )
     monkeypatch.setattr(
-        "services.market_discovery_analysis_scan.MarketAnalysisRepository", Repository,
+        "services.market_discovery_analysis_scan.MarketAnalysisRepository",
+        Repository,
     )
     monkeypatch.setattr(
         "services.market_discovery_analysis_scan.scan_members",
@@ -115,7 +129,9 @@ def test_quant_exclusion_does_not_prevent_signal_persistence(monkeypatch):
     )
 
     result = run_market_discovery_analysis_scan(
-        object(), market_data_service=object(), scan_config=ScanConfig(),
+        object(),
+        market_data_service=object(),
+        scan_config=ScanConfig(),
         quant_config=QuantPrefilterConfig(minimum_score=100),
     )
 

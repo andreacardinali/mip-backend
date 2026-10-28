@@ -15,10 +15,9 @@ class DeepOversoldStrategy:
     def evaluate(self, snapshot, *, timeframe, observed_at):
         if snapshot.rsi is None or not 0 < snapshot.rsi <= self.maximum_rsi:
             return None
-        if (
-              self.minimum_drop_pct > 0
-              and (snapshot.drop_from_high_pct is None
-                  or snapshot.drop_from_high_pct < self.minimum_drop_pct)
+        if self.minimum_drop_pct > 0 and (
+            snapshot.drop_from_high_pct is None
+            or snapshot.drop_from_high_pct < self.minimum_drop_pct
         ):
             return None
         confidence = 0.68 + min(0.12, (self.maximum_rsi - snapshot.rsi) / 100)
@@ -30,7 +29,8 @@ class DeepOversoldStrategy:
             direction=SignalDirection.LONG,
             signal_type=SignalType.STRONG_BUY,
             confidence=confidence,
-            reasons=("rsi_deep_oversold",) + (("material_drop_from_high",) if self.minimum_drop_pct > 0 else ()),
+            reasons=("rsi_deep_oversold",)
+            + (("material_drop_from_high",) if self.minimum_drop_pct > 0 else ()),
             invalidation=snapshot.swing_low,
             target=snapshot.sma_50,
             extra_evidence={

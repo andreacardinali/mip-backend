@@ -82,19 +82,28 @@ def test_registry_rejects_unknown_enabled_strategy():
 
 
 def test_legacy_deep_oversold_does_not_require_drawdown():
-    assert DeepOversoldStrategy().evaluate(snapshot(rsi=18), timeframe="1D", observed_at=NOW) is not None
+    assert (
+        DeepOversoldStrategy().evaluate(
+            snapshot(rsi=18), timeframe="1D", observed_at=NOW
+        )
+        is not None
+    )
 
 
 def test_call_entry_and_exit_are_distinct_long_actions():
     from market_analysis.strategies.swing import CallEntryStrategy, SwingExitStrategy
 
     entry = CallEntryStrategy().evaluate(
-        snapshot(market_price=95, rsi=30, bollinger_lower=98), timeframe="1D", observed_at=NOW,
+        snapshot(market_price=95, rsi=30, bollinger_lower=98),
+        timeframe="1D",
+        observed_at=NOW,
     )
     assert entry is not None
     assert entry.evidence["strategy"]["action"] == "ENTRY_LONG"
     exit_signal = SwingExitStrategy().evaluate(
-        snapshot(rsi=75, bollinger_upper=103), timeframe="1D", observed_at=NOW,
+        snapshot(rsi=75, bollinger_upper=103),
+        timeframe="1D",
+        observed_at=NOW,
     )
     assert exit_signal is not None
     assert exit_signal.direction == SignalDirection.LONG
@@ -104,7 +113,13 @@ def test_call_entry_and_exit_are_distinct_long_actions():
 def test_scan_configuration_reads_central_settings():
     from market_analysis.scan import ScanConfig
 
-    config = ScanConfig.from_settings({"SMC_SWING_LENGTH": "30", "SUPERTREND_USE_RMA": "false", "MARKET_ANALYSIS_STRATEGIES": "supertrend, smc_bos"})
+    config = ScanConfig.from_settings(
+        {
+            "SMC_SWING_LENGTH": "30",
+            "SUPERTREND_USE_RMA": "false",
+            "MARKET_ANALYSIS_STRATEGIES": "supertrend, smc_bos",
+        }
+    )
     assert config.technical_config.swing_length == 30
     assert not config.technical_config.supertrend_use_rma
     assert config.enabled_strategies == ("SUPERTREND", "SMC_BOS")
