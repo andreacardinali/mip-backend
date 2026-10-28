@@ -54,7 +54,7 @@ def rsi(closes, period=14):
         return None
     gain = loss = 0.0
     alpha = 1.0 / period
-    for previous, current in zip(closes, closes[1:]):
+    for previous, current in zip(closes, closes[1:], strict=False):
         change = current - previous
         gain = alpha * max(change, 0) + (1 - alpha) * gain
         loss = alpha * max(-change, 0) + (1 - alpha) * loss
