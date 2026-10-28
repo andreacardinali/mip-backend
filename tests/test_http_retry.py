@@ -1,4 +1,5 @@
 import logging
+import traceback
 import unittest
 
 import httpx
@@ -25,6 +26,114 @@ class SequenceTransport(httpx.BaseTransport):
 
 
 class RetryTests(unittest.TestCase):
+    def test_sensitive_requests_keep_status_and_hide_tokens(self):
+        for status in [401, 403, 404, 429, 500]:
+            with self.subTest(status=status):
+
+                def handler(request, status=status):
+                    self.assertEqual(request.url.params["token"], "query-secret")
+                    self.assertEqual(request.headers["X-API-Key"], "header-secret")
+                    return httpx.Response(
+                        status,
+                        json={"message": "query-secret header-secret bearer-secret"},
+                    )
+
+                with (
+                    httpx.Client(transport=httpx.MockTransport(handler)) as client,
+                    self.assertLogs(level=logging.INFO) as captured,
+                    self.assertRaises(httpx.HTTPStatusError) as error,
+                ):
+                    request_with_retry(
+                        client,
+                        "GET",
+                        "https://example.test?token=query-secret",
+                        headers={
+                            "X-API-Key": "header-secret",
+                            "Authorization": "Bearer bearer-secret",
+                        },
+                        policy=RetryPolicy(),
+                    )
+                self.assertEqual(error.exception.response.status_code, status)
+                diagnostics = "\n".join(captured.output) + "".join(
+                    traceback.format_exception(error.exception)
+                )
+                for secret in ["query-secret", "header-secret", "bearer-secret"]:
+                    self.assertNotIn(secret, diagnostics)
+
+    def test_client_default_credentials_are_redacted(self):
+        def handler(request):
+            return httpx.Response(
+                500, json={"message": "default-secret default-header form-secret"}
+            )
+
+        with (
+            httpx.Client(
+                transport=httpx.MockTransport(handler),
+                params={"token": "default-secret"},
+                headers={"X-API-Key": "default-header"},
+            ) as client,
+            self.assertLogs(level=logging.INFO) as captured,
+            self.assertRaises(httpx.HTTPStatusError) as error,
+        ):
+            request_with_retry(
+                client,
+                "POST",
+                "https://example.test",
+                json={"credentials": {"api_key": "form-secret"}},
+                policy=RetryPolicy(),
+            )
+        output = "\n".join(captured.output) + str(error.exception)
+        for secret in ["default-secret", "default-header", "form-secret"]:
+            self.assertNotIn(secret, output)
+
+    def test_retry_redacts_encoded_params_and_echoed_credentials(self):
+        secret = "sensitive +/value"
+        transport = SequenceTransport(
+            [(503, {}, {"message": secret, "api_key": "response-secret"}), 200]
+        )
+        with (
+            httpx.Client(transport=transport) as client,
+            self.assertLogs(level=logging.INFO) as captured,
+        ):
+            response = request_with_retry(
+                client,
+                "GET",
+                "https://example.test",
+                params={"api_key": secret},
+                policy=RetryPolicy(max_retries=1, jitter_seconds=0),
+                sleep=lambda _: None,
+            )
+        self.assertEqual(response.status_code, 200)
+        output = "\n".join(captured.output)
+        self.assertNotIn(secret, output)
+        self.assertNotIn("sensitive+%2B%2Fvalue", output)
+        self.assertNotIn("response-secret", output)
+        self.assertIn("[REDACTED]", output)
+
+    def test_network_failures_preserve_type_without_leaking_tokens(self):
+        attempts = 0
+
+        def handler(request):
+            nonlocal attempts
+            attempts += 1
+            raise httpx.ReadTimeout(f"timeout at {request.url}", request=request)
+
+        with (
+            httpx.Client(transport=httpx.MockTransport(handler)) as client,
+            self.assertLogs(level=logging.WARNING) as captured,
+            self.assertRaises(httpx.ReadTimeout) as error,
+        ):
+            request_with_retry(
+                client,
+                "GET",
+                "https://example.test?token=network-secret",
+                policy=RetryPolicy(max_retries=1, jitter_seconds=0),
+                sleep=lambda _: None,
+            )
+        self.assertEqual(attempts, 2)
+        self.assertNotIn("network-secret", str(error.exception))
+        self.assertNotIn("network-secret", "\n".join(captured.output))
+
     def test_get_retries_then_succeeds(self):
         transport = SequenceTransport([503, 200])
         with httpx.Client(transport=transport) as client:

@@ -5,10 +5,12 @@ from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
 from uuid import UUID
 
+import httpx
 import pytest
 
 from jobs.eulerpool_exchange_holidays import sync_holidays
 from market_data.capabilities import InstrumentType
+from market_data.exceptions import InstrumentNotFoundError
 from market_data.models import ExchangeReference, InstrumentReference
 from market_data.providers.eulerpool import EulerpoolProvider
 from market_time.repository import SQLHolidayRepository
@@ -240,7 +242,7 @@ def test_holiday_job_skips_conflicting_rows_and_continues(caplog):
     session_factory.assert_called_once_with()
 
 
-def test_holiday_job_catalog_failure_does_not_write():
+def test_holiday_job_catalog_failure_does_not_write(caplog):
     provider = Mock()
     provider.get_exchanges.side_effect = ValueError("secret-token")
     session_factory = Mock()
@@ -251,6 +253,50 @@ def test_holiday_job_catalog_failure_does_not_write():
             session_factory,
         )
     assert "secret-token" not in str(error.value)
+    assert "secret-token" not in caplog.text
+    assert "error_type=ValueError" in str(error.value)
+    assert "error_type=ValueError" in caplog.text
+    session_factory.assert_not_called()
+
+
+@pytest.mark.parametrize("status_code", [401, 403, 404, 429, 500])
+def test_holiday_job_catalog_http_failure_is_sanitized(status_code, caplog):
+    request = httpx.Request(
+        "GET", "https://api.eulerpool.com/api/1/market/exchanges?token=secret-token"
+    )
+    http_error = httpx.HTTPStatusError(
+        f"request failed: {request.url}",
+        request=request,
+        response=httpx.Response(status_code, request=request),
+    )
+    provider = Mock()
+    if status_code == 404:
+        error = InstrumentNotFoundError("secret-token")
+        error.__cause__ = http_error
+    else:
+        error = http_error
+    provider.get_exchanges.side_effect = error
+    session_factory = Mock()
+    with pytest.raises(RuntimeError) as failure:
+        sync_holidays(provider, [{"exchange": "XNYS"}], session_factory)
+    assert f"http_status={status_code}" in str(failure.value)
+    assert f"http_status={status_code}" in caplog.text
+    assert f"error_type={type(error).__name__}" in str(failure.value)
+    assert "secret-token" not in str(failure.value)
+    assert "secret-token" not in caplog.text
+    assert failure.value.__suppress_context__
+    session_factory.assert_not_called()
+
+
+def test_holiday_job_catalog_timeout_is_sanitized(caplog):
+    provider = Mock()
+    provider.get_exchanges.side_effect = httpx.ReadTimeout("secret-token")
+    session_factory = Mock()
+    with pytest.raises(RuntimeError, match="error_type=ReadTimeout") as failure:
+        sync_holidays(provider, [{"exchange": "XNYS"}], session_factory)
+    assert "error_type=ReadTimeout" in caplog.text
+    assert "secret-token" not in str(failure.value)
+    assert "secret-token" not in caplog.text
     session_factory.assert_not_called()
 
 

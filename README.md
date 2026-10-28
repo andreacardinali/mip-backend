@@ -2,6 +2,25 @@
 
 Adds explicit logs immediately before and after each provider call, including call number, mode, signal count, signal IDs, output-token limit and elapsed time. Batch failures log split sizes and error details before recursive retry.
 
+## Centralized HTTP Requests
+
+Provider HTTP calls must use `http_client.request_with_retry`; do not introduce
+independent retry or credential-redaction implementations in providers or jobs.
+The shared module redacts recognized credentials in its diagnostic messages and
+`httpx` request logs, including URL/query parameters, headers, client defaults,
+and sensitive fields in JSON/form mappings. Authentication sent to providers is
+unchanged. Retry and idempotency rules are unchanged, including no retry on 403.
+
+Failures retain their original `httpx` exception types. Callers requiring different
+handling without importing `httpx` can use `http_client.get_http_status(exc)`.
+It returns the status of an HTTP error or its immediate explicit cause, or `None`
+for other errors. Existing callers can still catch `httpx.HTTPStatusError` and
+inspect `exc.response.status_code`; network failures remain
+`httpx.RequestError` subclasses. Exception messages are sanitized, but request and
+response objects retain their original content for programmatic handling. Do not
+log those objects, raw bodies, arbitrary authentication objects or exception
+causes directly: this module does not sanitize every possible caller log.
+
 ## Shared Market Time: Phase One
 
 `market_time` centralizes UTC normalization and exchange session snapshots.

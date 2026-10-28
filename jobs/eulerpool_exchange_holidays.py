@@ -1,5 +1,6 @@
 import logging
 
+from http_client import get_http_status
 from market_time.repository import SQLHolidayRepository
 from scripts.sync_exchange_holidays import acquire
 
@@ -64,8 +65,18 @@ def sync_holidays(provider, targets, session_factory):
         }
     try:
         catalog = list(provider.get_exchanges())
-    except Exception:
-        raise RuntimeError("Unable to retrieve Eulerpool exchange catalog") from None
+    except Exception as exc:
+        error_type = type(exc).__name__
+        http_status = get_http_status(exc)
+        detail = f"error_type={error_type}"
+        if http_status is not None:
+            detail += f" http_status={http_status}"
+        logger.error(
+            "Holiday catalog retrieval failed endpoint=/market/exchanges %s", detail
+        )
+        raise RuntimeError(
+            f"Unable to retrieve Eulerpool exchange catalog ({detail})"
+        ) from None
     resolutions = [_resolve_target(target, catalog) for target in targets]
     code_counts = {}
     for code, reason in resolutions:

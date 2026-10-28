@@ -1,12 +1,15 @@
 import logging
 import random
+import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from enum import StrEnum
 from typing import Any
+from urllib.parse import quote, quote_plus
 
 import httpx
 
@@ -24,13 +27,107 @@ RETRYABLE_EXCEPTIONS = (
 )
 IDEMPOTENT_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE", "PUT", "DELETE"})
 MAX_ERROR_BODY_CHARACTERS = 2000
+SENSITIVE_FIELDS = frozenset(
+    {
+        "token",
+        "api_key",
+        "apikey",
+        "api-key",
+        "access_token",
+        "refresh_token",
+        "authorization",
+        "proxy-authorization",
+        "x-api-key",
+        "password",
+        "secret",
+        "client_secret",
+        "cookie",
+        "set-cookie",
+    }
+)
+ACTIVE_SECRETS: ContextVar[tuple[str, ...]] = ContextVar("http_secrets", default=())
+SENSITIVE_ASSIGNMENT = re.compile(
+    r"(?i)([\"\']?(?:api[_-]?key|(?:access_|refresh_)?token|password|"
+    r"client_secret|secret|authorization|proxy-authorization|x-api-key|cookie|"
+    r"set-cookie)[\"\']?\s*[:=]\s*)(?:\"[^\"]*\"|\'[^\']*\'|"
+    r"(?:(?:Bearer|Basic)\s+)?[^\s&,;}]+)"
+)
 
 
-def _response_error_message(response: httpx.Response) -> str:
+def _redact_text(text: str, secrets: tuple[str, ...]) -> str:
+    for secret in secrets:
+        text = text.replace(secret, "[REDACTED]")
+    return SENSITIVE_ASSIGNMENT.sub(r"\1[REDACTED]", text)
+
+
+def _request_secrets(
+    client: httpx.Client, url: str, request_kwargs: dict[str, Any]
+) -> tuple[str, ...]:
+    values = set()
+    query = httpx.URL(url).params.multi_items()
+    headers = []
+    if isinstance(client, httpx.Client):
+        query += client.params.multi_items()
+        headers += client.headers.multi_items()
+    params = request_kwargs.get("params")
+    if params is not None:
+        query += httpx.QueryParams(params).multi_items()
+    headers += httpx.Headers(request_kwargs.get("headers") or {}).multi_items()
+    for key, value in [*query, *headers]:
+        if key.casefold() in SENSITIVE_FIELDS and value:
+            values.add(value)
+            if key.casefold() in {"authorization", "proxy-authorization"}:
+                values.add(value.split(" ", 1)[-1])
+    pending = [request_kwargs.get("json"), request_kwargs.get("data")]
+    while pending:
+        payload = pending.pop()
+        if isinstance(payload, Mapping):
+            for key, value in payload.items():
+                if str(key).casefold() in SENSITIVE_FIELDS and isinstance(value, str):
+                    if value:
+                        values.add(value)
+                else:
+                    pending.append(value)
+        elif isinstance(payload, (list, tuple)):
+            pending.extend(payload)
+    for value in tuple(values):
+        values.update({quote(value, safe=""), quote_plus(value)})
+    return tuple(sorted(values, key=len, reverse=True))
+
+
+class _SecretFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.msg = _redact_text(record.getMessage(), ACTIVE_SECRETS.get())
+        record.args = ()
+        return True
+
+
+logging.getLogger("httpx").addFilter(_SecretFilter())
+
+
+def get_http_status(error: BaseException) -> int | None:
+    """Return the HTTP status of an error or its explicit cause."""
+    http_error = error if isinstance(error, httpx.HTTPStatusError) else error.__cause__
+    if isinstance(http_error, httpx.HTTPStatusError):
+        return http_error.response.status_code
+    return None
+
+
+def _raise_for_status(response: httpx.Response, secrets: tuple[str, ...]) -> None:
     try:
-        body = response.text.strip()
+        response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        exc.args = (_redact_text(str(exc), secrets),)
+        raise
+
+
+def _response_error_message(
+    response: httpx.Response, secrets: tuple[str, ...] = ()
+) -> str:
+    try:
+        body = _redact_text(response.text.strip(), secrets)
     except Exception as exc:
-        return f"<unable to read response body: {type(exc).__name__}: {exc}>"
+        return f"<unable to read response body: {type(exc).__name__}>"
     if not body:
         return "<empty response body>"
     body = " ".join(body.split())
@@ -91,12 +188,22 @@ def request_with_retry(
         raise ValueError("HTTP method cannot be empty")
 
     may_retry = normalized_method in IDEMPOTENT_METHODS or retry_non_idempotent
+    secrets = _request_secrets(client, url, request_kwargs)
 
     for attempt in range(policy.max_retries + 1):
         try:
-            response = client.request(normalized_method, url, **request_kwargs)
-        except RETRYABLE_EXCEPTIONS as exc:
-            if not may_retry or attempt >= policy.max_retries:
+            context_token = ACTIVE_SECRETS.set(secrets)
+            try:
+                response = client.request(normalized_method, url, **request_kwargs)
+            finally:
+                ACTIVE_SECRETS.reset(context_token)
+        except httpx.RequestError as exc:
+            exc.args = (_redact_text(str(exc), secrets),)
+            if (
+                not isinstance(exc, RETRYABLE_EXCEPTIONS)
+                or not may_retry
+                or attempt >= policy.max_retries
+            ):
                 raise
             delay = _retry_delay(
                 attempt=attempt,
@@ -118,15 +225,15 @@ def request_with_retry(
             continue
 
         if response.status_code in NEVER_RETRY_STATUS_CODES:
-            response.raise_for_status()
+            _raise_for_status(response, secrets)
             return response
 
         if response.status_code not in policy.retryable_status_codes:
-            response.raise_for_status()
+            _raise_for_status(response, secrets)
             return response
 
         if not may_retry or attempt >= policy.max_retries:
-            error_message = _response_error_message(response)
+            error_message = _response_error_message(response, secrets)
             logger.error(
                 "HTTP request failed permanently status=%s method=%s attempt=%s/%s "
                 "error=%s",
@@ -136,7 +243,7 @@ def request_with_retry(
                 policy.max_retries + 1,
                 error_message,
             )
-            response.raise_for_status()
+            _raise_for_status(response, secrets)
 
         response_hint = _response_retry_delay(response, policy=policy)
         delay = _retry_delay(
@@ -145,7 +252,7 @@ def request_with_retry(
             response_hint=response_hint,
             random_uniform=random_uniform,
         )
-        error_message = _response_error_message(response)
+        error_message = _response_error_message(response, secrets)
         logger.warning(
             "HTTP request retry status=%s method=%s attempt=%s/%s delay=%.3f error=%s",
             response.status_code,
