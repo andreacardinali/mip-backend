@@ -246,3 +246,42 @@ def test_real_calendar_us_holiday_and_early_close():
         if session.session_date == date(2026, 11, 27)
     )
     assert friday.closes_at == instant("2026-11-27T18:00:00Z")
+
+
+@pytest.mark.parametrize(
+    ("session_day", "opens_at", "closes_at"),
+    [
+        ("2026-03-06", "2026-03-06T14:30:00Z", "2026-03-06T21:00:00Z"),
+        ("2026-03-09", "2026-03-09T13:30:00Z", "2026-03-09T20:00:00Z"),
+        ("2026-10-30", "2026-10-30T13:30:00Z", "2026-10-30T20:00:00Z"),
+        ("2026-11-02", "2026-11-02T14:30:00Z", "2026-11-02T21:00:00Z"),
+    ],
+)
+def test_real_calendar_us_dst_boundaries(session_day, opens_at, closes_at):
+    pytest.importorskip("exchange_calendars")
+    window = ExchangeCalendarsProvider().window("XNYS", instant(opens_at))
+    session = next(
+        session for session in window.sessions
+        if session.session_date == date.fromisoformat(session_day)
+    )
+    assert session.opens_at == instant(opens_at)
+    assert session.closes_at == instant(closes_at)
+    assert session.opens_at.tzinfo == UTC
+    assert session.closes_at.tzinfo == UTC
+
+
+def test_real_calendar_hong_kong_intraday_break():
+    pytest.importorskip("exchange_calendars")
+    window = ExchangeCalendarsProvider().window(
+        "XHKG", instant("2026-07-02T04:30:00Z")
+    )
+    session = next(
+        session for session in window.sessions
+        if session.session_date == date(2026, 7, 2)
+    )
+    assert session.opens_at == instant("2026-07-02T01:30:00Z")
+    assert session.break_start == instant("2026-07-02T04:00:00Z")
+    assert session.break_end == instant("2026-07-02T05:00:00Z")
+    assert session.closes_at == instant("2026-07-02T08:00:00Z")
+    assert session.break_start.tzinfo == UTC
+    assert session.break_end.tzinfo == UTC
