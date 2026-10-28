@@ -40,7 +40,9 @@ def test_portfolio_list_batches_pricing_metadata(monkeypatch):
 
 
 @pytest.mark.parametrize("amount", ["NaN", "Infinity", -1, "invalid"])
-def test_invalid_historical_cost_is_rejected_before_database_access(monkeypatch, amount):
+def test_invalid_historical_cost_is_rejected_before_database_access(
+    monkeypatch, amount
+):
     session_factory = MagicMock()
     monkeypatch.setattr(positions, "SessionLocal", session_factory)
     with pytest.raises(HTTPException) as raised:
@@ -70,7 +72,9 @@ def test_inaccessible_watchlist_item_returns_404_and_rolls_back(monkeypatch):
     db.close.assert_called_once()
 
 
-def test_scheduler_contended_manual_run_is_deferred_and_releases_connection(monkeypatch):
+def test_scheduler_contended_manual_run_is_deferred_and_releases_connection(
+    monkeypatch,
+):
     import scheduler
 
     db = MagicMock()
@@ -79,7 +83,9 @@ def test_scheduler_contended_manual_run_is_deferred_and_releases_connection(monk
     connection.execute.return_value.scalar_one.return_value = False
     monkeypatch.setattr(scheduler, "SessionLocal", lambda: db)
     monkeypatch.setattr(scheduler, "SchedulerRepository", lambda session: repository)
-    monkeypatch.setattr(scheduler, "engine", SimpleNamespace(connect=lambda: connection))
+    monkeypatch.setattr(
+        scheduler, "engine", SimpleNamespace(connect=lambda: connection)
+    )
     result = scheduler.execute_job(JOB_ID, "unused.module", RUN_ID, True)
     assert result == {"status": "SKIPPED", "reason": "already_running"}
     repository.defer_manual_request.assert_called_once_with(UUID(RUN_ID))

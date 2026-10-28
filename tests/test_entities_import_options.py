@@ -38,8 +38,15 @@ def test_profile_payload_can_skip_quote(monkeypatch) -> None:
 def test_local_listing_respects_search_hints():
     from routers.imports import _matches_listing_hints
 
-    listing = {"exchange_code": "NASDAQ", "currency_code": "USD", "type": "STOCK", "isin": "US123"}
-    assert _matches_listing_hints(listing, {"exchange": "nasdaq", "currency": "usd", "instrument_type": "stock"})
+    listing = {
+        "exchange_code": "NASDAQ",
+        "currency_code": "USD",
+        "type": "STOCK",
+        "isin": "US123",
+    }
+    assert _matches_listing_hints(
+        listing, {"exchange": "nasdaq", "currency": "usd", "instrument_type": "stock"}
+    )
     assert not _matches_listing_hints(listing, {"exchange": "NYSE"})
     assert not _matches_listing_hints(listing, {"currency": "EUR"})
     assert not _matches_listing_hints(listing, {"isin": "US456"})

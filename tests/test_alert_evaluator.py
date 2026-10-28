@@ -64,9 +64,14 @@ def test_ranked_candidate_normalizes_scores():
 
     candidate = _candidate(
         dict(
-            signal_id="signal-1", instrument_id="instrument-1", symbol="MSFT",
-            direction="BUY", composite_score=86, consensus_score=78,
-            conflict_score=12, strategy_count=3,
+            signal_id="signal-1",
+            instrument_id="instrument-1",
+            symbol="MSFT",
+            direction="BUY",
+            composite_score=86,
+            consensus_score=78,
+            conflict_score=12,
+            strategy_count=3,
         )
     )
     assert candidate.composite_score == 0.86

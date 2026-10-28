@@ -72,7 +72,9 @@ def execute_job(
             if manual_request:
                 repository.defer_manual_request(job_run_id)
                 db.commit()
-            logger.info("Job already running job_id=%s; manual=%s", job_id, manual_request)
+            logger.info(
+                "Job already running job_id=%s; manual=%s", job_id, manual_request
+            )
             return {"status": "SKIPPED", "reason": "already_running"}
         repository.start_run(
             job_run_id=job_run_id,
@@ -196,7 +198,9 @@ def poll_manual_runs() -> None:
             except Exception:
                 repository.defer_manual_request(UUID(str(request["job_run_id"])))
                 db.commit()
-                logger.exception("Unable to schedule manual request %s", request["request_id"])
+                logger.exception(
+                    "Unable to schedule manual request %s", request["request_id"]
+                )
                 continue
             logger.info(
                 "Manual job queued request_id=%s job_id=%s run_id=%s",
@@ -311,13 +315,17 @@ def recover_stale_runs() -> int:
     recovered = 0
     try:
         with engine.connect() as connection:
-            job_ids = connection.execute(
-                text("SELECT public.sp_scheduler_list_job_ids()")
-            ).scalars().all()
+            job_ids = (
+                connection.execute(text("SELECT public.sp_scheduler_list_job_ids()"))
+                .scalars()
+                .all()
+            )
         for job_id in job_ids:
             with engine.connect() as connection:
                 result = connection.execute(
-                    text("SELECT public.sp_scheduler_recover_job_runs(CAST(:job_id AS uuid))"),
+                    text(
+                        "SELECT public.sp_scheduler_recover_job_runs(CAST(:job_id AS uuid))"
+                    ),
                     {"job_id": str(job_id)},
                 ).scalar_one()
                 connection.commit()

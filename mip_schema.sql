@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict mOEPKGCbPZoiqVTOMMRzT0IAdKB4EzWSmUEDw6ys0lhxh59gQXWFd6lBUQa1jQn
+\restrict Oz1y8nCT0UwhFQ8fdTG7PIqVZX461URmIfpaVdELhUsRkNwAeA6WvfOq0r5bIFX
 
 -- Dumped from database version 18.6 (Debian 18.6-1.pgdg13+2)
 -- Dumped by pg_dump version 18.6 (Debian 18.6-1.pgdg13+2)
@@ -244,6 +244,24 @@ BEGIN
 
     RETURN (p_amount * v_from_rate) / v_to_rate;
 END;
+$$;
+
+
+--
+-- Name: position_cost_basis(numeric, numeric, character, numeric, character, character); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.position_cost_basis(p_quantity numeric, p_avg_price numeric, p_listing_currency character, p_cost_amount numeric, p_cost_currency character, p_target_currency character) RETURNS numeric
+    LANGUAGE sql IMMUTABLE
+    AS $$
+    SELECT CASE
+        WHEN p_cost_amount IS NOT NULL
+         AND upper(btrim(p_cost_currency)) = upper(btrim(p_target_currency))
+        THEN p_cost_amount
+        WHEN upper(btrim(p_listing_currency)) = upper(btrim(p_target_currency))
+        THEN p_quantity * p_avg_price
+        ELSE NULL
+    END;
 $$;
 
 
@@ -3179,13 +3197,12 @@ $$;
 
 
 --
--- Name: sp_get_portfolio_summary(uuid, uuid); Type: FUNCTION; Schema: public; Owner: -
+-- Name: sp_get_portfolio_pricing_states(uuid, uuid); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.sp_get_portfolio_pricing_states(p_user_id uuid, p_portfolio_id uuid DEFAULT NULL)
-RETURNS TABLE(portfolio_id uuid, total_position_count bigint, pending_price_count bigint, price_refresh_pending boolean)
-        LANGUAGE sql STABLE
-        AS $$
+CREATE FUNCTION public.sp_get_portfolio_pricing_states(p_user_id uuid, p_portfolio_id uuid DEFAULT NULL::uuid) RETURNS TABLE(portfolio_id uuid, total_position_count bigint, pending_price_count bigint, price_refresh_pending boolean)
+    LANGUAGE sql STABLE
+    AS $$
         SELECT pf.portfolio_id,
                      COUNT(pos.position_id),
                      COUNT(pos.position_id) FILTER (WHERE i.last_price IS NULL),
@@ -3200,122 +3217,9 @@ RETURNS TABLE(portfolio_id uuid, total_position_count bigint, pending_price_coun
 $$;
 
 
-CREATE FUNCTION public.sp_set_position_cost_basis(p_position_id uuid, p_user_id uuid, p_amount numeric, p_currency character) RETURNS uuid
-    LANGUAGE sql
-    AS $$
-    WITH updated AS (
-        UPDATE public.positions pos
-        SET cost_basis_amount = p_amount, cost_basis_currency = p_currency
-        WHERE pos.position_id = p_position_id
-          AND EXISTS (
-              SELECT 1 FROM public.portfolios pf
-              WHERE pf.portfolio_id = pos.portfolio_id AND pf.user_id = p_user_id
-          )
-        RETURNING pos.position_id
-    )
-    SELECT position_id FROM updated;
-$$;
-
-
-CREATE FUNCTION public.sp_update_user_preferences(p_user_id uuid, p_reporting_currency character) RETURNS jsonb
-    LANGUAGE sql
-    AS $$
-    WITH updated AS (
-        UPDATE public.users
-        SET reporting_currency = p_reporting_currency, updated_at = now()
-        WHERE user_id = p_user_id
-        RETURNING user_id, username, email, is_active, reporting_currency
-    )
-    SELECT to_jsonb(updated) FROM updated;
-$$;
-
-
-CREATE FUNCTION public.sp_market_screener_list_alert_candidates(p_limit integer) RETURNS SETOF jsonb
-    LANGUAGE sql STABLE
-    AS $$
-    SELECT to_jsonb(candidate)
-    FROM (
-        SELECT signal_id, instrument_id, symbol, direction, origin,
-               composite_score, consensus_score, conflict_score,
-               strategy_count, verdict, summary, evidence
-        FROM public.market_screener_opportunities
-        WHERE active
-        ORDER BY ranking_position, opportunity_id
-        LIMIT p_limit
-    ) candidate;
-$$;
-
-
-CREATE FUNCTION public.sp_scheduler_try_job_lock(p_job_id uuid) RETURNS boolean
-    LANGUAGE sql
-    AS $$
-    SELECT pg_try_advisory_xact_lock(hashtextextended('mip.scheduler.' || p_job_id::text, 0));
-$$;
-
-
-CREATE FUNCTION public.sp_scheduler_list_job_ids() RETURNS SETOF uuid
-    LANGUAGE sql STABLE
-    AS $$
-    SELECT job_id FROM public.scheduler_jobs;
-$$;
-
-
-CREATE FUNCTION public.sp_scheduler_defer_job_run_request(p_job_run_id uuid) RETURNS void
-    LANGUAGE sql
-    AS $$
-    UPDATE public.scheduler_manual_run_requests
-    SET status = 'PENDING', claimed_at = NULL
-    WHERE job_run_id = p_job_run_id AND status = 'PROCESSING';
-$$;
-
-
-CREATE FUNCTION public.sp_scheduler_recover_job_runs(p_job_id uuid) RETURNS integer
-    LANGUAGE plpgsql
-    AS $$
-DECLARE
-    v_recovered integer;
-BEGIN
-    IF NOT public.sp_scheduler_try_job_lock(p_job_id) THEN
-        RETURN 0;
-    END IF;
-
-    UPDATE public.scheduler_job_runs
-    SET status = 'FAILED', completed_at = now(),
-        error_message = 'Recovered orphaned run during scheduler startup'
-    WHERE job_id = p_job_id AND status = 'RUNNING';
-    GET DIAGNOSTICS v_recovered = ROW_COUNT;
-
-    UPDATE public.scheduler_manual_run_requests request
-    SET status = 'FAILED', completed_at = now(),
-        error_message = 'Recovered orphaned manual run'
-    WHERE job_id = p_job_id AND status = 'PROCESSING'
-      AND EXISTS (
-          SELECT 1 FROM public.scheduler_job_runs run
-          WHERE run.job_run_id = request.job_run_id
-      );
-
-    UPDATE public.scheduler_manual_run_requests
-    SET status = 'PENDING', claimed_at = NULL
-    WHERE job_id = p_job_id AND status = 'PROCESSING'
-      AND claimed_at < now() - interval '5 minutes';
-    RETURN v_recovered;
-END;
-$$;
-
-
-CREATE FUNCTION public.position_cost_basis(p_quantity numeric, p_avg_price numeric, p_listing_currency character, p_cost_amount numeric, p_cost_currency character, p_target_currency character) RETURNS numeric
-    LANGUAGE sql IMMUTABLE
-    AS $$
-    SELECT CASE
-        WHEN p_cost_amount IS NOT NULL
-         AND upper(btrim(p_cost_currency)) = upper(btrim(p_target_currency))
-        THEN p_cost_amount
-        WHEN upper(btrim(p_listing_currency)) = upper(btrim(p_target_currency))
-        THEN p_quantity * p_avg_price
-        ELSE NULL
-    END;
-$$;
-
+--
+-- Name: sp_get_portfolio_summary(uuid, uuid); Type: FUNCTION; Schema: public; Owner: -
+--
 
 CREATE FUNCTION public.sp_get_portfolio_summary(p_portfolio_id uuid, p_user_id uuid) RETURNS TABLE(portfolio_currency character, reporting_currency character, invested_value_native numeric, portfolio_value_native numeric, profit_loss_native numeric, invested_value_reporting numeric, portfolio_value_reporting numeric, profit_loss_reporting numeric, profit_loss_pct numeric, positions_count bigint)
     LANGUAGE sql STABLE
@@ -6534,6 +6438,26 @@ $$;
 
 
 --
+-- Name: sp_market_screener_list_alert_candidates(integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_market_screener_list_alert_candidates(p_limit integer) RETURNS SETOF jsonb
+    LANGUAGE sql STABLE
+    AS $$
+    SELECT to_jsonb(candidate)
+    FROM (
+        SELECT signal_id, instrument_id, symbol, direction, origin,
+               composite_score, consensus_score, conflict_score,
+               strategy_count, verdict, summary, evidence
+        FROM public.market_screener_opportunities
+        WHERE active
+        ORDER BY ranking_position, opportunity_id
+        LIMIT p_limit
+    ) candidate;
+$$;
+
+
+--
 -- Name: sp_market_screener_list_opportunities(character varying, character varying, character varying, numeric, character varying, integer); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -8316,6 +8240,19 @@ $$;
 
 
 --
+-- Name: sp_scheduler_defer_job_run_request(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_scheduler_defer_job_run_request(p_job_run_id uuid) RETURNS void
+    LANGUAGE sql
+    AS $$
+    UPDATE public.scheduler_manual_run_requests
+    SET status = 'PENDING', claimed_at = NULL
+    WHERE job_run_id = p_job_run_id AND status = 'PROCESSING';
+$$;
+
+
+--
 -- Name: sp_scheduler_fail_job_run_request(uuid, text); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -8409,6 +8346,55 @@ $$;
 
 
 --
+-- Name: sp_scheduler_list_job_ids(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_scheduler_list_job_ids() RETURNS SETOF uuid
+    LANGUAGE sql STABLE
+    AS $$
+    SELECT job_id FROM public.scheduler_jobs;
+$$;
+
+
+--
+-- Name: sp_scheduler_recover_job_runs(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_scheduler_recover_job_runs(p_job_id uuid) RETURNS integer
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_recovered integer;
+BEGIN
+    IF NOT public.sp_scheduler_try_job_lock(p_job_id) THEN
+        RETURN 0;
+    END IF;
+
+    UPDATE public.scheduler_job_runs
+    SET status = 'FAILED', completed_at = now(),
+        error_message = 'Recovered orphaned run during scheduler startup'
+    WHERE job_id = p_job_id AND status = 'RUNNING';
+    GET DIAGNOSTICS v_recovered = ROW_COUNT;
+
+    UPDATE public.scheduler_manual_run_requests request
+    SET status = 'FAILED', completed_at = now(),
+        error_message = 'Recovered orphaned manual run'
+    WHERE job_id = p_job_id AND status = 'PROCESSING'
+      AND EXISTS (
+          SELECT 1 FROM public.scheduler_job_runs run
+          WHERE run.job_run_id = request.job_run_id
+      );
+
+    UPDATE public.scheduler_manual_run_requests
+    SET status = 'PENDING', claimed_at = NULL
+    WHERE job_id = p_job_id AND status = 'PROCESSING'
+      AND claimed_at < now() - interval '5 minutes';
+    RETURN v_recovered;
+END;
+$$;
+
+
+--
 -- Name: sp_scheduler_request_job_run(character varying, uuid); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -8438,6 +8424,17 @@ BEGIN
         jsonb_build_object('source', 'ADMIN_UI')
     );
 END;
+$$;
+
+
+--
+-- Name: sp_scheduler_try_job_lock(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_scheduler_try_job_lock(p_job_id uuid) RETURNS boolean
+    LANGUAGE sql
+    AS $$
+    SELECT pg_try_advisory_xact_lock(hashtextextended('mip.scheduler.' || p_job_id::text, 0));
 $$;
 
 
@@ -8643,6 +8640,27 @@ $$;
 
 
 --
+-- Name: sp_set_position_cost_basis(uuid, uuid, numeric, character); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_set_position_cost_basis(p_position_id uuid, p_user_id uuid, p_amount numeric, p_currency character) RETURNS uuid
+    LANGUAGE sql
+    AS $$
+    WITH updated AS (
+        UPDATE public.positions pos
+        SET cost_basis_amount = p_amount, cost_basis_currency = p_currency
+        WHERE pos.position_id = p_position_id
+          AND EXISTS (
+              SELECT 1 FROM public.portfolios pf
+              WHERE pf.portfolio_id = pos.portfolio_id AND pf.user_id = p_user_id
+          )
+        RETURNING pos.position_id
+    )
+    SELECT position_id FROM updated;
+$$;
+
+
+--
 -- Name: sp_set_scheduler_job_enabled(uuid, character varying, boolean); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -8725,6 +8743,23 @@ $$;
 CREATE FUNCTION public.sp_update_scheduler_job(p_actor uuid, p_key character varying, p_type character varying, p_cron character varying, p_minutes integer) RETURNS SETOF public.scheduler_jobs
     LANGUAGE plpgsql
     AS $$ DECLARE v varchar:=lower(trim(p_type)); BEGIN IF v NOT IN('cron','interval') OR (v='cron' AND nullif(trim(p_cron),'') IS NULL) OR (v='interval' AND coalesce(p_minutes,0)<=0) THEN RAISE EXCEPTION 'Invalid schedule'; END IF; RETURN QUERY UPDATE scheduler_jobs SET trigger_type=v,cron_expression=CASE WHEN v='cron' THEN p_cron END,interval_minutes=CASE WHEN v='interval' THEN p_minutes END WHERE job_key=p_key RETURNING *; INSERT INTO system_audit_log(actor_user_id,action,resource_type,resource_id,new_value) VALUES(p_actor,'SCHEDULER_JOB_SCHEDULE_CHANGED','SCHEDULER_JOB',p_key,jsonb_build_object('trigger_type',v,'cron_expression',p_cron,'interval_minutes',p_minutes)); END $$;
+
+
+--
+-- Name: sp_update_user_preferences(uuid, character); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_update_user_preferences(p_user_id uuid, p_reporting_currency character) RETURNS jsonb
+    LANGUAGE sql
+    AS $$
+    WITH updated AS (
+        UPDATE public.users
+        SET reporting_currency = p_reporting_currency, updated_at = now()
+        WHERE user_id = p_user_id
+        RETURNING user_id, username, email, is_active, reporting_currency
+    )
+    SELECT to_jsonb(updated) FROM updated;
+$$;
 
 
 --
@@ -11469,17 +11504,13 @@ CREATE TABLE public.positions (
     instrument_id uuid NOT NULL,
     quantity numeric(20,8) NOT NULL,
     avg_price numeric(20,8),
-    cost_basis_amount numeric(20,8),
-    cost_basis_currency character(3),
     opened_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     notes text,
-    CONSTRAINT ck_positions_cost_basis CHECK (
-        (cost_basis_amount IS NULL AND cost_basis_currency IS NULL)
-        OR (cost_basis_amount IS NOT NULL AND cost_basis_amount >= 0
-            AND cost_basis_currency IS NOT NULL)
-    )
+    cost_basis_amount numeric(20,8),
+    cost_basis_currency character(3),
+    CONSTRAINT ck_positions_cost_basis CHECK ((((cost_basis_amount IS NULL) AND (cost_basis_currency IS NULL)) OR ((cost_basis_amount IS NOT NULL) AND (cost_basis_amount >= (0)::numeric) AND (cost_basis_currency IS NOT NULL))))
 );
 
 
@@ -14864,5 +14895,5 @@ ALTER TABLE ONLY public.watchlists
 -- PostgreSQL database dump complete
 --
 
-\unrestrict mOEPKGCbPZoiqVTOMMRzT0IAdKB4EzWSmUEDw6ys0lhxh59gQXWFd6lBUQa1jQn
+\unrestrict Oz1y8nCT0UwhFQ8fdTG7PIqVZX461URmIfpaVdELhUsRkNwAeA6WvfOq0r5bIFX
 

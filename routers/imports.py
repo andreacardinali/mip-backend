@@ -37,7 +37,11 @@ def _has_price(payload) -> bool:
 def _matches_listing_hints(payload, hints: dict) -> bool:
     if not isinstance(payload, dict):
         return False
-    aliases = {"exchange": "exchange_code", "currency": "currency_code", "instrument_type": "type"}
+    aliases = {
+        "exchange": "exchange_code",
+        "currency": "currency_code",
+        "instrument_type": "type",
+    }
     for key, requested in hints.items():
         if not requested:
             continue
@@ -110,7 +114,9 @@ def import_entity(
             "currency": requested_currency,
             "isin": requested_isin,
             "instrument_type": (
-                requested_type.value if requested_type != InstrumentType.UNKNOWN else None
+                requested_type.value
+                if requested_type != InstrumentType.UNKNOWN
+                else None
             ),
         }
         local_matches = _matches_listing_hints(local_payload, requested_hints)

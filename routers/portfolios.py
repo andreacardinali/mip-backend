@@ -24,7 +24,8 @@ def _get_pricing_states(db, user_id, portfolio_id=None):
         str(row["portfolio_id"]): {
             "pricing_complete": row["pending_price_count"] == 0,
             "pending_price_count": row["pending_price_count"],
-            "priced_position_count": row["total_position_count"] - row["pending_price_count"],
+            "priced_position_count": row["total_position_count"]
+            - row["pending_price_count"],
             "total_position_count": row["total_position_count"],
             "price_refresh_pending": row["price_refresh_pending"],
         }
@@ -158,7 +159,9 @@ def get_portfolio_summary(
         if row is None:
             raise HTTPException(status_code=404, detail="Portfolio not found")
         result = dict(row._mapping)
-        pricing_state = next(iter(_get_pricing_states(db, user_id, portfolio_id).values()))
+        pricing_state = next(
+            iter(_get_pricing_states(db, user_id, portfolio_id).values())
+        )
         return _apply_pricing_state(result, pricing_state)
     finally:
         db.close()
