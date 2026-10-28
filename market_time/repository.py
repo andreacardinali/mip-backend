@@ -30,7 +30,7 @@ class SQLHolidayRepository:
     def __init__(self, db: Session):
         self.db = db
 
-    def list_exchanges(self, source: str) -> list[dict[str, str]]:
+    def list_exchanges(self, source: str) -> list[dict[str, str | list[str]]]:
         active_systems = self.db.execute(
             text(
                 "SELECT count(*) FROM public.external_systems "
@@ -43,9 +43,21 @@ class SQLHolidayRepository:
         rows = (
             self.db.execute(
                 text(
-                    "SELECT DISTINCT exchange, exchange_code "
-                    "FROM public.exchange_holiday_snapshots "
-                    "WHERE source = :source ORDER BY exchange_code, exchange"
+                    "SELECT e.exchange, e.exchangefullname, "
+                    "ARRAY(SELECT DISTINCT h.exchange_code "
+                    "FROM public.exchange_holiday_snapshots h "
+                    "WHERE h.exchange = e.exchange AND h.source = :source "
+                    "ORDER BY h.exchange_code) AS exchange_codes, "
+                    "ARRAY(SELECT DISTINCT identifiers.identifier "
+                    "FROM public.exchange_source_mappings m "
+                    "JOIN public.external_systems s ON s.system_id = m.system_id "
+                    "CROSS JOIN LATERAL (VALUES (m.source_exchange_code), "
+                    "(m.source_exchange_name)) AS identifiers(identifier) "
+                    "WHERE m.exchange = e.exchange AND lower(s.code) = :source "
+                    "AND s.active AND identifiers.identifier IS NOT NULL "
+                    "AND btrim(identifiers.identifier) <> '' "
+                    "ORDER BY identifiers.identifier) AS source_identifiers "
+                    "FROM public.exchanges e ORDER BY e.exchange"
                 ),
                 {"source": source.lower()},
             )

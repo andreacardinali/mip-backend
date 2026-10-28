@@ -9,7 +9,7 @@ import pytest
 
 from jobs.eulerpool_exchange_holidays import sync_holidays
 from market_data.capabilities import InstrumentType
-from market_data.models import InstrumentReference
+from market_data.models import ExchangeReference, InstrumentReference
 from market_data.providers.eulerpool import EulerpoolProvider
 from market_time.repository import SQLHolidayRepository
 from scheduler_repository import SchedulerRepository
@@ -33,7 +33,8 @@ def test_holiday_job_isolates_exchange_failures(outcomes, expected_status):
     sessions = [MagicMock(), MagicMock()]
     session_factory = Mock(side_effect=sessions)
     provider = Mock()
-    provider.get_exchanges.return_value = []
+    catalog = [ExchangeReference(code="XNYS"), ExchangeReference(code="XETR")]
+    provider.get_exchanges.return_value = catalog
     with (
         patch(
             "jobs.eulerpool_exchange_holidays.acquire", side_effect=outcomes
@@ -50,17 +51,23 @@ def test_holiday_job_isolates_exchange_failures(outcomes, expected_status):
     assert session_factory.call_count == successful
     assert repository.return_value.save.call_count == successful
     assert fetch.call_args_list[1].args == (provider, "XETR")
-    assert fetch.call_args_list[1].kwargs == {"catalog": []}
+    assert fetch.call_args_list[1].kwargs == {"catalog": catalog}
     provider.get_exchanges.assert_called_once_with()
     if successful:
         assert repository.return_value.save.call_args.args == ("XETR", outcomes[1])
 
 
-def test_holiday_job_without_registered_exchanges_does_not_fetch():
+def test_holiday_job_without_registered_exchanges_does_not_fetch(caplog):
     provider = Mock()
     session_factory = Mock()
     result = sync_holidays(provider, [], session_factory)
     assert result["status"] == "INCOMPLETE"
+    assert any(
+        record.name == "jobs.eulerpool_exchange_holidays"
+        and record.levelname == "WARNING"
+        and "reason=no_registered_exchanges" in record.getMessage()
+        for record in caplog.records
+    )
     provider.get_exchanges.assert_not_called()
     provider.get_exchange_holidays.assert_not_called()
     session_factory.assert_not_called()
@@ -100,7 +107,10 @@ def test_holiday_job_rolls_back_failed_save_and_continues():
     ]
     sessions = [MagicMock(), MagicMock()]
     provider = Mock()
-    provider.get_exchanges.return_value = []
+    provider.get_exchanges.return_value = [
+        ExchangeReference(code="XNYS"),
+        ExchangeReference(code="XETR"),
+    ]
     with (
         patch("jobs.eulerpool_exchange_holidays.acquire", return_value=Mock()),
         patch("jobs.eulerpool_exchange_holidays.SQLHolidayRepository") as repository,
@@ -114,6 +124,120 @@ def test_holiday_job_rolls_back_failed_save_and_continues():
     successful_db = sessions[1].__enter__.return_value
     assert failed_db.begin.return_value.__exit__.call_args.args[0] is ValueError
     assert successful_db.begin.return_value.__exit__.call_args.args[0] is None
+
+
+@pytest.mark.parametrize(
+    "identity",
+    [
+        {"exchange": "XNYS"},
+        {"exchange": "local", "exchangefullname": " New York Stock Exchange "},
+        {"exchange": "local", "source_identifiers": ["NYSE", "xnys"]},
+        {"exchange": "local", "exchange_codes": ["XNYS"]},
+    ],
+)
+def test_holiday_job_acquires_initial_snapshot_from_catalog(identity):
+    provider = EulerpoolProvider(
+        "key",
+        client=Client(
+            [
+                [{"code": "XNYS", "name": "New York Stock Exchange"}],
+                holiday_payload(),
+            ]
+        ),
+    )
+    session_factory = MagicMock()
+    with patch("jobs.eulerpool_exchange_holidays.SQLHolidayRepository") as repository:
+        result = sync_holidays(provider, [identity], session_factory)
+    assert result["status"] == "SUCCESS"
+    assert result["upserted"] == 1
+    exchange, snapshot = repository.return_value.save.call_args.args
+    assert exchange == identity["exchange"]
+    assert snapshot.exchange_code == "XNYS"
+    session_factory.assert_called_once_with()
+
+
+@pytest.mark.parametrize(
+    ("target", "catalog", "reason"),
+    [
+        ({"exchange": "unknown"}, [], "unresolved_exchange"),
+        (
+            {"exchange": "NYSE"},
+            [ExchangeReference(code="XNYS", name="New York Stock Exchange")],
+            "unresolved_exchange",
+        ),
+        (
+            {"exchange": "local", "source_identifiers": ["old"]},
+            [ExchangeReference(code="LOCL", name="local")],
+            "unresolved_exchange_mapping",
+        ),
+        (
+            {"exchange": "XNYS", "exchange_codes": ["OLDX"]},
+            [ExchangeReference(code="XNYS")],
+            "unresolved_exchange_mapping",
+        ),
+        (
+            {"exchange": "same"},
+            [
+                ExchangeReference(code="XNYS", name="same"),
+                ExchangeReference(code="XETR", name="same"),
+            ],
+            "ambiguous_exchange",
+        ),
+        (
+            {"exchange": "local", "source_identifiers": ["XNYS", "XETR"]},
+            [ExchangeReference(code="XNYS"), ExchangeReference(code="XETR")],
+            "ambiguous_exchange",
+        ),
+        (
+            {"exchange": "XNYS"},
+            [ExchangeReference(code="XNYS"), ExchangeReference(code="XNYS")],
+            "ambiguous_exchange",
+        ),
+    ],
+)
+def test_holiday_job_logs_unresolved_targets_without_fetching(
+    target, catalog, reason, caplog
+):
+    provider = Mock()
+    provider.get_exchanges.return_value = catalog
+    session_factory = Mock()
+    result = sync_holidays(provider, [target], session_factory)
+    assert result["status"] == "FAILED"
+    assert result["failed"] == 1
+    assert result["exchanges"][0]["reason"] == reason
+    assert f"reason={reason}" in caplog.text
+    provider.get_exchange_holidays.assert_not_called()
+    session_factory.assert_not_called()
+
+
+def test_holiday_job_skips_conflicting_rows_and_continues(caplog):
+    provider = Mock()
+    provider.get_exchanges.return_value = [
+        ExchangeReference(code="XNYS", name="NYSE"),
+        ExchangeReference(code="XETR"),
+    ]
+    catalog = provider.get_exchanges.return_value
+    targets = [
+        {"exchange": "XNYS"},
+        {"exchange": "NYSE"},
+        {"exchange": "unknown"},
+        {"exchange": "XETR"},
+    ]
+    session_factory = MagicMock()
+    with (
+        patch("jobs.eulerpool_exchange_holidays.acquire", return_value=Mock()) as fetch,
+        patch("jobs.eulerpool_exchange_holidays.SQLHolidayRepository"),
+    ):
+        result = sync_holidays(provider, targets, session_factory)
+    assert result["status"] == "PARTIAL"
+    assert result["eligible"] == 4
+    assert result["upserted"] == 1
+    assert result["failed"] == 3
+    assert "reason=conflicting_exchange_mapping" in caplog.text
+    assert "reason=unresolved_exchange" in caplog.text
+    fetch.assert_called_once_with(provider, "XETR", catalog=catalog)
+    provider.get_exchanges.assert_called_once_with()
+    session_factory.assert_called_once_with()
 
 
 def test_holiday_job_catalog_failure_does_not_write():
@@ -143,18 +267,30 @@ def test_holiday_job_manifest():
     assert callable(importlib.import_module(definition["python_module"]).run)
 
 
-def test_holiday_repository_lists_registered_codes():
+def test_holiday_repository_includes_exchanges_without_snapshots():
     db = Mock()
     db.execute.return_value.scalar_one.return_value = 1
-    db.execute.return_value.mappings.return_value.all.return_value = [
-        {"exchange": "NYSE", "exchange_code": "XNYS"}
+    rows = [
+        {
+            "exchange": "NYSE",
+            "exchangefullname": "New York Stock Exchange",
+            "exchange_codes": ["XNYS"],
+            "source_identifiers": ["NYSE", "XNYS"],
+        },
+        {
+            "exchange": "XETR",
+            "exchangefullname": "Xetra",
+            "exchange_codes": [],
+            "source_identifiers": [],
+        },
     ]
-    assert SQLHolidayRepository(db).list_exchanges("Eulerpool") == [
-        {"exchange": "NYSE", "exchange_code": "XNYS"}
-    ]
+    db.execute.return_value.mappings.return_value.all.return_value = rows
+    assert SQLHolidayRepository(db).list_exchanges("Eulerpool") == rows
     query, params = db.execute.call_args.args
-    assert "SELECT DISTINCT exchange, exchange_code" in str(query)
+    assert "FROM public.exchanges e" in str(query)
     assert "exchange_holiday_snapshots" in str(query)
+    assert "exchange_source_mappings" in str(query)
+    assert "s.active" in str(query)
     assert params == {"source": "eulerpool"}
 
 

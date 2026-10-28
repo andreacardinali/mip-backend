@@ -100,25 +100,32 @@ row with code `eulerpool` (case-insensitive). All database writes use the stored
 function in a transaction. No external calls or migrations were executed during
 implementation. Validate the SQL on a test PostgreSQL database before production.
 
-The `eulerpool_exchange_holidays` scheduler job refreshes existing canonical links
-from `exchange_holiday_snapshots`, not unverified legacy aliases. Bootstrap at
-scheduler startup discovers its manifest and registers it disabled by default.
-After the initial acquisition, enable it through the existing scheduler controls.
+The `eulerpool_exchange_holidays` scheduler job acquires missing holiday snapshots
+and refreshes existing ones for rows in `public.exchanges`. Bootstrap at scheduler
+startup discovers its manifest and registers it disabled by default. Enable it
+through the existing scheduler controls; manual initial acquisition is optional.
 Its daily cron is `30 6 * * *`, interpreted in `SCHEDULER_TIMEZONE` (default
 `Europe/Rome`), not necessarily UTC. No additional schema migration is required.
 
-Each run retrieves one live catalog and requires a unique matching code for each
-registered exchange. Each snapshot is stored in a separate transaction; a failed
-exchange does not prevent the others from updating. Results include per-exchange
+Each run retrieves one live catalog. Existing snapshot codes take precedence,
+followed by Eulerpool source mappings, then the MIP exchange code/full name when
+no prior identity is available. Resolution requires an exact, unique catalog
+code or case-insensitive trimmed name; no hardcoded aliases or fuzzy matching
+are used. Stale canonical codes, unresolved mappings, ambiguous matches and
+multiple MIP rows resolving to the same code are skipped with a warning and a
+per-exchange failure reason. Each snapshot is stored in a separate transaction;
+a failed exchange does not prevent the others from updating. Results include per-exchange
 outcomes and `eligible`, `upserted`, `failed` counters. `upserted` counts successful
 stores, including idempotent existing snapshots. Results are `SUCCESS`, `PARTIAL`
-or `FAILED`; an empty registered set returns `INCOMPLETE` without HTTP requests.
+or `FAILED`; an empty MIP exchange table returns `INCOMPLETE` with reason
+`no_registered_exchanges` and a warning, without HTTP requests.
 The scheduler repository persists `INCOMPLETE` as `PARTIAL`, matching the database
 completion contract, while preserving the original status and reason in the JSON
-result. An empty set requires initial acquisition; applying the schema alone does
-not register any exchanges for refresh.
+result. Existing MIP exchange rows need no initial snapshot to be eligible;
+unresolved identities still require a verified mapping before acquisition.
 Catalog, configuration and target-selection failures fail the whole run. The job
-does not create exchange rows, infer new mappings, or change calendar metadata.
+does not create exchange rows or change calendar metadata. Successful acquisition
+stores the verified provider identity through the existing stored function.
 
 Holiday snapshots are acquisition evidence only: `as_of` is not calendar coverage.
 They do not yet replace the session provider or assign `calendar_name`, IANA
