@@ -25,6 +25,7 @@ def import_universe_instrument(db, symbol: str) -> bool:
                 full_refresh=False,
                 instrument_type=InstrumentType.STOCK,
                 include_quote=False,
+                commit_each=False,
             )
     except Exception:
         logger.exception(

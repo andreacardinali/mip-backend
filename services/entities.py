@@ -87,6 +87,7 @@ def refresh_entities(
     instrument_type: InstrumentType = InstrumentType.UNKNOWN,
     include_quote: bool = True,
     progress: ProgressCallback | None = None,
+    commit_each: bool = True,
 ) -> dict[str, Any]:
     normalized_mode = _normalize_mode(mode)
     normalized_symbol = _normalize_symbol(symbol)
@@ -106,6 +107,8 @@ def refresh_entities(
         text("SELECT * FROM sp_get_entities_for_refresh(:mode, :symbol)"),
         {"mode": normalized_mode.value, "symbol": normalized_symbol},
     ).fetchall()
+    if commit_each:
+        db.commit()
     total = len(rows)
     _emit(progress, "scan_loaded", total=total)
 
@@ -115,14 +118,22 @@ def refresh_entities(
         and not rows
         and create_if_missing
     ):
-        return _create_missing_entity(
-            db,
-            symbol=normalized_symbol,
-            full_refresh=full_refresh,
-            instrument_type=instrument_type,
-            include_quote=include_quote,
-            progress=progress,
-        )
+        try:
+            result = _create_missing_entity(
+                db,
+                symbol=normalized_symbol,
+                full_refresh=full_refresh,
+                instrument_type=instrument_type,
+                include_quote=include_quote,
+                progress=progress,
+            )
+            if commit_each:
+                db.commit()
+            return result
+        except Exception:
+            if commit_each:
+                db.rollback()
+            raise
 
     updated = 0
     skipped = 0
@@ -204,6 +215,8 @@ def refresh_entities(
                 if result is None:
                     raise RuntimeError("sp_upsert_asset_profile returned no row")
 
+            if commit_each:
+                db.commit()
             updated += 1
             duration_ms = round((time.monotonic() - iteration_started_at) * 1000)
             _emit(
@@ -226,6 +239,8 @@ def refresh_entities(
                 result.action,
             )
         except Exception as exc:
+            if commit_each:
+                db.rollback()
             error = str(exc)
             errors.append({"symbol": row_symbol, "error": error})
             _emit(

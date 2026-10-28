@@ -1,11 +1,13 @@
 import json
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from market_data.capabilities import InstrumentType
+from services import entities
 from services.entities import _instrument_type
 
 
@@ -22,11 +24,16 @@ def test_etf_instrument_type_is_preserved():
     assert _instrument_type("ETF") == InstrumentType.ETF
 
 
-def test_full_refresh_job_refreshes_all_existing_entities(monkeypatch, stub_database):
-    from jobs.entities import refresh_entities_full
+@pytest.mark.parametrize("full_refresh", [False, True])
+def test_refresh_job_uses_service_transaction_boundaries(
+    monkeypatch, stub_database, full_refresh
+):
+    from jobs.entities import refresh_entities, refresh_entities_full
     from services.entities import RefreshMode
 
-    database = object()
+    job = refresh_entities_full if full_refresh else refresh_entities
+    closed = []
+    database = SimpleNamespace(close=lambda: closed.append(True))
     expected = {"status": "SUCCESS"}
     captured = {}
 
@@ -35,17 +42,16 @@ def test_full_refresh_job_refreshes_all_existing_entities(monkeypatch, stub_data
         captured.update(kwargs)
         return expected
 
-    monkeypatch.setattr(refresh_entities_full, "refresh_entities", fake_refresh)
-    monkeypatch.setattr(
-        refresh_entities_full, "run_transactional", lambda action: action(database)
-    )
+    monkeypatch.setattr(job, "refresh_entities", fake_refresh)
+    monkeypatch.setattr(job, "SessionLocal", lambda: database)
 
-    assert refresh_entities_full.run() is expected
+    assert job.run() is expected
+    assert closed == [True]
     assert captured == {
-        "mode": RefreshMode.ALL,
+        "mode": RefreshMode.ALL if full_refresh else RefreshMode.MISSING,
         "symbol": None,
         "create_if_missing": False,
-        "full_refresh": True,
+        "full_refresh": full_refresh,
     }
 
 
@@ -65,3 +71,48 @@ def test_full_refresh_job_is_disabled_by_default(stub_database):
     assert definition["enabled_by_default"] is False
     assert definition["job_key"] != existing["job_key"]
     assert definition["python_module"] == refresh_entities_full.__name__
+
+
+@pytest.mark.parametrize(
+    "mode", [entities.RefreshMode.MISSING, entities.RefreshMode.ALL]
+)
+@pytest.mark.parametrize("failure_stage", ["persist", "commit"])
+def test_refresh_commits_each_update_and_recovers_from_failure(
+    monkeypatch, mode, failure_stage
+):
+    events = []
+    rows = [
+        SimpleNamespace(symbol=symbol, entity_id=symbol, instrument_id=symbol)
+        for symbol in ("FIRST", "FAIL", "LAST")
+    ]
+
+    def commit():
+        if failure_stage == "commit" and events and events[-1] == "FAIL":
+            raise RuntimeError("failed commit")
+        events.append("commit")
+
+    database = SimpleNamespace(
+        execute=lambda *args: SimpleNamespace(fetchall=lambda: rows),
+        begin_nested=nullcontext,
+        commit=commit,
+        rollback=lambda: events.append("rollback"),
+    )
+
+    def profile(reference, **kwargs):
+        events.append(reference.symbol)
+        return {"symbol": reference.symbol}
+
+    def persist(db, payload, **kwargs):
+        if payload["symbol"] == "FAIL" and failure_stage == "persist":
+            raise RuntimeError("failed update")
+        return SimpleNamespace(action="UPDATED")
+
+    monkeypatch.setattr(entities, "_profile_payload", profile)
+    monkeypatch.setattr(entities, "upsert_asset_profile", persist)
+
+    result = entities.refresh_entities(database, mode=mode)
+
+    assert result["status"] == "PARTIAL"
+    assert result["updated"] == 2
+    assert result["failed"] == 1
+    assert events == ["commit", "FIRST", "commit", "FAIL", "rollback", "LAST", "commit"]
