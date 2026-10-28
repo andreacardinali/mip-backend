@@ -1,6 +1,4 @@
-import httpx
-
-from http_client.retry import RetryPolicy, request_with_retry
+from http_client import RetryPolicy, create_http_client, request_with_retry
 from market_data.capabilities import MarketDataCapability, ProviderCapabilities
 from market_data.exceptions import InstrumentNotFoundError
 from market_data.models import InstrumentProfile
@@ -53,7 +51,7 @@ class OpenFigiProvider:
             raise InstrumentNotFoundError("OpenFIGI requires identifier")
 
         owns_client = self._client is None
-        client = self._client or httpx.Client(timeout=self.timeout)
+        client = self._client or create_http_client(timeout=self.timeout)
         headers = {"Content-Type": "application/json"}
 
         if self.api_key:

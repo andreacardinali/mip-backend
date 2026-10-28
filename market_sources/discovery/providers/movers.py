@@ -2,9 +2,13 @@ import math
 import re
 from datetime import UTC, datetime
 
-import httpx
-
-from http_client.retry import RetryPolicy, request_with_retry
+from http_client import (
+    HttpRequestError,
+    HttpStatusError,
+    RetryPolicy,
+    create_http_client,
+    request_with_retry,
+)
 from market_sources.capabilities import (
     MarketSourceCapability,
     SourceProviderCapabilities,
@@ -203,7 +207,7 @@ class _MoversDiscoveryProvider:
 
     def discover(self, request: DiscoveryRequest) -> DiscoverySnapshot:
         url, params = self._endpoint(request)
-        client = self._client or httpx.Client(timeout=self.timeout)
+        client = self._client or create_http_client(timeout=self.timeout)
         try:
             response = request_with_retry(
                 client,
@@ -224,11 +228,11 @@ class _MoversDiscoveryProvider:
                 source_reference=str(response.url),
                 source_metadata={"returned_count": len(candidates)},
             )
-        except httpx.HTTPStatusError as exc:
+        except HttpStatusError as exc:
             if exc.response.status_code == 429:
                 raise SourceRateLimitError(f"{self.name} rate limited") from exc
             raise SourceTemporaryError(f"{self.name} HTTP error") from exc
-        except httpx.RequestError as exc:
+        except HttpRequestError as exc:
             raise SourceTemporaryError(f"{self.name} request failed") from exc
         except ValueError as exc:
             raise InvalidSourceResponseError(f"Invalid {self.name} response") from exc

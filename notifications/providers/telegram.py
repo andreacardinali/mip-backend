@@ -3,8 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-import httpx
-
+from http_client import (
+    HttpClient,
+    HttpResponse,
+    HttpStatusError,
+    RetryPolicy,
+    create_http_client,
+    request_with_retry,
+)
 from notifications.credentials import decrypt_credential
 from notifications.models import NotificationDelivery, NotificationSendResult
 
@@ -77,14 +83,14 @@ class TelegramClient:
         self,
         config: TelegramConfig,
         *,
-        client: httpx.Client | None = None,
+        client: HttpClient | None = None,
     ) -> None:
         self.config = config
         self._client = client
 
     def send(self, message: str) -> list[TelegramMessageResult]:
         owns_client = self._client is None
-        client = self._client or httpx.Client(timeout=self.config.timeout_seconds)
+        client = self._client or create_http_client(timeout=self.config.timeout_seconds)
         try:
             return [
                 self._send_chunk(client, chunk)
@@ -94,7 +100,7 @@ class TelegramClient:
             if owns_client:
                 client.close()
 
-    def _send_chunk(self, client: httpx.Client, text: str) -> TelegramMessageResult:
+    def _send_chunk(self, client: HttpClient, text: str) -> TelegramMessageResult:
         payload: dict[str, Any] = {
             "chat_id": self.config.chat_id,
             "text": text,
@@ -104,11 +110,20 @@ class TelegramClient:
         if self.config.parse_mode:
             payload["parse_mode"] = self.config.parse_mode
 
-        response = client.post(
-            f"{TELEGRAM_API_BASE_URL}/bot{self.config.bot_token}/sendMessage",
-            json=payload,
-        )
-        body = _telegram_response(response)
+        try:
+            response = request_with_retry(
+                client,
+                "POST",
+                f"{TELEGRAM_API_BASE_URL}/bot{self.config.bot_token}/sendMessage",
+                policy=RetryPolicy(),
+                retry_non_idempotent=False,
+                sensitive_values=(self.config.bot_token,),
+                json=payload,
+            )
+        except HttpStatusError as error:
+            body = _telegram_response(error.response, status_error=error)
+        else:
+            body = _telegram_response(response)
         result = body.get("result") or {}
         message_id = result.get("message_id")
         if message_id is None:
@@ -140,17 +155,21 @@ class TelegramProvider:
         )
 
 
-def _telegram_response(response: httpx.Response) -> dict[str, Any]:
+def _telegram_response(
+    response: HttpResponse, *, status_error: HttpStatusError | None = None
+) -> dict[str, Any]:
     try:
         body = response.json()
     except ValueError as exc:
+        if status_error is not None:
+            raise status_error from exc
         response.raise_for_status()
         raise TelegramDeliveryError("Telegram returned a non-JSON response") from exc
     if response.is_error or not body.get("ok"):
         description = body.get("description", "unknown Telegram error")
         raise TelegramDeliveryError(
             f"Telegram delivery failed ({response.status_code}): {description}"
-        )
+        ) from status_error
     return body
 
 

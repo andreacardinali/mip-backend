@@ -2,9 +2,14 @@ from datetime import date
 from decimal import Decimal
 from xml.etree import ElementTree
 
-import httpx
-
-from http_client.retry import RetryPolicy, request_with_retry
+from http_client import (
+    HttpClient,
+    HttpRequestError,
+    HttpStatusError,
+    RetryPolicy,
+    create_http_client,
+    request_with_retry,
+)
 from market_data.capabilities import MarketDataCapability, ProviderCapabilities
 from market_data.exceptions import (
     InvalidProviderResponseError,
@@ -27,7 +32,7 @@ class EcbProvider:
         *,
         timeout: float = 30.0,
         retry_policy: RetryPolicy | None = None,
-        client: httpx.Client | None = None,
+        client: HttpClient | None = None,
     ) -> None:
         self.timeout = timeout
         self.retry_policy = retry_policy or RetryPolicy()
@@ -35,7 +40,7 @@ class EcbProvider:
 
     def get_exchange_rates(self) -> ExchangeRateSnapshot:
         owns_client = self._client is None
-        client = self._client or httpx.Client(
+        client = self._client or create_http_client(
             timeout=self.timeout,
             follow_redirects=True,
         )
@@ -48,14 +53,14 @@ class EcbProvider:
                 policy=self.retry_policy,
             )
             return self._parse_xml(response.content)
-        except httpx.HTTPStatusError as error:
+        except HttpStatusError as error:
             status = error.response.status_code
             if status == 429:
                 raise ProviderRateLimitError("ECB rate limit exceeded") from error
             raise ProviderTemporaryError(
                 f"ECB request failed: HTTP {status}"
             ) from error
-        except httpx.RequestError as error:
+        except HttpRequestError as error:
             raise ProviderTemporaryError(f"ECB transport error: {error}") from error
         finally:
             if owns_client:

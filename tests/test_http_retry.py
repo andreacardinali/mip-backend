@@ -3,12 +3,38 @@ import traceback
 import unittest
 
 import httpx
+import pytest
 
 from http_client.retry import (
     RetryDelayStrategy,
     RetryPolicy,
     request_with_retry,
 )
+
+
+def test_shared_http_redacts_explicit_secret_in_errors_and_logs(caplog):
+    token = "123456:test-secret"
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(503, text=f"unavailable for {token}")
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        with caplog.at_level(logging.INFO):
+            with pytest.raises(httpx.HTTPStatusError) as captured:
+                request_with_retry(
+                    client,
+                    "POST",
+                    f"https://api.telegram.org/bot{token}/sendMessage",
+                    policy=RetryPolicy(max_retries=3),
+                    sensitive_values=(token,),
+                    json={"text": "test"},
+                )
+    assert len(requests) == 1
+    assert token not in str(captured.value)
+    assert token not in caplog.text
+    assert captured.value.response.status_code == 503
 
 
 class SequenceTransport(httpx.BaseTransport):

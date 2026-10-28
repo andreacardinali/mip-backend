@@ -3,9 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-import httpx
-
-from http_client.retry import RetryPolicy, request_with_retry
+from http_client import (
+    HttpRequestError,
+    HttpStatusError,
+    RetryPolicy,
+    create_http_client,
+    request_with_retry,
+)
 from market_sources.capabilities import (
     MarketSourceCapability,
     SourceProviderCapabilities,
@@ -77,7 +81,7 @@ class WikipediaUniverseProvider:
             raise InvalidSourceResponseError(
                 f"Wikipedia universe {universe_code!r} is not configured; supported: {', '.join(sorted(UNIVERSE_DEFINITIONS))}"
             ) from error
-        client = self._client or httpx.Client(timeout=self.timeout)
+        client = self._client or create_http_client(timeout=self.timeout)
         close = self._client is None
         try:
             response = request_with_retry(
@@ -101,11 +105,11 @@ class WikipediaUniverseProvider:
                 )
             response.raise_for_status()
             return parse_universe_members(response.text, definition)
-        except httpx.HTTPStatusError as error:
+        except HttpStatusError as error:
             raise SourceTemporaryError(
                 f"Wikipedia request failed universe {code}: HTTP {error.response.status_code}"
             ) from error
-        except httpx.RequestError as error:
+        except HttpRequestError as error:
             raise SourceTemporaryError(
                 f"Wikipedia request failed universe {code}: {error}"
             ) from error

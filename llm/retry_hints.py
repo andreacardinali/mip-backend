@@ -2,7 +2,7 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
-import httpx
+from http_client import HttpResponse
 
 _RETRY_PATTERNS = (
     re.compile(r"try again in\s+([0-9]+(?:\.[0-9]+)?)s", re.IGNORECASE),
@@ -10,7 +10,7 @@ _RETRY_PATTERNS = (
 )
 
 
-def llm_response_delay(response: httpx.Response) -> float | None:
+def llm_response_delay(response: HttpResponse) -> float | None:
     if response.status_code != 429:
         return None
 
@@ -41,10 +41,10 @@ def llm_response_delay(response: httpx.Response) -> float | None:
 
 def exception_retry_delay(exc: Exception) -> float | None:
     response = getattr(exc, "response", None)
-    if isinstance(response, httpx.Response):
+    if isinstance(response, HttpResponse):
         return llm_response_delay(response)
     cause = getattr(exc, "__cause__", None)
     response = getattr(cause, "response", None)
-    if isinstance(response, httpx.Response):
+    if isinstance(response, HttpResponse):
         return llm_response_delay(response)
     return None

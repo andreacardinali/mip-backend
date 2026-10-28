@@ -33,7 +33,7 @@ def test_ollama_passes_response_schema_to_format(monkeypatch):
             json={"response": json.dumps({"llm_score": 75})},
         )
 
-    monkeypatch.setattr(module.httpx, "Client", FakeClient)
+    monkeypatch.setattr(module, "create_http_client", FakeClient)
     monkeypatch.setattr(module, "request_with_retry", fake_request)
 
     provider = module.OllamaProvider(

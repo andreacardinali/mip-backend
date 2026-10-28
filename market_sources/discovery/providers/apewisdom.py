@@ -3,9 +3,14 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-import httpx
-
-from http_client.retry import RetryPolicy, request_with_retry
+from http_client import (
+    HttpClient,
+    HttpRequestError,
+    HttpStatusError,
+    RetryPolicy,
+    create_http_client,
+    request_with_retry,
+)
 from market_sources.capabilities import (
     MarketSourceCapability,
     SourceProviderCapabilities,
@@ -37,7 +42,7 @@ class ApeWisdomDiscoveryProvider:
         user_agent: str,
         timeout: float = 30.0,
         retry_policy: RetryPolicy | None = None,
-        client: httpx.Client | None = None,
+        client: HttpClient | None = None,
     ) -> None:
         clean_user_agent = str(user_agent or "").strip()
         if not clean_user_agent:
@@ -56,7 +61,7 @@ class ApeWisdomDiscoveryProvider:
                 f"{request.source_type.value}"
             )
 
-        client = self._client or httpx.Client(timeout=self.timeout)
+        client = self._client or create_http_client(timeout=self.timeout)
         close_client = self._client is None
         try:
             response = request_with_retry(
@@ -82,14 +87,14 @@ class ApeWisdomDiscoveryProvider:
                     "returned_count": len(candidates),
                 },
             )
-        except httpx.HTTPStatusError as error:
+        except HttpStatusError as error:
             status_code = error.response.status_code
             if status_code == 429:
                 raise SourceRateLimitError("ApeWisdom rate limit exceeded") from error
             raise SourceTemporaryError(
                 f"ApeWisdom HTTP failure: {status_code}"
             ) from error
-        except httpx.RequestError as error:
+        except HttpRequestError as error:
             raise SourceTemporaryError(f"ApeWisdom request failed: {error}") from error
         except ValueError as error:
             raise InvalidSourceResponseError(

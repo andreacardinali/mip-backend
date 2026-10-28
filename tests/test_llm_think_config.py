@@ -70,7 +70,7 @@ def test_ollama_sends_configured_think_value(monkeypatch):
             json={"response": json.dumps({"status": "ok"})},
         )
 
-    monkeypatch.setattr(module.httpx, "Client", FakeClient)
+    monkeypatch.setattr(module, "create_http_client", FakeClient)
     monkeypatch.setattr(module, "request_with_retry", fake_request)
     provider = module.OllamaProvider(
         base_url="http://ollama.internal:11434",

@@ -1,6 +1,10 @@
-import httpx
-
-from http_client.retry import RetryPolicy, request_with_retry
+from http_client import (
+    RETRYABLE_EXCEPTIONS,
+    HttpStatusError,
+    RetryPolicy,
+    create_http_client,
+    request_with_retry,
+)
 from market_data.capabilities import MarketDataCapability, ProviderCapabilities
 from market_data.exceptions import (
     CapabilityUnavailableError,
@@ -86,7 +90,7 @@ class FMPProvider:
 
     def _get(self, path, *, params=None):
         owns_client = self._client is None
-        client = self._client or httpx.Client(timeout=self.timeout)
+        client = self._client or create_http_client(timeout=self.timeout)
         query = {**(params or {}), "apikey": self.api_key}
         try:
             response = request_with_retry(
@@ -97,16 +101,9 @@ class FMPProvider:
                 params=query,
             )
             return response.json()
-        except httpx.HTTPStatusError as error:
+        except HttpStatusError as error:
             raise _normalize_http_error(error) from error
-        except (
-            httpx.ConnectError,
-            httpx.ConnectTimeout,
-            httpx.ReadTimeout,
-            httpx.WriteTimeout,
-            httpx.PoolTimeout,
-            httpx.RemoteProtocolError,
-        ) as error:
+        except RETRYABLE_EXCEPTIONS as error:
             raise ProviderTemporaryError(f"FMP transport error: {error}") from error
         finally:
             if owns_client:

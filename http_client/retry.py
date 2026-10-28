@@ -15,6 +15,16 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
+HttpClient = httpx.Client
+HttpRequestError = httpx.RequestError
+HttpResponse = httpx.Response
+HttpStatusError = httpx.HTTPStatusError
+
+
+def create_http_client(**kwargs: Any) -> HttpClient:
+    return httpx.Client(**kwargs)
+
+
 DEFAULT_RETRYABLE_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
 NEVER_RETRY_STATUS_CODES = frozenset({403})
 RETRYABLE_EXCEPTIONS = (
@@ -61,9 +71,12 @@ def _redact_text(text: str, secrets: tuple[str, ...]) -> str:
 
 
 def _request_secrets(
-    client: httpx.Client, url: str, request_kwargs: dict[str, Any]
+    client: httpx.Client,
+    url: str,
+    request_kwargs: dict[str, Any],
+    sensitive_values: tuple[str, ...] = (),
 ) -> tuple[str, ...]:
-    values = set()
+    values = {value for value in sensitive_values if value}
     query = httpx.URL(url).params.multi_items()
     headers = []
     if isinstance(client, httpx.Client):
@@ -178,6 +191,7 @@ def request_with_retry(
     *,
     policy: RetryPolicy,
     retry_non_idempotent: bool = False,
+    sensitive_values: tuple[str, ...] = (),
     sleep: Callable[[float], None] = time.sleep,
     random_uniform: Callable[[float, float], float] = random.uniform,
     **request_kwargs: Any,
@@ -188,7 +202,7 @@ def request_with_retry(
         raise ValueError("HTTP method cannot be empty")
 
     may_retry = normalized_method in IDEMPOTENT_METHODS or retry_non_idempotent
-    secrets = _request_secrets(client, url, request_kwargs)
+    secrets = _request_secrets(client, url, request_kwargs, sensitive_values)
 
     for attempt in range(policy.max_retries + 1):
         try:

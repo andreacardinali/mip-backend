@@ -1,8 +1,13 @@
 from typing import Any
 
-import httpx
-
-from http_client.retry import RetryDelayStrategy, RetryPolicy, request_with_retry
+from http_client import (
+    HttpResponse,
+    HttpStatusError,
+    RetryDelayStrategy,
+    RetryPolicy,
+    create_http_client,
+    request_with_retry,
+)
 from llm.base import LLMProvider, LLMRequest, LLMResponse
 from llm.json_config import deep_merge_dicts, validate_protected_paths
 from llm.parsing import parse_json_object
@@ -73,7 +78,7 @@ class OpenAICompatibleProvider(LLMProvider):
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
-        with httpx.Client(timeout=self.timeout) as client:
+        with create_http_client(timeout=self.timeout) as client:
             try:
                 response = request_with_retry(
                     client,
@@ -84,7 +89,7 @@ class OpenAICompatibleProvider(LLMProvider):
                     headers=headers,
                     json=body,
                 )
-            except httpx.HTTPStatusError as exc:
+            except HttpStatusError as exc:
                 delay = llm_response_delay(exc.response)
                 if delay is not None:
                     self.rate_limiter.block(delay)
@@ -112,7 +117,7 @@ class OpenAICompatibleProvider(LLMProvider):
         return body
 
     @staticmethod
-    def _decode_response(response: httpx.Response) -> dict[str, Any]:
+    def _decode_response(response: HttpResponse) -> dict[str, Any]:
         try:
             raw = response.json()
         except ValueError as exc:
@@ -151,7 +156,7 @@ class OpenAICompatibleProvider(LLMProvider):
         return text
 
     @staticmethod
-    def _response_error_message(response: httpx.Response) -> str:
+    def _response_error_message(response: HttpResponse) -> str:
         try:
             body = response.text.strip()
         except Exception as exc:

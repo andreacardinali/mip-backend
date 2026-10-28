@@ -1,9 +1,12 @@
 from datetime import UTC, date, datetime
 from urllib.parse import quote
 
-import httpx
-
-from http_client.retry import RetryPolicy, request_with_retry
+from http_client import (
+    HttpStatusError,
+    RetryPolicy,
+    create_http_client,
+    request_with_retry,
+)
 from market_data.capabilities import (
     InstrumentType,
     MarketDataCapability,
@@ -557,7 +560,7 @@ class EulerpoolProvider:
 
     def _get(self, path, params=None):
         owns_client = self._client is None
-        client = self._client or httpx.Client(timeout=self.timeout)
+        client = self._client or create_http_client(timeout=self.timeout)
         query = {"token": self.api_key, **(params or {})}
         try:
             try:
@@ -568,7 +571,7 @@ class EulerpoolProvider:
                     policy=self.retry_policy,
                     params=query,
                 )
-            except httpx.HTTPStatusError as error:
+            except HttpStatusError as error:
                 if error.response.status_code == 404:
                     raise InstrumentNotFoundError(path) from error
                 raise

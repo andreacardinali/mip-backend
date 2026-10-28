@@ -1,9 +1,7 @@
 import json
 from typing import Any
 
-import httpx
-
-from http_client.retry import RetryPolicy, request_with_retry
+from http_client import RetryPolicy, create_http_client, request_with_retry
 from llm.base import LLMProvider, LLMRequest, LLMResponse
 from llm.json_config import deep_merge_dicts, validate_protected_paths
 from llm.parsing import parse_json_object
@@ -60,7 +58,7 @@ class OllamaProvider(LLMProvider):
         }
         body = deep_merge_dicts(standard_body, self.json_config)
         validate_protected_paths(body, standard_body, PROTECTED_PATHS)
-        with httpx.Client(timeout=self.timeout) as client:
+        with create_http_client(timeout=self.timeout) as client:
             response = request_with_retry(
                 client,
                 "POST",

@@ -3,9 +3,15 @@ from __future__ import annotations
 from typing import Any
 from urllib.parse import quote
 
-import httpx
-
-from http_client.retry import RetryPolicy, request_with_retry
+from http_client import (
+    RETRYABLE_EXCEPTIONS,
+    HttpClient,
+    HttpResponse,
+    HttpStatusError,
+    RetryPolicy,
+    create_http_client,
+    request_with_retry,
+)
 from market_data.capabilities import (
     InstrumentType,
     MarketDataCapability,
@@ -57,7 +63,7 @@ class YahooProvider:
         *,
         timeout: float = 10.0,
         retry_policy: RetryPolicy | None = None,
-        client: httpx.Client | None = None,
+        client: HttpClient | None = None,
     ) -> None:
         self.timeout = timeout
         self.retry_policy = retry_policy or RetryPolicy()
@@ -184,7 +190,7 @@ class YahooProvider:
 
     def _request_search(self, query: str, *, limit: int) -> dict[str, Any]:
         owns_client = self._client is None
-        client = self._client or httpx.Client(
+        client = self._client or create_http_client(
             timeout=self.timeout,
             headers={"User-Agent": "Mozilla/5.0 mip-market-data"},
         )
@@ -213,16 +219,9 @@ class YahooProvider:
                 )
 
             return payload
-        except httpx.HTTPStatusError as error:
+        except HttpStatusError as error:
             raise _normalize_http_error(error, query) from error
-        except (
-            httpx.ConnectError,
-            httpx.ConnectTimeout,
-            httpx.ReadTimeout,
-            httpx.WriteTimeout,
-            httpx.PoolTimeout,
-            httpx.RemoteProtocolError,
-        ) as error:
+        except RETRYABLE_EXCEPTIONS as error:
             raise ProviderTemporaryError(f"Yahoo transport error: {error}") from error
         finally:
             if owns_client:
@@ -233,9 +232,9 @@ class YahooProvider:
         symbol: str,
         *,
         params: dict[str, Any],
-    ) -> httpx.Response:
+    ) -> HttpResponse:
         owns_client = self._client is None
-        client = self._client or httpx.Client(
+        client = self._client or create_http_client(
             timeout=self.timeout,
             headers={"User-Agent": "Mozilla/5.0 mip-market-data"},
         )
@@ -247,16 +246,9 @@ class YahooProvider:
                 policy=self.retry_policy,
                 params=params,
             )
-        except httpx.HTTPStatusError as error:
+        except HttpStatusError as error:
             raise _normalize_http_error(error, symbol) from error
-        except (
-            httpx.ConnectError,
-            httpx.ConnectTimeout,
-            httpx.ReadTimeout,
-            httpx.WriteTimeout,
-            httpx.PoolTimeout,
-            httpx.RemoteProtocolError,
-        ) as error:
+        except RETRYABLE_EXCEPTIONS as error:
             raise ProviderTemporaryError(f"Yahoo transport error: {error}") from error
         finally:
             if owns_client:
@@ -264,7 +256,7 @@ class YahooProvider:
 
     @staticmethod
     def _parse_response(
-        response: httpx.Response,
+        response: HttpResponse,
         symbol: str,
     ) -> MarketQuote:
         if response.status_code == 404:
@@ -272,7 +264,7 @@ class YahooProvider:
 
         try:
             response.raise_for_status()
-        except httpx.HTTPStatusError as error:
+        except HttpStatusError as error:
             raise _normalize_http_error(error, symbol) from error
 
         try:
@@ -340,7 +332,7 @@ class YahooProvider:
 
     @staticmethod
     def _parse_ohlcv_response(
-        response: httpx.Response,
+        response: HttpResponse,
         symbol: str,
     ) -> list[PriceBar]:
         result = _chart_result(response, symbol)
@@ -375,7 +367,7 @@ class YahooProvider:
 
 
 def _chart_result(
-    response: httpx.Response,
+    response: HttpResponse,
     symbol: str,
 ) -> dict[str, Any]:
     if response.status_code == 404:
@@ -383,7 +375,7 @@ def _chart_result(
 
     try:
         response.raise_for_status()
-    except httpx.HTTPStatusError as error:
+    except HttpStatusError as error:
         raise _normalize_http_error(error, symbol) from error
 
     try:
@@ -413,7 +405,7 @@ def _chart_result(
 
 
 def _normalize_http_error(
-    error: httpx.HTTPStatusError,
+    error: HttpStatusError,
     symbol: str,
 ) -> Exception:
     status_code = error.response.status_code
