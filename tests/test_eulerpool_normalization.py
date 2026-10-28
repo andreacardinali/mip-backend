@@ -1,8 +1,9 @@
 import importlib
 import json
-from datetime import UTC, date, time
+from datetime import UTC, date, datetime, time
 from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
+from uuid import UUID
 
 import pytest
 
@@ -11,6 +12,7 @@ from market_data.capabilities import InstrumentType
 from market_data.models import InstrumentReference
 from market_data.providers.eulerpool import EulerpoolProvider
 from market_time.repository import SQLHolidayRepository
+from scheduler_repository import SchedulerRepository
 from scripts.apply_market_time_holidays import migration_statements
 from scripts.sync_exchange_holidays import acquire
 
@@ -62,6 +64,33 @@ def test_holiday_job_without_registered_exchanges_does_not_fetch():
     provider.get_exchanges.assert_not_called()
     provider.get_exchange_holidays.assert_not_called()
     session_factory.assert_not_called()
+    db = Mock()
+    SchedulerRepository(db).complete_run(
+        job_run_id=UUID("00000000-0000-0000-0000-000000000001"),
+        status=result["status"],
+        result=result,
+        completed_at=datetime.now(UTC),
+        error_message="Job completed with partial or incomplete result",
+    )
+    parameters = db.execute.call_args.args[1]
+    assert parameters["status"] == "PARTIAL"
+    assert json.loads(parameters["result"]) == result
+    assert result["reason"] == "no_registered_exchanges"
+
+
+@pytest.mark.parametrize("status", ["SUCCESS", "PARTIAL", "FAILED"])
+def test_scheduler_repository_preserves_supported_completion_statuses(status):
+    db = Mock()
+    result = {"status": status}
+    SchedulerRepository(db).complete_run(
+        job_run_id=UUID("00000000-0000-0000-0000-000000000001"),
+        status=f" {status.lower()} ",
+        result=result,
+        completed_at=datetime.now(UTC),
+    )
+    parameters = db.execute.call_args.args[1]
+    assert parameters["status"] == status
+    assert json.loads(parameters["result"]) == result
 
 
 def test_holiday_job_rolls_back_failed_save_and_continues():

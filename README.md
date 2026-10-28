@@ -113,6 +113,10 @@ exchange does not prevent the others from updating. Results include per-exchange
 outcomes and `eligible`, `upserted`, `failed` counters. `upserted` counts successful
 stores, including idempotent existing snapshots. Results are `SUCCESS`, `PARTIAL`
 or `FAILED`; an empty registered set returns `INCOMPLETE` without HTTP requests.
+The scheduler repository persists `INCOMPLETE` as `PARTIAL`, matching the database
+completion contract, while preserving the original status and reason in the JSON
+result. An empty set requires initial acquisition; applying the schema alone does
+not register any exchanges for refresh.
 Catalog, configuration and target-selection failures fail the whole run. The job
 does not create exchange rows, infer new mappings, or change calendar metadata.
 
