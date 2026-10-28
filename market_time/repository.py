@@ -3,6 +3,7 @@ import json
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from market_data.models import ExchangeReference
 from market_time.holidays import HolidaySnapshot, normalize_holidays
 from market_time.models import ExchangeHours
 
@@ -26,9 +27,27 @@ class SQLExchangeHoursRepository:
         return ExchangeHours(**row) if row is not None else None
 
 
-class SQLHolidayRepository:
+class SQLExchangeRepository:
     def __init__(self, db: Session):
         self.db = db
+
+    def sync_catalog(self, exchanges: tuple[ExchangeReference, ...]) -> int:
+        if not exchanges or any(item.source != "eulerpool" for item in exchanges):
+            raise ValueError("A nonempty Eulerpool catalog is required")
+        payload = [
+            {
+                "code": item.code,
+                "name": item.name,
+                "country": item.country_code,
+                "timezone": item.timezone,
+                "raw_payload": item.raw_payload,
+            }
+            for item in exchanges
+        ]
+        return self.db.execute(
+            text("SELECT public.sp_sync_exchange_catalog(CAST(:payload AS jsonb))"),
+            {"payload": json.dumps(payload)},
+        ).scalar_one()
 
     def list_exchanges(self, source: str) -> list[dict[str, str | list[str]]]:
         active_systems = self.db.execute(

@@ -30,8 +30,8 @@ def normalize_exchange_code(value: str) -> str:
     if not isinstance(value, str):
         raise ValueError("Exchange code must be a string")
     code = value.strip().upper()
-    if len(code) != 4 or not code.isascii() or not code.isalnum():
-        raise ValueError("An explicit four-character exchange code is required")
+    if not 4 <= len(code) <= 20 or not code.isascii() or not code.isalnum():
+        raise ValueError("An explicit 4-20 character exchange code is required")
     return code
 
 

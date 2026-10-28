@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "job_key": "eulerpool_exchange_sync",
+  "job_name": "Eulerpool Exchange Sync",
+  "python_module": "jobs.eulerpool_exchange_sync",
+  "trigger": {
+    "type": "cron",
+    "cron_expression": "30 6 * * *"
+  },
+  "enabled_by_default": false
+}

@@ -519,7 +519,7 @@ class EulerpoolProvider:
             else None
         )
 
-    def get_exchanges(self):
+    def get_exchanges(self, *, strict=False):
         if self._exchange_cache is None:
             try:
                 payload = self._get("/market/exchanges")
@@ -540,9 +540,11 @@ class EulerpoolProvider:
             invalid_codes = 0
             for index, item in enumerate(payload):
                 if not isinstance(item, dict):
+                    invalid_codes += 1
                     continue
                 raw_code = item.get("exchange_code") or item.get("code")
                 if not raw_code:
+                    invalid_codes += 1
                     continue
                 try:
                     code = normalize_exchange_code(raw_code)
@@ -571,11 +573,17 @@ class EulerpoolProvider:
                         country_code=item.get("country"),
                         timezone=item.get("timezone"),
                         source=self.name,
+                        raw_payload=dict(item),
                     )
                 )
             if invalid_codes and not exchanges:
                 raise ValueError("Exchange catalog contains no valid exchange codes")
+            self._exchange_catalog_invalid = invalid_codes
             self._exchange_cache = exchanges
+        if strict and self._exchange_catalog_invalid:
+            raise ValueError(
+                "Incomplete Eulerpool exchange catalog cannot be synchronized"
+            )
         return tuple(self._exchange_cache)
 
     def get_exchange_holidays(self, exchange_code):

@@ -1123,6 +1123,56 @@ $$;
 
 
 --
+-- Name: sp_list_orphan_entities(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_list_orphan_entities()
+RETURNS TABLE(entity_id uuid)
+LANGUAGE sql
+AS $$
+    SELECT e.entity_id
+    FROM public.entities e
+    WHERE NOT EXISTS (
+        SELECT 1 FROM public.instruments i WHERE i.entity_id = e.entity_id
+    )
+    ORDER BY e.entity_id;
+$$;
+
+--
+-- Name: sp_cleanup_orphan_entity(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_cleanup_orphan_entity(p_entity_id uuid)
+RETURNS text
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    PERFORM 1
+    FROM public.entities e
+    WHERE e.entity_id = p_entity_id
+    FOR UPDATE SKIP LOCKED;
+
+    IF NOT FOUND THEN
+        RETURN 'skipped';
+    END IF;
+
+    DELETE FROM public.entities e
+    WHERE e.entity_id = p_entity_id
+      AND NOT EXISTS (
+          SELECT 1 FROM public.instruments i WHERE i.entity_id = e.entity_id
+      );
+
+    IF FOUND THEN
+        RETURN 'deleted';
+    END IF;
+    RETURN 'skipped';
+EXCEPTION
+    WHEN foreign_key_violation THEN
+        RETURN 'referenced';
+END;
+$$;
+
+--
 -- Name: sp_cleanup_market_cache(integer); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -2074,7 +2124,9 @@ BEGIN
         alias_symbol
     FROM instrument_aliases
     WHERE instrument_id = p_source_instrument_id
-    ON CONFLICT (alias_symbol) DO NOTHING;
+    ON CONFLICT (instrument_id, upper(btrim((alias_symbol)::text)))
+    WHERE ((instrument_id IS NOT NULL) AND (NULLIF(btrim((alias_symbol)::text), ''::text) IS NOT NULL))
+    DO NOTHING;
 
     IF v_source.symbol IS DISTINCT FROM v_target.symbol THEN
         INSERT INTO instrument_aliases (
@@ -2085,10 +2137,52 @@ BEGIN
             p_target_instrument_id,
             v_source.symbol
         )
-        ON CONFLICT (alias_symbol) DO NOTHING;
+        ON CONFLICT (instrument_id, upper(btrim((alias_symbol)::text)))
+        WHERE ((instrument_id IS NOT NULL) AND (NULLIF(btrim((alias_symbol)::text), ''::text) IS NOT NULL))
+        DO NOTHING;
     END IF;
 
     DELETE FROM instrument_aliases
+    WHERE instrument_id = p_source_instrument_id;
+
+    /*
+     * Record the operation before removing the source.
+     */
+    INSERT INTO instrument_consolidation_audit (
+        duplicate_instrument_id,
+        canonical_instrument_id,
+        duplicate_entity_id,
+        canonical_entity_id,
+        symbol,
+        exchange,
+        details
+    )
+    VALUES (
+        p_source_instrument_id,
+        p_target_instrument_id,
+        v_source.entity_id,
+        v_target.entity_id,
+        v_source.symbol,
+        v_source.exchange,
+        jsonb_build_object(
+            'source_name', v_source_entity.name,
+            'target_name', v_target_entity.name,
+            'source_data_source', v_source.data_source,
+            'target_data_source', v_target.data_source,
+            'source_currency', v_source.currency_code,
+            'target_currency', v_target.currency_code,
+            'moved_positions', v_moved_positions,
+            'merged_positions', v_merged_positions,
+            'moved_prices', v_moved_prices,
+            'moved_snapshots', v_moved_snapshots,
+            'moved_identities', v_moved_identities,
+            'forced', p_force
+        )
+    )
+    ON CONFLICT (duplicate_instrument_id)
+    DO NOTHING;
+
+    DELETE FROM instruments
     WHERE instrument_id = p_source_instrument_id;
 
     /*
@@ -2146,46 +2240,6 @@ BEGIN
             )
         END
     WHERE instrument_id = p_target_instrument_id;
-
-    /*
-     * Record the operation before removing the source.
-     */
-    INSERT INTO instrument_consolidation_audit (
-        duplicate_instrument_id,
-        canonical_instrument_id,
-        duplicate_entity_id,
-        canonical_entity_id,
-        symbol,
-        exchange,
-        details
-    )
-    VALUES (
-        p_source_instrument_id,
-        p_target_instrument_id,
-        v_source.entity_id,
-        v_target.entity_id,
-        v_source.symbol,
-        v_source.exchange,
-        jsonb_build_object(
-            'source_name', v_source_entity.name,
-            'target_name', v_target_entity.name,
-            'source_data_source', v_source.data_source,
-            'target_data_source', v_target.data_source,
-            'source_currency', v_source.currency_code,
-            'target_currency', v_target.currency_code,
-            'moved_positions', v_moved_positions,
-            'merged_positions', v_merged_positions,
-            'moved_prices', v_moved_prices,
-            'moved_snapshots', v_moved_snapshots,
-            'moved_identities', v_moved_identities,
-            'forced', p_force
-        )
-    )
-    ON CONFLICT (duplicate_instrument_id)
-    DO NOTHING;
-
-    DELETE FROM instruments
-    WHERE instrument_id = p_source_instrument_id;
 
     /*
      * If requested, merge the now orphaned source entity into the entity
@@ -7628,40 +7682,39 @@ DECLARE
     v_exchange varchar;
     v_system_code varchar;
     v_mapped_exchange varchar;
+    v_mapped_exchanges varchar[];
 BEGIN
     v_symbol := upper(nullif(btrim(p_symbol), ''));
     v_exchange := upper(nullif(btrim(p_exchange), ''));
     v_system_code := upper(nullif(btrim(p_system_code), ''));
 
-    -- A canonical MIC already known by MIP wins.
-    IF v_exchange IS NOT NULL
-       AND EXISTS (
-           SELECT 1
-           FROM public.exchanges e
-           WHERE upper(e.exchange) = v_exchange
-       )
-    THEN
-        RETURN v_exchange;
-    END IF;
-
-    -- Translate provider-specific exchange codes through the existing mapping table.
     IF v_exchange IS NOT NULL AND v_system_code IS NOT NULL THEN
-        SELECT esm.exchange
-        INTO v_mapped_exchange
+        SELECT array_agg(DISTINCT esm.exchange)
+        INTO v_mapped_exchanges
         FROM public.exchange_source_mappings esm
         JOIN public.external_systems es
           ON es.system_id = esm.system_id
-        WHERE upper(es.code) = v_system_code
+        WHERE upper(btrim(es.code)) = v_system_code
+          AND es.active
           AND (
-              upper(esm.source_exchange_code) = v_exchange
-              OR upper(coalesce(esm.source_exchange_name, '')) = v_exchange
-          )
-        ORDER BY esm.observed_at DESC
-        LIMIT 1;
+              upper(btrim(esm.source_exchange_code)) = v_exchange
+              OR upper(btrim(esm.source_exchange_name)) = v_exchange
+          );
 
-        IF v_mapped_exchange IS NOT NULL THEN
-            RETURN upper(v_mapped_exchange);
+        IF cardinality(v_mapped_exchanges) > 1 THEN
+            RAISE EXCEPTION 'Ambiguous exchange alias % for provider %',
+                v_exchange, v_system_code;
         END IF;
+        IF cardinality(v_mapped_exchanges) = 1 THEN
+            RETURN v_mapped_exchanges[1];
+        END IF;
+    END IF;
+
+    SELECT e.exchange INTO v_mapped_exchange
+    FROM public.exchanges e
+    WHERE upper(btrim(e.exchange)) = v_exchange;
+    IF FOUND THEN
+        RETURN v_mapped_exchange;
     END IF;
 
     -- Conservative suffix-to-MIC fallback, used only when the provider did not
@@ -8066,6 +8119,41 @@ BEGIN
         v_job_id,
         p_job_key,
         v_action;
+END;
+$$;
+
+
+--
+-- Name: sp_migrate_exchange_sync_job(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_migrate_exchange_sync_job() RETURNS integer
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_updated integer;
+BEGIN
+    LOCK TABLE public.scheduler_jobs IN SHARE ROW EXCLUSIVE MODE;
+
+    IF EXISTS (
+        SELECT 1 FROM public.scheduler_jobs
+        WHERE job_key = 'eulerpool_exchange_holidays'
+    ) AND EXISTS (
+        SELECT 1 FROM public.scheduler_jobs
+        WHERE job_key = 'eulerpool_exchange_sync'
+    ) THEN
+        RAISE EXCEPTION 'Both legacy and exchange-sync scheduler jobs exist; explicit reconciliation required';
+    END IF;
+
+    UPDATE public.scheduler_jobs
+    SET job_key = 'eulerpool_exchange_sync',
+        job_name = 'Eulerpool Exchange Sync',
+        python_module = 'jobs.eulerpool_exchange_sync',
+        updated_at = now()
+    WHERE job_key = 'eulerpool_exchange_holidays';
+
+    GET DIAGNOSTICS v_updated = ROW_COUNT;
+    RETURN v_updated;
 END;
 $$;
 
@@ -9430,7 +9518,7 @@ DECLARE
     v_snapshot_id uuid;
     v_payload jsonb;
 BEGIN
-    IF p_exchange_code !~ '^[A-Z0-9]{4}$' OR p_exchange_code IS NULL
+    IF p_exchange_code !~ '^[A-Z0-9]{4,20}$' OR p_exchange_code IS NULL
         OR p_provider_exchange IS NULL OR btrim(p_provider_exchange) = ''
         OR p_source IS NULL OR p_as_of IS NULL OR p_updated_at IS NULL
         OR p_fetched_at IS NULL OR p_payload IS NULL
@@ -9495,12 +9583,77 @@ END;
 $$;
 
 
+CREATE FUNCTION public.sp_register_exchange_alias(p_exchange character varying, p_system_code character varying, p_alias character varying) RETURNS void
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_alias varchar;
+    v_system_id uuid;
+    v_system_count integer;
+BEGIN
+    v_alias := upper(nullif(btrim(p_alias), ''));
+    IF v_alias IS NULL OR length(v_alias) > 100 THEN
+        RAISE EXCEPTION 'Exchange alias must contain between 1 and 100 characters';
+    END IF;
+    PERFORM 1 FROM public.exchanges WHERE exchange = p_exchange FOR KEY SHARE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Existing exchange row required: %', p_exchange;
+    END IF;
+    SELECT count(*) INTO v_system_count FROM public.external_systems
+    WHERE upper(btrim(code)) = upper(btrim(p_system_code)) AND active;
+    IF v_system_count <> 1 THEN
+        RAISE EXCEPTION 'Expected one active external system for %', p_system_code;
+    END IF;
+    SELECT system_id INTO v_system_id FROM public.external_systems
+    WHERE upper(btrim(code)) = upper(btrim(p_system_code)) AND active;
+
+    LOCK TABLE public.exchange_source_mappings IN SHARE ROW EXCLUSIVE MODE;
+    IF EXISTS (
+        SELECT 1 FROM public.exchange_source_mappings
+        WHERE system_id = v_system_id AND exchange <> p_exchange
+          AND (upper(btrim(source_exchange_code)) = v_alias
+               OR upper(btrim(source_exchange_name)) = v_alias)
+    ) THEN
+        RAISE EXCEPTION 'Exchange alias % already belongs to another row for provider %',
+            v_alias, p_system_code;
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM public.exchange_source_mappings
+        WHERE system_id = v_system_id AND exchange = p_exchange
+          AND (upper(btrim(source_exchange_code)) = v_alias
+               OR upper(btrim(source_exchange_name)) = v_alias)
+    ) THEN
+        RETURN;
+    END IF;
+    INSERT INTO public.exchange_source_mappings
+        (exchange, system_id, source_exchange_code, raw_payload)
+    VALUES (p_exchange, v_system_id, v_alias,
+            jsonb_build_object('registration', 'manual'));
+END;
+$$;
+
+
 CREATE FUNCTION public.sp_upsert_exchange(p_exchange character varying, p_exchange_full_name character varying) RETURNS void
     LANGUAGE plpgsql
     AS $$
 BEGIN
 
     IF p_exchange IS NULL THEN
+        RETURN;
+    END IF;
+
+    IF EXISTS (
+        SELECT 1 FROM public.exchange_source_mappings
+        WHERE raw_payload->>'authority' = 'eulerpool_catalog'
+    ) THEN
+        IF NOT EXISTS (
+            SELECT 1 FROM public.exchange_source_mappings
+            WHERE exchange = p_exchange
+              AND source_exchange_code = p_exchange
+              AND raw_payload->>'authority' = 'eulerpool_catalog'
+        ) THEN
+            RAISE EXCEPTION 'Unknown canonical exchange %; register a provider alias or refresh the Eulerpool catalog', p_exchange;
+        END IF;
         RETURN;
     END IF;
 
@@ -9526,6 +9679,93 @@ BEGIN
                 exchanges.exchangeFullName
             );
 
+END;
+$$;
+
+CREATE FUNCTION public.sp_sync_exchange_catalog(p_catalog jsonb) RETURNS integer
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_system_id uuid;
+    v_item jsonb;
+    v_code text;
+    v_legacy text;
+BEGIN
+    IF jsonb_typeof(p_catalog) IS DISTINCT FROM 'array' THEN
+        RAISE EXCEPTION 'Exchange catalog must be an array';
+    END IF;
+    IF jsonb_array_length(p_catalog) = 0 THEN
+        RAISE EXCEPTION 'Exchange catalog must not be empty';
+    END IF;
+    SELECT system_id INTO STRICT v_system_id
+    FROM public.external_systems
+    WHERE lower(btrim(code)) = 'eulerpool' AND active;
+
+    LOCK TABLE public.exchanges IN SHARE ROW EXCLUSIVE MODE;
+    LOCK TABLE public.exchange_source_mappings IN SHARE ROW EXCLUSIVE MODE;
+
+    IF EXISTS (
+        SELECT 1 FROM jsonb_array_elements(p_catalog) AS rows(item)
+        WHERE jsonb_typeof(item) IS DISTINCT FROM 'object'
+           OR jsonb_typeof(item->'code') IS DISTINCT FROM 'string'
+           OR COALESCE(item->>'code', '') !~ '^[A-Z0-9]{4,20}$'
+           OR jsonb_typeof(item->'name') IS DISTINCT FROM 'string'
+           OR NULLIF(btrim(item->>'name'), '') IS NULL
+           OR length(item->>'name') > 255
+           OR length(item->>'country') > 10
+           OR (NULLIF(item->>'timezone', '') IS NOT NULL AND NOT EXISTS (
+               SELECT 1 FROM pg_timezone_names WHERE name = item->>'timezone'
+           ))
+    ) THEN
+        RAISE EXCEPTION 'Invalid Eulerpool exchange catalog entry';
+    END IF;
+    IF EXISTS (
+        SELECT item->>'code' FROM jsonb_array_elements(p_catalog) AS rows(item)
+        GROUP BY item->>'code' HAVING count(*) > 1
+    ) THEN
+        RAISE EXCEPTION 'Duplicate Eulerpool exchange catalog codes';
+    END IF;
+
+    SELECT string_agg(e.exchange, ', ' ORDER BY e.exchange) INTO v_legacy
+    FROM public.exchanges e
+    WHERE NOT EXISTS (
+        SELECT 1 FROM jsonb_array_elements(p_catalog) AS rows(item)
+        WHERE item->>'code' = e.exchange
+    );
+    IF v_legacy IS NOT NULL THEN
+        RAISE EXCEPTION 'Noncanonical existing exchanges: %. Reconcile explicitly before catalog synchronization', v_legacy;
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM public.exchange_source_mappings m
+        JOIN jsonb_array_elements(p_catalog) AS rows(item)
+          ON upper(btrim(m.source_exchange_code)) = item->>'code'
+          OR upper(btrim(m.source_exchange_name)) = upper(btrim(item->>'name'))
+        WHERE m.system_id = v_system_id AND m.exchange <> item->>'code'
+    ) THEN
+        RAISE EXCEPTION 'Eulerpool catalog conflicts with existing exchange mappings';
+    END IF;
+
+    FOR v_item IN SELECT item FROM jsonb_array_elements(p_catalog) AS rows(item)
+    LOOP
+        v_code := v_item->>'code';
+        INSERT INTO public.exchanges(exchange, exchangefullname, country_code, timezone_name)
+        VALUES (v_code, btrim(v_item->>'name'), NULLIF(v_item->>'country', ''), NULLIF(v_item->>'timezone', ''))
+        ON CONFLICT (exchange) DO UPDATE SET
+            exchangefullname = EXCLUDED.exchangefullname,
+            country_code = EXCLUDED.country_code,
+            timezone_name = COALESCE(EXCLUDED.timezone_name, exchanges.timezone_name),
+            updated_at = now();
+
+        INSERT INTO public.exchange_source_mappings
+            (exchange, system_id, source_exchange_code, source_exchange_name, raw_payload)
+        VALUES (v_code, v_system_id, v_code, btrim(v_item->>'name'),
+            jsonb_build_object('authority', 'eulerpool_catalog', 'catalog', v_item->'raw_payload'))
+        ON CONFLICT (exchange, system_id, source_exchange_code) DO UPDATE SET
+            source_exchange_name = EXCLUDED.source_exchange_name,
+            raw_payload = EXCLUDED.raw_payload,
+            observed_at = now();
+    END LOOP;
+    RETURN jsonb_array_length(p_catalog);
 END;
 $$;
 
@@ -10925,7 +11165,7 @@ CREATE TABLE public.exchanges (
 CREATE TABLE public.exchange_holiday_snapshots (
     snapshot_id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
     exchange character varying(20) NOT NULL,
-    exchange_code character varying(4) NOT NULL CHECK (exchange_code ~ '^[A-Z0-9]{4}$'),
+    exchange_code character varying(20) NOT NULL CHECK (exchange_code ~ '^[A-Z0-9]{4,20}$'),
     source text NOT NULL,
     provider_exchange text NOT NULL,
     as_of date NOT NULL,

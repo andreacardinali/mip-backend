@@ -164,6 +164,7 @@ class ExchangeReference:
     timezone: str | None = None
     source: str | None = None
     provider_code: str | None = None
+    raw_payload: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)

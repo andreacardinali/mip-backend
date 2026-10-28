@@ -1,10 +1,21 @@
+"""Synchronize authoritative exchange metadata and holiday snapshots."""
+
 import logging
 
 from http_client import get_http_status
-from market_time.repository import SQLHolidayRepository
-from scripts.sync_exchange_holidays import acquire
+from market_time.holidays import normalize_exchange_code
+from market_time.repository import SQLExchangeRepository
 
 logger = logging.getLogger(__name__)
+
+
+def acquire_holidays(provider, exchange_code, *, catalog=None):
+    code = normalize_exchange_code(exchange_code)
+    exchanges = provider.get_exchanges() if catalog is None else catalog
+    matches = [item for item in exchanges if item.code == code]
+    if len(matches) != 1:
+        raise ValueError("Requested code must identify exactly one catalog exchange")
+    return provider.get_exchange_holidays(code)
 
 
 def _resolve_target(target, catalog):
@@ -49,7 +60,42 @@ def _resolve_target(target, catalog):
     return resolved_codes.pop(), None
 
 
-def sync_holidays(provider, targets, session_factory):
+def _fetch_catalog(provider, *, strict=False):
+    try:
+        if strict:
+            catalog = tuple(provider.get_exchanges(strict=True))
+            if not catalog:
+                raise ValueError(
+                    "Empty Eulerpool exchange catalog cannot be synchronized"
+                )
+            return catalog
+        return list(provider.get_exchanges())
+    except Exception as exc:
+        error_type = type(exc).__name__
+        http_status = get_http_status(exc)
+        detail = f"error_type={error_type}"
+        if http_status is not None:
+            detail += f" http_status={http_status}"
+        logger.error(
+            "Exchange catalog retrieval failed endpoint=/market/exchanges %s", detail
+        )
+        raise RuntimeError(
+            f"Unable to retrieve Eulerpool exchange catalog ({detail})"
+        ) from None
+
+
+def sync_exchange_data(provider, session_factory):
+    catalog = _fetch_catalog(provider, strict=True)
+    with session_factory() as db, db.begin():
+        repository = SQLExchangeRepository(db)
+        catalog_upserted = repository.sync_catalog(catalog)
+        targets = repository.list_exchanges("eulerpool")
+    logger.info("Eulerpool exchange catalog synchronized upserted=%s", catalog_upserted)
+    result = sync_holidays(provider, targets, session_factory, catalog=catalog)
+    return {**result, "catalog_upserted": catalog_upserted}
+
+
+def sync_holidays(provider, targets, session_factory, *, catalog=None):
     if not targets:
         logger.warning(
             "Holiday sync skipped reason=no_registered_exchanges eligible=0; "
@@ -63,20 +109,8 @@ def sync_holidays(provider, targets, session_factory):
             "failed": 0,
             "exchanges": [],
         }
-    try:
-        catalog = list(provider.get_exchanges())
-    except Exception as exc:
-        error_type = type(exc).__name__
-        http_status = get_http_status(exc)
-        detail = f"error_type={error_type}"
-        if http_status is not None:
-            detail += f" http_status={http_status}"
-        logger.error(
-            "Holiday catalog retrieval failed endpoint=/market/exchanges %s", detail
-        )
-        raise RuntimeError(
-            f"Unable to retrieve Eulerpool exchange catalog ({detail})"
-        ) from None
+    if catalog is None:
+        catalog = _fetch_catalog(provider)
     resolutions = [_resolve_target(target, catalog) for target in targets]
     code_counts = {}
     for code, reason in resolutions:
@@ -104,9 +138,9 @@ def sync_holidays(provider, targets, session_factory):
             )
             continue
         try:
-            snapshot = acquire(provider, code, catalog=catalog)
+            snapshot = acquire_holidays(provider, code, catalog=catalog)
             with session_factory() as db, db.begin():
-                snapshot_id = SQLHolidayRepository(db).save(exchange, snapshot)
+                snapshot_id = SQLExchangeRepository(db).save(exchange, snapshot)
             results.append(
                 {
                     "exchange": exchange,
@@ -146,16 +180,3 @@ def sync_holidays(provider, targets, session_factory):
         "failed": failed,
         "exchanges": results,
     }
-
-
-def run():
-    from config.settings import settings
-    from db import SessionLocal
-    from market_data.providers.eulerpool import EulerpoolProvider
-
-    key = settings.get("EULERPOOL_API_KEY")
-    if not key:
-        raise ValueError("EULERPOOL_API_KEY is required in backend configuration")
-    with SessionLocal() as db:
-        targets = SQLHolidayRepository(db).list_exchanges("eulerpool")
-    return sync_holidays(EulerpoolProvider(key), targets, SessionLocal)

@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "job_key": "cleanup_entities",
+  "job_name": "Cleanup Entities Without Instruments",
+  "python_module": "jobs.entities.cleanup_entities",
+  "trigger": {
+    "type": "cron",
+    "cron_expression": "30 4 * * *"
+  },
+  "enabled_by_default": false
+}

@@ -8,15 +8,97 @@ from uuid import UUID
 import pytest
 
 from http_client import testing as httpx
-from jobs.eulerpool_exchange_holidays import sync_holidays
 from market_data.capabilities import InstrumentType
 from market_data.exceptions import InstrumentNotFoundError
+from market_data.exchange_sync import (
+    acquire_holidays,
+    sync_exchange_data,
+    sync_holidays,
+)
 from market_data.models import ExchangeReference, InstrumentReference
 from market_data.providers.eulerpool import EulerpoolProvider
-from market_time.repository import SQLHolidayRepository
+from market_time.repository import SQLExchangeRepository
 from scheduler_repository import SchedulerRepository
-from scripts.apply_market_time_holidays import migration_statements
-from scripts.sync_exchange_holidays import acquire
+from scripts.apply_exchange_registry import migration_statements
+from scripts.sync_exchanges import main as sync_exchanges_main
+
+
+def test_exchange_job_commits_catalog_before_holidays_and_reuses_response():
+    catalog = (ExchangeReference("XKLSE", name="Bursa Malaysia", source="eulerpool"),)
+    provider = Mock()
+    provider.get_exchanges.return_value = catalog
+    session = MagicMock()
+    session_factory = Mock(return_value=session)
+    events = []
+    session.__enter__.return_value = session
+    session.begin.return_value.__exit__.side_effect = lambda *args: events.append(
+        "commit"
+    )
+    with (
+        patch("market_data.exchange_sync.SQLExchangeRepository") as repository,
+        patch("market_data.exchange_sync.sync_holidays") as holidays,
+    ):
+        repository.return_value.sync_catalog.side_effect = (
+            lambda value: events.append("catalog") or 1
+        )
+        repository.return_value.list_exchanges.side_effect = (
+            lambda source: events.append("targets") or [{"exchange": "XKLSE"}]
+        )
+        holidays.side_effect = lambda *args, **kwargs: events.append("holidays") or {
+            "status": "SUCCESS"
+        }
+        result = sync_exchange_data(provider, session_factory)
+        repository.return_value.sync_catalog.assert_called_once_with(catalog)
+        holidays.assert_called_once_with(
+            provider, [{"exchange": "XKLSE"}], session_factory, catalog=catalog
+        )
+    provider.get_exchanges.assert_called_once_with(strict=True)
+    assert events == ["catalog", "targets", "commit", "holidays"]
+    assert result == {"status": "SUCCESS", "catalog_upserted": 1}
+
+
+def test_exchange_job_catalog_save_failure_rolls_back_and_stops():
+    provider = Mock()
+    provider.get_exchanges.return_value = (
+        ExchangeReference("XNYS", source="eulerpool"),
+    )
+    session = MagicMock()
+    with (
+        patch("market_data.exchange_sync.SQLExchangeRepository") as repository,
+        patch("market_data.exchange_sync.sync_holidays") as holidays,
+    ):
+        repository.return_value.sync_catalog.side_effect = ValueError(
+            "Noncanonical existing exchanges"
+        )
+        with pytest.raises(ValueError, match="Noncanonical"):
+            sync_exchange_data(provider, Mock(return_value=session))
+        repository.return_value.list_exchanges.assert_not_called()
+        holidays.assert_not_called()
+    assert (
+        session.__enter__.return_value.begin.return_value.__exit__.call_args.args[0]
+        is ValueError
+    )
+
+
+@pytest.mark.parametrize("invalid_entry", [None, {}, {"code": "BAD"}])
+def test_exchange_job_rejects_partial_catalog_before_database_access(invalid_entry):
+    provider = EulerpoolProvider(
+        "key", client=Client([[{"code": "XNYS"}, invalid_entry]])
+    )
+    session_factory = Mock()
+    with pytest.raises(RuntimeError, match="ValueError"):
+        sync_exchange_data(provider, session_factory)
+    session_factory.assert_not_called()
+    with pytest.raises(ValueError, match="Incomplete"):
+        provider.get_exchanges(strict=True)
+
+
+def test_exchange_job_rejects_empty_catalog_before_database_access():
+    provider = EulerpoolProvider("key", client=Client([[]]))
+    session_factory = Mock()
+    with pytest.raises(RuntimeError, match="ValueError"):
+        sync_exchange_data(provider, session_factory)
+    session_factory.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -58,7 +140,7 @@ def test_holiday_catalog_parse_failures_have_safe_diagnostics(
 
 
 @pytest.mark.parametrize(
-    "invalid_code", ["ABCDE", "secret-token", 123, " XNY ", "ABCDE\nwarning"]
+    "invalid_code", ["A" * 21, "secret-token", 123, " XNY ", "ABCDE\nwarning"]
 )
 def test_holiday_job_skips_invalid_catalog_codes(invalid_code, caplog):
     requests = []
@@ -82,8 +164,8 @@ def test_holiday_job_skips_invalid_catalog_codes(invalid_code, caplog):
     session_factory = Mock(side_effect=[MagicMock(), MagicMock()])
     with (
         httpx.Client(transport=httpx.MockTransport(handler)) as client,
-        patch("jobs.eulerpool_exchange_holidays.acquire") as fetch,
-        patch("jobs.eulerpool_exchange_holidays.SQLHolidayRepository") as repository,
+        patch("market_data.exchange_sync.acquire_holidays") as fetch,
+        patch("market_data.exchange_sync.SQLExchangeRepository") as repository,
     ):
         provider = EulerpoolProvider("secret-token", client=client)
         result = sync_holidays(provider, targets, session_factory)
@@ -126,12 +208,26 @@ def test_exchange_catalog_normalization_and_cache():
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
         provider = EulerpoolProvider("secret-token", client=client)
         expected = (
-            ExchangeReference(code="XNYS", name="NYSE", source="eulerpool"),
+            ExchangeReference(
+                code="XNYS",
+                name="NYSE",
+                source="eulerpool",
+                raw_payload={
+                    "exchange_code": " xnys ",
+                    "code": "ignored",
+                    "name": "NYSE",
+                },
+            ),
             ExchangeReference(
                 code="XETR",
                 country_code="DE",
                 timezone="Europe/Berlin",
                 source="eulerpool",
+                raw_payload={
+                    "code": "xetr",
+                    "country": "DE",
+                    "timezone": "Europe/Berlin",
+                },
             ),
         )
         assert provider.get_exchanges() == expected
@@ -161,9 +257,9 @@ def test_holiday_job_isolates_exchange_failures(outcomes, expected_status):
     provider.get_exchanges.return_value = catalog
     with (
         patch(
-            "jobs.eulerpool_exchange_holidays.acquire", side_effect=outcomes
+            "market_data.exchange_sync.acquire_holidays", side_effect=outcomes
         ) as fetch,
-        patch("jobs.eulerpool_exchange_holidays.SQLHolidayRepository") as repository,
+        patch("market_data.exchange_sync.SQLExchangeRepository") as repository,
     ):
         result = sync_holidays(provider, targets, session_factory)
     successful = sum(not isinstance(outcome, Exception) for outcome in outcomes)
@@ -187,7 +283,7 @@ def test_holiday_job_without_registered_exchanges_does_not_fetch(caplog):
     result = sync_holidays(provider, [], session_factory)
     assert result["status"] == "INCOMPLETE"
     assert any(
-        record.name == "jobs.eulerpool_exchange_holidays"
+        record.name == "market_data.exchange_sync"
         and record.levelname == "WARNING"
         and "reason=no_registered_exchanges" in record.getMessage()
         for record in caplog.records
@@ -236,8 +332,8 @@ def test_holiday_job_rolls_back_failed_save_and_continues():
         ExchangeReference(code="XETR"),
     ]
     with (
-        patch("jobs.eulerpool_exchange_holidays.acquire", return_value=Mock()),
-        patch("jobs.eulerpool_exchange_holidays.SQLHolidayRepository") as repository,
+        patch("market_data.exchange_sync.acquire_holidays", return_value=Mock()),
+        patch("market_data.exchange_sync.SQLExchangeRepository") as repository,
     ):
         repository.return_value.save.side_effect = [ValueError("secret-token"), "uuid"]
         result = sync_holidays(provider, targets, Mock(side_effect=sessions))
@@ -270,7 +366,7 @@ def test_holiday_job_acquires_initial_snapshot_from_catalog(identity):
         ),
     )
     session_factory = MagicMock()
-    with patch("jobs.eulerpool_exchange_holidays.SQLHolidayRepository") as repository:
+    with patch("market_data.exchange_sync.SQLExchangeRepository") as repository:
         result = sync_holidays(provider, [identity], session_factory)
     assert result["status"] == "SUCCESS"
     assert result["upserted"] == 1
@@ -349,8 +445,10 @@ def test_holiday_job_skips_conflicting_rows_and_continues(caplog):
     ]
     session_factory = MagicMock()
     with (
-        patch("jobs.eulerpool_exchange_holidays.acquire", return_value=Mock()) as fetch,
-        patch("jobs.eulerpool_exchange_holidays.SQLHolidayRepository"),
+        patch(
+            "market_data.exchange_sync.acquire_holidays", return_value=Mock()
+        ) as fetch,
+        patch("market_data.exchange_sync.SQLExchangeRepository"),
     ):
         result = sync_holidays(provider, targets, session_factory)
     assert result["status"] == "PARTIAL"
@@ -378,7 +476,7 @@ def test_holiday_job_exchange_http_failure_is_isolated(status_code, caplog):
     session_factory = MagicMock()
     with (
         httpx.Client(transport=httpx.MockTransport(handler)) as client,
-        patch("jobs.eulerpool_exchange_holidays.SQLHolidayRepository") as repository,
+        patch("market_data.exchange_sync.SQLExchangeRepository") as repository,
     ):
         provider = EulerpoolProvider("secret-token", client=client)
         result = sync_holidays(provider, targets, session_factory)
@@ -457,16 +555,32 @@ def test_holiday_job_catalog_timeout_is_sanitized(caplog):
 
 
 def test_holiday_job_manifest():
-    path = (
-        Path(__file__).resolve().parents[1]
-        / "jobs/eulerpool_exchange_holidays.job.json"
-    )
+    path = Path(__file__).resolve().parents[1] / "jobs/eulerpool_exchange_sync.job.json"
     definition = json.loads(path.read_text(encoding="utf-8"))
     assert definition["schema_version"] == 1
-    assert definition["job_key"] == "eulerpool_exchange_holidays"
+    assert definition["job_key"] == "eulerpool_exchange_sync"
+    assert definition["job_name"] == "Eulerpool Exchange Sync"
+    assert definition["python_module"] == "jobs.eulerpool_exchange_sync"
     assert definition["enabled_by_default"] is False
     assert definition["trigger"] == {"type": "cron", "cron_expression": "30 6 * * *"}
     assert callable(importlib.import_module(definition["python_module"]).run)
+
+
+def test_exchange_cli_dry_run_does_not_run_job(monkeypatch, capsys):
+    monkeypatch.setattr("sys.argv", ["sync_exchanges"])
+    with patch("jobs.eulerpool_exchange_sync.run") as run:
+        sync_exchanges_main()
+    run.assert_not_called()
+    assert "No HTTP or database access" in capsys.readouterr().out
+
+
+def test_exchange_cli_apply_runs_complete_sync(monkeypatch, capsys):
+    monkeypatch.setattr("sys.argv", ["sync_exchanges", "--apply"])
+    result = {"status": "PARTIAL", "catalog_upserted": 2, "failed": 1}
+    with patch("jobs.eulerpool_exchange_sync.run", return_value=result) as run:
+        sync_exchanges_main()
+    run.assert_called_once_with()
+    assert json.loads(capsys.readouterr().out) == result
 
 
 def test_holiday_repository_includes_exchanges_without_snapshots():
@@ -487,7 +601,7 @@ def test_holiday_repository_includes_exchanges_without_snapshots():
         },
     ]
     db.execute.return_value.mappings.return_value.all.return_value = rows
-    assert SQLHolidayRepository(db).list_exchanges("Eulerpool") == rows
+    assert SQLExchangeRepository(db).list_exchanges("Eulerpool") == rows
     query, params = db.execute.call_args.args
     assert "FROM public.exchanges e" in str(query)
     assert "exchange_holiday_snapshots" in str(query)
@@ -501,7 +615,7 @@ def test_holiday_repository_rejects_missing_or_ambiguous_system(active_systems):
     db = Mock()
     db.execute.return_value.scalar_one.return_value = active_systems
     with pytest.raises(ValueError, match="exactly one active"):
-        SQLHolidayRepository(db).list_exchanges("eulerpool")
+        SQLExchangeRepository(db).list_exchanges("eulerpool")
     assert db.execute.call_count == 1
 
 
@@ -644,6 +758,14 @@ def test_exchange_resolution_uses_catalog_without_aliases_or_partial_names():
     assert provider._resolve_exchange("xetra").code == "XETR"
 
 
+def test_catalog_accepts_eulerpool_five_character_codes():
+    provider = EulerpoolProvider(
+        "key", client=Client([[{"code": "XKLSE", "name": "Bursa Malaysia"}]])
+    )
+    assert provider.get_exchanges()[0].code == "XKLSE"
+    assert provider._resolve_exchange("xklse").code == "XKLSE"
+
+
 def test_ambiguous_catalog_names_do_not_resolve():
     provider = EulerpoolProvider(
         "key",
@@ -675,9 +797,9 @@ def test_acquisition_verifies_requested_code_in_catalog():
             ]
         ),
     )
-    assert acquire(provider, "XNYS").exchange_code == "XNYS"
+    assert acquire_holidays(provider, "XNYS").exchange_code == "XNYS"
     with pytest.raises(ValueError, match="catalog"):
-        acquire(provider, "XETR")
+        acquire_holidays(provider, "XETR")
 
 
 def test_holiday_repository_uses_stored_function_and_restores_snapshot():
@@ -686,7 +808,7 @@ def test_holiday_repository_uses_stored_function_and_restores_snapshot():
     ).get_exchange_holidays("XNYS")
     db = Mock()
     db.execute.return_value.scalar_one.return_value = "snapshot-id"
-    repository = SQLHolidayRepository(db)
+    repository = SQLExchangeRepository(db)
     assert repository.save("NYSE", snapshot) == "snapshot-id"
     statement, parameters = db.execute.call_args.args
     assert "sp_store_exchange_holidays" in str(statement)
@@ -704,7 +826,7 @@ def test_holiday_repository_uses_stored_function_and_restores_snapshot():
 
 def test_holiday_migration_preserves_existing_exchanges_and_utc_types():
     statements = migration_statements()
-    assert len(statements) == 4
+    assert len(statements) == 8
     assert "timestamp with time zone" in statements[1]
     assert "as_of date" in statements[1]
     assert "UNIQUE (exchange_code, source, provider_updated_at)" in statements[1]
@@ -715,4 +837,93 @@ def test_holiday_migration_preserves_existing_exchanges_and_utc_types():
     assert "ON CONFLICT" in statements[3]
     assert "Provider exchange identity conflicts" in statements[3]
     assert "without changing its version" in statements[3]
+    assert "sp_upsert_exchange" in statements[4]
+    assert "sp_sync_exchange_catalog" in statements[5]
     assert "CASCADE" not in "\n".join(statements)
+
+
+def test_holiday_catalog_upgrade_preserves_registry_and_replaces_functions():
+    statements = migration_statements(upgrade=True)
+    assert len(statements) == 9
+    assert (
+        "DROP CONSTRAINT exchange_holiday_snapshots_exchange_code_check"
+        in statements[1]
+    )
+    assert "ALTER COLUMN exchange_code TYPE character varying(20)" in statements[2]
+    assert "^[A-Z0-9]{4,20}$" in statements[3]
+    assert all(
+        statement.startswith("CREATE OR REPLACE FUNCTION")
+        for statement in statements[4:-1]
+    )
+    assert "Noncanonical existing exchanges" in statements[6]
+    assert "CREATE TABLE" not in "\n".join(statements)
+    assert "DELETE FROM" not in "\n".join(statements)
+
+
+def test_exchange_job_migration_only_preserves_identity_schedule_and_history():
+    statements = migration_statements(rename_job_only=True)
+    assert len(statements) == 3
+    assert statements[-1] == "SELECT public.sp_migrate_exchange_sync_job();"
+    function = statements[1]
+    assert "LOCK TABLE public.scheduler_jobs IN SHARE ROW EXCLUSIVE MODE" in function
+    assert "RAISE EXCEPTION" in function
+    assert "WHERE job_key = 'eulerpool_exchange_holidays'" in function
+    assert "job_key = 'eulerpool_exchange_sync'" in function
+    assert "python_module = 'jobs.eulerpool_exchange_sync'" in function
+    assignments = function.split("UPDATE public.scheduler_jobs", 1)[1].split(
+        "WHERE", 1
+    )[0]
+    for field in (
+        "job_id",
+        "enabled",
+        "cron_expression",
+        "trigger_type",
+        "interval_minutes",
+        "created_at",
+        "last_run_at",
+        "next_run_at",
+    ):
+        assert field not in assignments
+    assert "DELETE" not in function
+    assert "INSERT" not in function
+    assert "ALTER TABLE" not in "\n".join(statements)
+
+
+def test_exchange_migration_rejects_combined_modes():
+    with pytest.raises(ValueError, match="either registry upgrade"):
+        migration_statements(upgrade=True, rename_job_only=True)
+
+
+def test_holiday_repository_syncs_full_eulerpool_catalog_through_stored_function():
+    db = Mock()
+    db.execute.return_value.scalar_one.return_value = 1
+    payload = {"code": "XKLSE", "name": "Bursa Malaysia", "country": "MY"}
+    catalog = (
+        ExchangeReference(
+            "XKLSE",
+            name="Bursa Malaysia",
+            country_code="MY",
+            source="eulerpool",
+            raw_payload=payload,
+        ),
+    )
+    assert SQLExchangeRepository(db).sync_catalog(catalog) == 1
+    statement, parameters = db.execute.call_args.args
+    assert "sp_sync_exchange_catalog(CAST(:payload AS jsonb))" in str(statement)
+    assert json.loads(parameters["payload"]) == [
+        {
+            "code": "XKLSE",
+            "name": "Bursa Malaysia",
+            "country": "MY",
+            "timezone": None,
+            "raw_payload": payload,
+        }
+    ]
+
+
+@pytest.mark.parametrize("catalog", [(), (ExchangeReference("XNYS", source="fmp"),)])
+def test_holiday_repository_rejects_empty_or_nonauthoritative_catalog(catalog):
+    db = Mock()
+    with pytest.raises(ValueError, match="nonempty Eulerpool"):
+        SQLExchangeRepository(db).sync_catalog(catalog)
+    db.execute.assert_not_called()

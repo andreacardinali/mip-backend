@@ -73,6 +73,75 @@ def test_full_refresh_job_is_disabled_by_default(stub_database):
     assert definition["python_module"] == refresh_entities_full.__name__
 
 
+@pytest.mark.parametrize("fail_after_first", [False, True])
+def test_cleanup_job_commits_each_entity(monkeypatch, stub_database, fail_after_first):
+    from jobs.entities import cleanup_entities
+
+    events = []
+    outcomes = iter(["deleted", "referenced", "skipped"])
+
+    def execute(statement, parameters=None):
+        if parameters is None:
+            assert (
+                str(statement)
+                == "SELECT entity_id FROM public.sp_list_orphan_entities()"
+            )
+            return SimpleNamespace(
+                scalars=lambda: SimpleNamespace(
+                    all=lambda: ["first", "second", "third"]
+                )
+            )
+        assert str(statement) == "SELECT public.sp_cleanup_orphan_entity(:entity_id)"
+        events.append(parameters["entity_id"])
+        if fail_after_first and parameters["entity_id"] == "second":
+            raise RuntimeError("cleanup failed")
+        return SimpleNamespace(scalar_one=lambda: next(outcomes))
+
+    database = SimpleNamespace(
+        execute=execute,
+        commit=lambda: events.append("commit"),
+        rollback=lambda: events.append("rollback"),
+        close=lambda: events.append("close"),
+    )
+    monkeypatch.setattr(cleanup_entities, "SessionLocal", lambda: database)
+    if fail_after_first:
+        with pytest.raises(RuntimeError, match="cleanup failed"):
+            cleanup_entities.run()
+        assert events == ["first", "commit", "second", "rollback", "close"]
+    else:
+        assert cleanup_entities.run() == {
+            "status": "SUCCESS",
+            "candidates": 3,
+            "deleted": 1,
+            "referenced": 1,
+            "skipped": 1,
+        }
+        assert events == [
+            "first",
+            "commit",
+            "second",
+            "commit",
+            "third",
+            "commit",
+            "close",
+        ]
+
+
+def test_cleanup_job_definition_is_disabled_by_default(stub_database):
+    from jobs.entities import cleanup_entities
+
+    path = Path(__file__).resolve().parents[1] / "jobs" / "cleanup_entities.job.json"
+    definition = json.loads(path.read_text(encoding="utf-8"))
+    assert definition["schema_version"] == 1
+    assert definition["job_key"] == "cleanup_entities"
+    assert definition["python_module"] == cleanup_entities.__name__
+    assert definition["enabled_by_default"] is False
+    assert definition["trigger"] == {
+        "type": "cron",
+        "cron_expression": "30 4 * * *",
+    }
+
+
 @pytest.mark.parametrize(
     "mode", [entities.RefreshMode.MISSING, entities.RefreshMode.ALL]
 )

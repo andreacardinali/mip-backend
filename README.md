@@ -92,21 +92,55 @@ are superseded and must not be applied as part of this workflow.
 
 Eulerpool exchange resolution uses its live catalog, exact exchange codes first,
 then unique exact names. There is no name-to-calendar dictionary in this path.
-Holiday acquisition verifies the requested four-character `exchange_code` against
-that catalog and calls `/market/holidays/{exchange_code}`. Four-character syntax
+Holiday acquisition verifies the requested 4-20 character `exchange_code` against
+that catalog and calls `/market/holidays/{exchange_code}`. Valid code syntax
 and provider membership do not independently certify an ISO MIC identity.
 
 The response label (for example `NYSE`) is provider evidence, not a new exchange
-identity. An optional `--exchange` explicitly links the canonical request code to
-an existing MIP row without renaming it, creating another row, or changing assets.
-This link must be reviewed by the operator; matching a catalog code alone does not
-prove that a legacy MIP row represents the same venue.
+identity. Provider aliases must be reviewed and registered explicitly through
+`sp_register_exchange_alias`; the full synchronization CLI does not accept a
+single-exchange override. Matching a catalog code alone does not prove that a
+legacy MIP row represents the same venue.
 
 `exchange_holiday_snapshots` retains original JSON and provider versions.
 `as_of` and holiday dates remain dates; `updated_at` and `fetched_at` are aware UTC
 instants stored as `timestamptz`. Adjusted opening/closing hours remain local times,
 not UTC instants. Conflicting closure flags, response identities and duplicate
 holiday dates are rejected. Null closure flags remain unknown.
+
+### Provider Exchange Aliases
+
+`exchanges.exchange` is the internal venue identity; provider codes are aliases
+in `exchange_source_mappings`. Apply `scripts/install_exchange_aliases.sql` to
+install conflict-checked alias registration and update listing normalization.
+This migration does not register aliases, rename exchanges or move instruments.
+
+After reviewing venue identity, register each provider identifier against the
+chosen existing MIP row. For example, if that row is `XNAS` and both external
+systems are active:
+
+```sql
+BEGIN;
+SELECT public.sp_register_exchange_alias('XNAS', 'fmp', 'NASDAQ');
+SELECT public.sp_register_exchange_alias('XNAS', 'eulerpool', 'XNAS');
+SELECT public.sp_register_exchange_alias('XNAS', 'eulerpool', 'NASDAQ');
+COMMIT;
+```
+
+Registration is case-insensitive, whitespace-trimmed and idempotent. Conflicting
+code or name mappings are rejected, not reassigned. Listing imports resolve
+provider aliases before checking existing exchange codes and before exchange
+creation; ambiguous mappings fail instead of selecting the latest observation.
+Before catalog authority is activated, unknown identifiers retain the existing
+fallback behavior and can produce distinct venues. After activation, exchange
+upserts require canonical catalog membership. Review aliases before new-provider
+imports. Provider identity must be included in the profile's source metadata.
+These mappings resolve incoming identifiers, not outbound API parameter choices.
+
+Existing `NASDAQ`/`XNAS` rows and their instrument references are not merged by
+registering aliases. The unified job refuses to synchronize a catalog while
+noncanonical rows remain; neither provider acceptance nor valid code syntax
+code alone proves that two venues are equivalent.
 
 The existing `exchange_source_mappings` records the requested code and observed
 provider label with endpoint/version evidence. Ambiguous aliases or canonical-code
@@ -115,34 +149,83 @@ are idempotent; changed JSON for the same version is rejected. Migration and ini
 acquisition are explicit commands, not API side effects:
 
 ```powershell
-.\.venv\Scripts\python.exe -m scripts.apply_market_time_holidays
-.\.venv\Scripts\python.exe -m scripts.sync_exchange_holidays XNYS --exchange NYSE
+.\.venv\Scripts\python.exe -m scripts.apply_exchange_registry
+.\.venv\Scripts\python.exe -m scripts.sync_exchanges
 ```
 
 Both commands above are dry-runs: no database or HTTP access. Before activation,
 review the schema SQL, ownership/grants, existing exchange mappings and backup.
-The schema migration requires existing `exchanges`, `external_systems` and
+The schema migration requires existing `scheduler_jobs`, `exchanges`, `external_systems` and
 `exchange_source_mappings` tables. It is a one-time migration and deliberately
 fails if its objects already exist. After review, explicit application is:
 
 ```powershell
-.\.venv\Scripts\python.exe -m scripts.apply_market_time_holidays --apply
-.\.venv\Scripts\python.exe -m scripts.sync_exchange_holidays XNYS --exchange NYSE --apply
+.\.venv\Scripts\python.exe -m scripts.apply_exchange_registry --apply
+.\.venv\Scripts\python.exe -m scripts.sync_exchanges --apply
 ```
 
 Acquisition requires `EULERPOOL_API_KEY` and exactly one active external-system
-row with code `eulerpool` (case-insensitive). All database writes use the stored
-function in a transaction. No external calls or migrations were executed during
+row with code `eulerpool` (case-insensitive). All database writes use stored
+functions in transactions. No external calls or migrations were executed during
 implementation. Validate the SQL on a test PostgreSQL database before production.
 
-The `eulerpool_exchange_holidays` scheduler job acquires missing holiday snapshots
-and refreshes existing ones for rows in `public.exchanges`. Bootstrap at scheduler
-startup discovers its manifest and registers it disabled by default. Enable it
+The `eulerpool_exchange_sync` scheduler job first synchronizes the complete
+Eulerpool catalog into `public.exchanges`, then acquires or refreshes holidays for
+all registered exchanges. Catalog codes (4-20 uppercase alphanumeric characters)
+are authoritative; names, country and supplied IANA timezones are updated, and the
+full provider payload is retained in `exchange_source_mappings`. Missing timezones
+preserve existing values. Calendar names and regular trading hours are not inferred.
+The orchestration lives in `market_data.exchange_sync`, with a thin job entrypoint
+in `jobs.eulerpool_exchange_sync`. The CLI uses the same complete flow.
+Bootstrap at scheduler startup discovers its manifest and registers new jobs
+disabled by default. Enable it
 through the existing scheduler controls; manual initial acquisition is optional.
 Its daily cron is `30 6 * * *`, interpreted in `SCHEDULER_TIMEZONE` (default
-`Europe/Rome`), not necessarily UTC. No additional schema migration is required.
+`Europe/Rome`), not necessarily UTC. Fresh exchange-registry migrations include the
+catalog functions. For an already installed registry, review this upgrade first:
 
-Each run retrieves one live catalog. Existing snapshot codes take precedence,
+```powershell
+.\.venv\Scripts\python.exe -m scripts.apply_exchange_registry --upgrade
+```
+
+Only after SQL review, backup and validation on a test PostgreSQL database, repeat
+with `--upgrade --apply`. The upgrade widens holiday exchange codes and replaces
+the holiday storage, canonical exchange upsert and catalog synchronization functions.
+It does not reconcile existing exchange rows.
+
+### Scheduler Job Rename
+
+Stop backend/scheduler writers before applying the migration, and complete it
+before starting the new code or manifest bootstrap. The registry migration also
+calls `sp_migrate_exchange_sync_job`, renaming the persisted
+`eulerpool_exchange_holidays` row to `eulerpool_exchange_sync`. It changes only
+the job key, display name, Python module and update timestamp. The UUID,
+enablement, trigger, schedule, run timestamps, history and queued requests remain
+unchanged. If both keys already exist, it aborts instead of merging or deleting
+either job. Resolve that conflict explicitly before proceeding.
+
+For databases whose exchange registry is already up to date, review the standalone
+rename SQL, then apply it only after backup and PostgreSQL validation:
+
+```powershell
+.\.venv\Scripts\python.exe -m scripts.apply_exchange_registry --rename-job-only
+.\.venv\Scripts\python.exe -m scripts.apply_exchange_registry --rename-job-only --apply
+```
+
+This mode is repeatable and does nothing if the legacy job is absent. After the
+migration, restart the scheduler. Old Python entrypoint and CLI names are removed;
+update operational commands to use the new names. No migration runs automatically
+on application startup.
+
+Each run retrieves one live catalog through the centralized HTTP client. Malformed
+or empty catalogs fail the run before holiday acquisition. The catalog transaction
+is committed before holidays begin, and the same response is reused for all venues.
+Existing noncanonical rows (for example `NASDAQ` instead of `XNAS`) or conflicting
+Eulerpool mappings block catalog synchronization: reconcile them explicitly first.
+No automatic merges, instrument moves or exchange deletions are performed. Once
+catalog authority is activated, asset ingestion must resolve provider aliases to
+catalog codes rather than create new exchange identities.
+Existing snapshot codes take precedence,
 followed by Eulerpool source mappings, then the MIP exchange code/full name when
 no prior identity is available. Resolution requires an exact, unique catalog
 code or case-insensitive trimmed name; no hardcoded aliases or fuzzy matching
@@ -152,15 +235,12 @@ per-exchange failure reason. Each snapshot is stored in a separate transaction;
 a failed exchange does not prevent the others from updating. Results include per-exchange
 outcomes and `eligible`, `upserted`, `failed` counters. `upserted` counts successful
 stores, including idempotent existing snapshots. Results are `SUCCESS`, `PARTIAL`
-or `FAILED`; an empty MIP exchange table returns `INCOMPLETE` with reason
-`no_registered_exchanges` and a warning, without HTTP requests.
-The scheduler repository persists `INCOMPLETE` as `PARTIAL`, matching the database
-completion contract, while preserving the original status and reason in the JSON
-result. Existing MIP exchange rows need no initial snapshot to be eligible;
-unresolved identities still require a verified mapping before acquisition.
-Catalog, configuration and target-selection failures fail the whole run. The job
-does not create exchange rows or change calendar metadata. Successful acquisition
-stores the verified provider identity through the existing stored function.
+or `FAILED`; `catalog_upserted` counts synchronized catalog entries. An empty MIP
+exchange table is populated from the catalog before holiday acquisition. Existing
+rows need no initial snapshot to be eligible. Catalog, configuration and
+target-selection failures fail the whole run. A holiday failure does not roll back
+the already committed catalog. Successful acquisition stores the verified provider
+identity through the existing stored function.
 
 Holiday snapshots are acquisition evidence only: `as_of` is not calendar coverage.
 They do not yet replace the session provider or assign `calendar_name`, IANA
@@ -190,6 +270,30 @@ skips are not successful validation of those integrations. Before activation,
 rerun them with dependencies installed and verify the migration and persisted
 values on a test PostgreSQL database. Remaining screener migration phases and
 frontend integration are outside this foundation.
+
+## Entity cleanup job
+
+Apply `scripts/install_cleanup_entities.sql` to an existing PostgreSQL database
+before running `cleanup_entities`. New databases include these functions in
+`mip_schema.sql`. Scheduler startup discovers `jobs/cleanup_entities.job.json`
+and registers the job disabled by default. Run it manually through the existing
+scheduler controls before enabling its daily `30 4 * * *` schedule, interpreted
+in `SCHEDULER_TIMEZONE`.
+
+To preview candidates after installing the functions:
+
+```sql
+SELECT entity_id FROM public.sp_list_orphan_entities();
+```
+
+The job deletes entities with no instruments, committing each entity separately.
+It locks and rechecks each candidate, skipping busy, missing or newly linked
+entities. Existing foreign keys remain authoritative: cascading metadata is
+deleted, but references that prohibit deletion (including watchlist/discovery
+items) leave the entity intact. Results report `candidates`, `deleted`,
+`referenced` and `skipped`; unexpected errors stop the run without undoing earlier
+commits. Validate the installation and concurrency behavior on a test PostgreSQL
+database before production use.
 
 ## Centralized market data
 
