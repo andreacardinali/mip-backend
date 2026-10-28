@@ -1,7 +1,7 @@
 import runpy
 from datetime import UTC, date, datetime
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pytest
@@ -118,7 +118,7 @@ def test_clock_api_rejects_naive_instants_and_serializes_utc():
     from fastapi.testclient import TestClient
 
     security = Mock(CurrentUser=dict, get_current_user=lambda: {})
-    database = Mock()
+    database = MagicMock()
     db = database.SessionLocal.return_value.__enter__.return_value
     db.execute.return_value.mappings.return_value.one_or_none.return_value = None
     with patch.dict("sys.modules", {"db": database, "auth.security": security}):
