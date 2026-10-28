@@ -54,7 +54,14 @@ def create_market_data_service(config=None):
     key = settings.get("FMP_API_KEY")
     if key:
         providers.append(
-            FMPProvider(key, timeout=config.http_timeout, retry_policy=retry)
+            FMPProvider(
+                key,
+                timeout=config.http_timeout,
+                retry_policy=retry,
+                quota_cooldown_seconds=float(
+                    settings.get("FMP_QUOTA_COOLDOWN_SECONDS", 86400)
+                ),
+            )
         )
     key = settings.get("EULERPOOL_API_KEY")
     if key:

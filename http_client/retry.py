@@ -179,6 +179,7 @@ class RetryPolicy:
     retryable_status_codes: frozenset[int] = field(
         default_factory=lambda: DEFAULT_RETRYABLE_STATUS_CODES
     )
+    response_retry_filter: Callable[[httpx.Response], bool] | None = None
 
     def validate(self) -> None:
         if self.max_retries < 0:
@@ -249,11 +250,15 @@ def request_with_retry(
             _raise_for_status(response, secrets)
             return response
 
+        response_allows_retry = (
+            policy.response_retry_filter is None
+            or policy.response_retry_filter(response)
+        )
         if response.status_code not in policy.retryable_status_codes:
             _raise_for_status(response, secrets)
             return response
 
-        if not may_retry or attempt >= policy.max_retries:
+        if not may_retry or attempt >= policy.max_retries or not response_allows_retry:
             error_message = _response_error_message(response, secrets)
             logger.error(
                 "HTTP request failed permanently status=%s method=%s attempt=%s/%s "

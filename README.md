@@ -21,6 +21,22 @@ response objects retain their original content for programmatic handling. Do not
 log those objects, raw bodies, arbitrary authentication objects or exception
 causes directly: this module does not sanitize every possible caller log.
 
+### FMP Quota Cooldown
+
+FMP HTTP 429 responses whose JSON `Error Message` contains `Limit Reach` stop
+retries immediately. Market-data providers and FMP jobs share a cooldown per API
+key within the current process. During cooldown, calls fail locally with
+`ProviderRateLimitError`, without HTTP requests. Ordinary 429 responses retain
+their retry policy. A caller-supplied `response_retry_filter` is preserved;
+the shared HTTP client evaluates this filter on responses except HTTP 403.
+
+Set `FMP_QUOTA_COOLDOWN_SECONDS=86400` in `.env` to configure the suspension
+(default: 24 hours; finite nonnegative seconds, with zero disabling suspension).
+After expiry, requests resume automatically. Cooldown is in memory: restarting
+the process clears it, and separate worker processes do not share its state.
+Requests already in flight are not cancelled. The triggering HTTP error retains
+status 429; locally blocked calls have no HTTP response.
+
 ## Shared Market Time: Phase One
 
 `market_time` centralizes UTC normalization and exchange session snapshots.

@@ -37,6 +37,21 @@ def test_shared_http_redacts_explicit_secret_in_errors_and_logs(caplog):
     assert captured.value.response.status_code == 503
 
 
+def test_response_filter_stops_retry_and_preserves_status():
+    transport = SequenceTransport([429, 200])
+    sleeps = []
+    with httpx.Client(transport=transport) as client:
+        with pytest.raises(httpx.HTTPStatusError) as error:
+            request_with_retry(
+                client, "GET", "https://example.test",
+                policy=RetryPolicy(max_retries=3, response_retry_filter=lambda _: False),
+                sleep=sleeps.append,
+            )
+    assert error.value.response.status_code == 429
+    assert transport.calls == 1
+    assert sleeps == []
+
+
 class SequenceTransport(httpx.BaseTransport):
     def __init__(self, responses):
         self.responses = list(responses)

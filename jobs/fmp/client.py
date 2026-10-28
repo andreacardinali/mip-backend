@@ -3,6 +3,7 @@ from typing import Any
 
 from config.settings import settings
 from http_client import RetryPolicy, create_http_client, request_with_retry
+from market_data.providers.fmp import FMPQuotaGuard
 
 logger = logging.getLogger(__name__)
 
@@ -16,9 +17,13 @@ class FMPClient:
         self.timeout = float(settings.get("FMP_HTTP_TIMEOUT", 30))
         self.max_retries = int(settings.get("FMP_HTTP_MAX_RETRIES", 3))
         self.retry_delay = float(settings.get("FMP_HTTP_RETRY_DELAY", 2))
+        self._quota_guard = FMPQuotaGuard(
+            self.api_key, settings.get("FMP_QUOTA_COOLDOWN_SECONDS", 86400)
+        )
         self.retry_policy = RetryPolicy(
             max_retries=self.max_retries,
             base_delay_seconds=self.retry_delay,
+            response_retry_filter=self._quota_guard.should_retry,
         )
         self._client = create_http_client(
             base_url=self.base_url,
@@ -36,6 +41,7 @@ class FMPClient:
         self.close()
 
     def get_list(self, endpoint: str, params: dict[str, Any]) -> list[dict[str, Any]]:
+        self._quota_guard.check_available()
         logger.info("FMP request endpoint=%s", endpoint)
         response = request_with_retry(
             self._client,
