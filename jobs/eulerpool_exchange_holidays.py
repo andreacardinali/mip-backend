@@ -118,20 +118,24 @@ def sync_holidays(provider, targets, session_factory):
             logger.info("Holiday snapshot stored exchange=%s code=%s", exchange, code)
         except Exception as exc:
             error_type = type(exc).__name__
+            http_status = get_http_status(exc)
+            failure = {
+                "exchange": exchange,
+                "exchange_code": code,
+                "status": "FAILED",
+                "error_type": error_type,
+            }
+            detail = f"error_type={error_type}"
+            if http_status is not None:
+                failure["http_status"] = http_status
+                detail += f" http_status={http_status}"
             logger.error(
-                "Holiday sync failed exchange=%s code=%s error_type=%s",
+                "Holiday sync failed exchange=%s code=%s %s",
                 exchange,
                 code,
-                error_type,
+                detail,
             )
-            results.append(
-                {
-                    "exchange": exchange,
-                    "exchange_code": code,
-                    "status": "FAILED",
-                    "error_type": error_type,
-                }
-            )
+            results.append(failure)
     failed = sum(result["status"] == "FAILED" for result in results)
     return {
         "status": (

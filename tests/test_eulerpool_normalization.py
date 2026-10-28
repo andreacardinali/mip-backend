@@ -102,9 +102,7 @@ def test_holiday_job_skips_invalid_catalog_codes(invalid_code, caplog):
     assert "Exchange catalog entry skipped" in caplog.text
     assert "secret-token" not in caplog.text
     if isinstance(invalid_code, str):
-        expected_code = (
-            "[REDACTED]" if invalid_code == "secret-token" else invalid_code
-        )
+        expected_code = "[REDACTED]" if invalid_code == "secret-token" else invalid_code
         assert f"raw_code={expected_code!r}" in caplog.text
     else:
         assert "raw_code=" not in caplog.text
@@ -364,6 +362,40 @@ def test_holiday_job_skips_conflicting_rows_and_continues(caplog):
     fetch.assert_called_once_with(provider, "XETR", catalog=catalog)
     provider.get_exchanges.assert_called_once_with()
     session_factory.assert_called_once_with()
+
+
+@pytest.mark.parametrize("status_code", [403, 404, 429, 500])
+def test_holiday_job_exchange_http_failure_is_isolated(status_code, caplog):
+    def handler(request):
+        if request.url.path.endswith("/market/exchanges"):
+            return httpx.Response(200, json=[{"code": "XBER"}, {"code": "XNYS"}])
+        if request.url.path.endswith("/market/holidays/XBER"):
+            return httpx.Response(status_code, text="secret-token")
+        assert request.url.path.endswith("/market/holidays/XNYS")
+        return httpx.Response(200, json=holiday_payload())
+
+    targets = [{"exchange": "XBER"}, {"exchange": "XNYS"}]
+    session_factory = MagicMock()
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler)) as client,
+        patch("jobs.eulerpool_exchange_holidays.SQLHolidayRepository") as repository,
+    ):
+        provider = EulerpoolProvider("secret-token", client=client)
+        result = sync_holidays(provider, targets, session_factory)
+    assert result["status"] == "PARTIAL"
+    assert result["failed"] == 1
+    assert result["upserted"] == 1
+    assert result["exchanges"][0]["http_status"] == status_code
+    assert result["exchanges"][0]["error_type"] == (
+        "InstrumentNotFoundError" if status_code == 404 else "HTTPStatusError"
+    )
+    assert result["exchanges"][1]["status"] == "SUCCESS"
+    assert f"http_status={status_code}" in caplog.text
+    assert "secret-token" not in caplog.text
+    assert "secret-token" not in str(result)
+    session_factory.assert_called_once_with()
+    assert repository.return_value.save.call_count == 1
+    assert repository.return_value.save.call_args.args[0] == "XNYS"
 
 
 def test_holiday_job_catalog_failure_does_not_write(caplog):
