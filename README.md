@@ -2,6 +2,82 @@
 
 Adds explicit logs immediately before and after each provider call, including call number, mode, signal count, signal IDs, output-token limit and elapsed time. Batch failures log split sizes and error details before recursive retry.
 
+## Shared Market Time: Phase One
+
+`market_time` centralizes UTC normalization and exchange session snapshots.
+Instants must be aware and are normalized to UTC; PostgreSQL connections request
+UTC. Date-only events stay dates: FMP earnings, dividends and splits write
+`catalyst_day` via the payload, with no fabricated `catalyst_date` midnight.
+Existing historical instants are not rewritten or cleared.
+
+Authenticated `GET /api/market-time/exchanges/{exchange}` returns `OPEN`, `CLOSED`
+or `UNKNOWN`, UTC session boundaries, next transitions and calendar provenance.
+Optional `at` must include an offset (URL-encode `+`); a naive value returns 422.
+Missing exchange mapping, dependencies or calendar coverage returns `UNKNOWN`.
+Regular local opening hours are metadata, not a holiday-aware fallback. News and
+catalysts are not suppressed when a market is closed. Cron timezone is separate.
+
+### Review and Activation
+
+No installation, database migration or job activation is performed automatically.
+Use the backend virtual environment, independently of other workspace roots.
+The required `exchange-calendars` and `tzdata` packages are declared in
+`requirements.txt`; installing them is a separate authorized step.
+
+Before changing an existing database, run the read-only audit
+`scripts/market_time_audit.sql` with PostgreSQL tooling, review types, function
+ownership/grants and dependencies, and take a backup. The audit does not establish
+the original timezone of historical values. Do not relabel naive historical
+timestamps as UTC without verified provenance and a separately reviewed migration.
+
+From the backend root on Windows:
+
+```powershell
+.\.venv\Scripts\python.exe -m scripts.apply_market_time
+```
+
+This prints the transaction only and does not connect to the database. Review the
+SQL, stop backend/scheduler writers, and only then explicitly apply:
+
+```powershell
+.\.venv\Scripts\python.exe -m scripts.apply_market_time --apply
+```
+
+The transactional upgrade adds nullable `exchanges.calendar_name` and replaces the
+legacy naive filing function signature with a `timestamptz` signature. It refuses
+unexpected existing temporal column types, unreviewed ownership/grants, and
+dependent objects (`RESTRICT`, never `CASCADE`). Resolve such blockers explicitly;
+the runner does not convert columns or backfill history. Keep this checkout with
+the migration record, since function SQL is read from `mip_schema.sql`.
+
+After verifying exchange identifiers, populate `calendar_name` with the matching
+`exchange-calendars` identifier and `timezone_name` with its verified IANA zone.
+No mappings are inferred or seeded. Confirm actual holidays, early closes, breaks
+and DST against the installed calendar before consuming its status in other jobs.
+
+FMP `acceptedDate` with an offset is converted to UTC. Naive filing timestamps are
+rejected unless `FMP_ACCEPTED_DATE_TIMEZONE` is set in the backend `.env` to a
+verified source timezone. This setting describes FMP acceptance timestamps, not an
+exchange timezone; there is no default. Ambiguous/nonexistent local times are
+rejected. Logs report temporal rejections; job `normalization_discarded` also counts
+other filtering/deduplication, so it is not a temporal-only rejection metric.
+News persistence rejects naive instants; Eulerpool ISO timestamps without offsets
+are discarded rather than treated as UTC. Provider timezone assumptions require
+separate verification.
+
+### Focused Checks
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/test_market_time.py tests/test_fmp_time.py tests/test_news_ingestion.py -q -rs
+.\.venv\Scripts\python.exe -m ruff check market_time routers/market_time.py scripts/apply_market_time.py tests/test_market_time.py tests/test_fmp_time.py jobs/fmp/normalizers.py jobs/fmp/fmp_daily_sync.py services/news_ingestion.py market_data/providers/eulerpool.py db.py
+```
+
+Calendar/DST/API tests can be skipped when local dependencies are unavailable;
+skips are not successful validation of those integrations. Before activation,
+rerun them with dependencies installed and verify the migration and persisted
+values on a test PostgreSQL database. Remaining screener migration phases and
+frontend integration are outside this foundation.
+
 ## Centralized market data
 
 Screener price and candle acquisition uses `market_data` and its configured

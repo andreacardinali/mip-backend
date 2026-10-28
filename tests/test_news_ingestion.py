@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from unittest.mock import Mock, patch
 
 from market_data.models import NewsArticle
-from services.news_ingestion import _external_id, ingest_news
+from services.news_ingestion import _external_id, _published_at, ingest_news
 
 
 class R:
@@ -22,6 +22,11 @@ class R:
 
 
 class Tests(unittest.TestCase):
+    def test_naive_news_timestamp_is_rejected(self):
+        article = NewsArticle(headline="x", published_at=datetime(2026, 7, 1))
+        with self.assertRaises(ValueError):
+            _published_at(article)
+
     def test_stable_id(self):
         a = NewsArticle(
             headline="x",

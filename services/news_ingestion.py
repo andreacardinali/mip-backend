@@ -13,6 +13,7 @@ from market_data.capabilities import InstrumentType
 from market_data.exceptions import AllProvidersFailedError, InstrumentNotFoundError
 from market_data.models import InstrumentReference, NewsArticle
 from market_data.service import MarketDataService
+from market_time.normalization import as_utc
 
 logger = logging.getLogger(__name__)
 
@@ -42,10 +43,7 @@ def _instrument_type(value: str | None) -> InstrumentType:
 
 
 def _published_at(article: NewsArticle) -> datetime:
-    value = article.published_at
-    if value.tzinfo is None:
-        return value.replace(tzinfo=UTC)
-    return value.astimezone(UTC)
+    return as_utc(article.published_at)
 
 
 def _external_id(article: NewsArticle) -> str:

@@ -1,13 +1,22 @@
+import runpy
 from datetime import UTC, date, datetime
-from unittest.mock import Mock
+from pathlib import Path
+from unittest.mock import Mock, patch
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pytest
 
-from market_time.normalization import TemporalNormalizationError, as_utc
 from market_time.calendar import CalendarUnavailable, ExchangeCalendarsProvider
-from market_time.models import CalendarWindow, ExchangeHours, MarketSession, MarketStatus
+from market_time.models import (
+    CalendarWindow,
+    ExchangeHours,
+    MarketSession,
+    MarketStatus,
+)
+from market_time.normalization import TemporalNormalizationError, as_utc
+from market_time.repository import SQLExchangeHoursRepository
 from market_time.service import MarketTimeService
+from scripts.apply_market_time import migration_statements
 
 
 @pytest.fixture
@@ -22,6 +31,17 @@ def test_aware_offset_becomes_utc():
     assert as_utc(datetime.fromisoformat("2026-07-01T12:00:00+02:00")) == datetime(
         2026, 7, 1, 10, tzinfo=UTC
     )
+
+
+def test_database_connections_request_utc_without_connecting():
+    with (
+        patch("sqlalchemy.create_engine") as create_engine,
+        patch("config.settings.settings", Mock(DATABASE_URL="postgresql+psycopg://test")),
+    ):
+        runpy.run_path(str(Path(__file__).resolve().parents[1] / "db.py"))
+    assert create_engine.call_args.kwargs["connect_args"] == {
+        "options": "-c timezone=UTC"
+    }
 
 
 @pytest.mark.parametrize("value", [date(2026, 7, 1), datetime(2026, 7, 1)])
@@ -54,6 +74,71 @@ def test_explicit_utc_requires_no_iana_data():
 def test_unknown_timezone_is_rejected():
     with pytest.raises(TemporalNormalizationError, match="Timezone unavailable"):
         as_utc(datetime(2026, 7, 1), source_timezone="Unknown/Exchange")
+
+
+def test_exchange_repository_uses_only_explicit_mapping():
+    db = Mock()
+    db.execute.return_value.mappings.return_value.one_or_none.return_value = {
+        "exchange": "TEST", "calendar_name": None, "timezone_name": "UTC"
+    }
+    result = SQLExchangeHoursRepository(db).get_exchange("TEST")
+    assert result == ExchangeHours("TEST", None, "UTC")
+    assert db.execute.call_args.args[1] == {"exchange": "TEST"}
+    db.execute.return_value.mappings.return_value.one_or_none.return_value = None
+    assert SQLExchangeHoursRepository(db).get_exchange("MISSING") is None
+
+
+def test_market_time_migration_is_scoped_and_does_not_backfill():
+    schema = (Path(__file__).resolve().parents[1] / "mip_schema.sql").read_text(
+        encoding="utf-8"
+    )
+    preflight, definition = migration_statements(schema)
+    assert "ADD COLUMN IF NOT EXISTS calendar_name" in preflight
+    assert "RESTRICT" in preflight
+    assert "proacl IS NOT NULL" in preflight
+    assert "CASCADE" not in preflight
+    assert "UPDATE public.filings" not in preflight
+    assert "actual_type IS DISTINCT FROM expected.data_type" in preflight
+    assert "No automatic historical conversion is allowed" in preflight
+    assert definition.startswith("CREATE OR REPLACE FUNCTION public.sp_upsert_filing")
+    assert "p_accepted_at timestamp with time zone" in definition
+
+
+def test_market_time_migration_rejects_wrong_signature():
+    with pytest.raises(ValueError):
+        migration_statements(
+            "CREATE FUNCTION public.sp_upsert_filing(p_accepted_at timestamp without time zone)\n$$;"
+        )
+
+
+def test_clock_api_rejects_naive_instants_and_serializes_utc():
+    pytest.importorskip("fastapi")
+    pytest.importorskip("httpx")
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    security = Mock(CurrentUser=dict, get_current_user=lambda: {})
+    database = Mock()
+    db = database.SessionLocal.return_value.__enter__.return_value
+    db.execute.return_value.mappings.return_value.one_or_none.return_value = None
+    with patch.dict("sys.modules", {"db": database, "auth.security": security}):
+        namespace = runpy.run_path(
+            str(Path(__file__).resolve().parents[1] / "routers" / "market_time.py")
+        )
+    app = FastAPI()
+    app.include_router(namespace["router"], prefix="/api/market-time")
+    client = TestClient(app)
+    assert client.get(
+        "/api/market-time/exchanges/TEST", params={"at": "2026-07-01T12:00:00"}
+    ).status_code == 422
+    database.SessionLocal.assert_not_called()
+    response = client.get(
+        "/api/market-time/exchanges/TEST",
+        params={"at": "2026-07-01T12:00:00+02:00"},
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "UNKNOWN"
+    assert response.json()["observed_at"] == "2026-07-01T10:00:00Z"
 
 
 def make_service(sessions):

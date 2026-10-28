@@ -1,7 +1,11 @@
-from datetime import UTC, date, datetime
+import logging
+from datetime import date, datetime
 from typing import Any
 
+from market_time.normalization import TemporalNormalizationError, as_utc
+
 SOURCE = "FMP"
+logger = logging.getLogger(__name__)
 
 
 def normalize_symbol(value: Any) -> str | None:
@@ -21,21 +25,19 @@ def normalize_date(value: Any) -> date | None:
         return None
 
 
-def normalize_timestamp(value: Any) -> datetime | None:
+def normalize_timestamp(
+    value: Any, *, source_timezone: str | None = None
+) -> datetime | None:
     text = str(value or "").strip()
 
-    if not text:
+    if len(text) <= 10:
         return None
 
     try:
         parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except ValueError:
+        return as_utc(parsed, source_timezone=source_timezone)
+    except (ValueError, TemporalNormalizationError):
         return None
-
-    if parsed.tzinfo is not None:
-        parsed = parsed.astimezone(UTC).replace(tzinfo=None)
-
-    return parsed
 
 
 def normalize_earnings(
@@ -132,18 +134,25 @@ def normalize_splits(
 
 def normalize_filings_8k(
     rows: list[dict[str, Any]],
+    *,
+    source_timezone: str | None = None,
 ) -> list[dict[str, Any]]:
     deduplicated: dict[
         tuple[str, datetime, str],
         dict[str, Any],
     ] = {}
 
+    temporal_rejections = 0
     for row in rows:
         symbol = normalize_symbol(row.get("symbol"))
         cik = str(row.get("cik") or "").strip()
         filing_type = str(row.get("formType") or "UNKNOWN").strip().upper()
         filing_date = normalize_date(row.get("filingDate"))
-        accepted_at = normalize_timestamp(row.get("acceptedDate"))
+        accepted_at = normalize_timestamp(
+            row.get("acceptedDate"), source_timezone=source_timezone
+        )
+        if accepted_at is None:
+            temporal_rejections += 1
 
         if not all(
             (
@@ -175,4 +184,11 @@ def normalize_filings_8k(
             "payload": row,
         }
 
+    if temporal_rejections:
+        logger.warning(
+            "FMP filings rejected timestamps count=%s source_timezone=%s; "
+            "offset or verified FMP_ACCEPTED_DATE_TIMEZONE required",
+            temporal_rejections,
+            source_timezone,
+        )
     return list(deduplicated.values())

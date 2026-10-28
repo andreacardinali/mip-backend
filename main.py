@@ -14,6 +14,7 @@ from routers.imports import router as imports_router
 from routers.instruments import router as instruments_router
 from routers.market_data import router as market_data_router
 from routers.market_screener import router as market_screener_router
+from routers.market_time import router as market_time_router
 from routers.news import router as news_router
 from routers.notification_preferences import router as notification_preferences_router
 from routers.portfolios import router as portfolios_router
@@ -48,6 +49,7 @@ app.include_router(imports_router, prefix="/api/import", tags=["import"])
 app.include_router(instruments_router, prefix="/api/instruments", tags=["instruments"])
 app.include_router(market_data_router, prefix="/api/market-data", tags=["market-data"])
 app.include_router(market_screener_router, prefix="/api/screener", tags=["screener"])
+app.include_router(market_time_router, prefix="/api/market-time", tags=["market-time"])
 app.include_router(news_router, prefix="/api/news", tags=["news"])
 app.include_router(
     notification_preferences_router,

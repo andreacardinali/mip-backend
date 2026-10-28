@@ -9550,10 +9550,10 @@ $_$;
 
 
 --
--- Name: sp_upsert_filing(text, text, text, date, timestamp without time zone, text, text, jsonb, text, text); Type: FUNCTION; Schema: public; Owner: -
+-- Name: sp_upsert_filing(text, text, text, date, timestamp with time zone, text, text, jsonb, text, text); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.sp_upsert_filing(p_symbol text, p_filing_type text, p_cik text, p_filing_date date, p_accepted_at timestamp without time zone, p_title text, p_source text, p_raw_payload jsonb, p_filing_subtype text DEFAULT NULL::text, p_accession_number text DEFAULT NULL::text) RETURNS uuid
+CREATE FUNCTION public.sp_upsert_filing(p_symbol text, p_filing_type text, p_cik text, p_filing_date date, p_accepted_at timestamp with time zone, p_title text, p_source text, p_raw_payload jsonb, p_filing_subtype text DEFAULT NULL::text, p_accession_number text DEFAULT NULL::text) RETURNS uuid
     LANGUAGE plpgsql
     AS $$
 DECLARE
@@ -10836,6 +10836,7 @@ CREATE TABLE public.exchanges (
     exchangefullname character varying(255) NOT NULL,
     country_code character varying(10),
     timezone_name character varying(64),
+    calendar_name character varying(64),
     market_open_time time without time zone,
     market_close_time time without time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,

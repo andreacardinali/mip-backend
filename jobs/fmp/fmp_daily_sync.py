@@ -15,21 +15,9 @@ from jobs.fmp.normalizers import (
     normalize_filings_8k,
     normalize_splits,
 )
+from market_time.normalization import as_utc
 
 logger = logging.getLogger(__name__)
-
-
-def as_utc_datetime(value: date | datetime) -> datetime:
-    if isinstance(value, datetime):
-        if value.tzinfo is None:
-            return value.replace(tzinfo=UTC)
-        return value.astimezone(UTC)
-
-    return datetime.combine(
-        value,
-        datetime.min.time(),
-        tzinfo=UTC,
-    )
 
 
 CATALYST_SQL = text(
@@ -55,7 +43,7 @@ FILING_SQL = text(
         p_filing_type => :filing_type,
         p_cik => :cik,
         p_filing_date => :filing_date,
-        p_accepted_at => :accepted_at,
+        p_accepted_at => CAST(:accepted_at AS timestamptz),
         p_title => :title,
         p_source => :source,
         p_raw_payload => CAST(:payload AS jsonb),
@@ -73,14 +61,21 @@ def _upsert_catalysts(
     import json
 
     for row in rows:
+        value = row["entity_date"]
+        instant = as_utc(value) if isinstance(value, datetime) else None
+        if not isinstance(value, date):
+            raise ValueError("Catalyst requires a date or aware instant")
+        payload = dict(row["payload"])
+        if instant is None:
+            payload["date"] = value.isoformat()
         db.execute(
             CATALYST_SQL,
             {
                 **row,
                 "entity_id": row.get("entity_id"),
-                "entity_date": as_utc_datetime(row["entity_date"]),
+                "entity_date": instant,
                 "payload": json.dumps(
-                    row["payload"],
+                    payload,
                     default=str,
                 ),
             },
@@ -100,6 +95,7 @@ def _upsert_filings(
             FILING_SQL,
             {
                 **row,
+                "accepted_at": as_utc(row["accepted_at"]),
                 "payload": json.dumps(row["payload"]),
             },
         )
@@ -131,6 +127,7 @@ def _run_source(
             "status": "SUCCESS",
             "received": len(received_rows),
             "eligible": len(normalized_rows),
+            "normalization_discarded": len(received_rows) - len(normalized_rows),
             "upserted": upserted,
             "failed": 0,
         }
@@ -164,7 +161,7 @@ def _run_source(
 
 
 def run() -> dict[str, Any]:
-    today = date.today()
+    today = datetime.now(UTC).date()
     calendar_days = int(
         settings.get(
             "FMP_CALENDAR_DAYS_FORWARD",
@@ -234,7 +231,10 @@ def run() -> dict[str, Any]:
                     page=0,
                     limit=filing_page_limit,
                 ),
-                normalize_filings_8k,
+                lambda rows: normalize_filings_8k(
+                    rows,
+                    source_timezone=settings.get("FMP_ACCEPTED_DATE_TIMEZONE") or None,
+                ),
                 _upsert_filings,
             ),
         }
