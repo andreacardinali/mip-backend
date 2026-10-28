@@ -24,32 +24,38 @@ class SchedulerRepository:
 
     def complete_manual_request(self, job_run_id: UUID) -> None:
         self.db.execute(
-            text("""
+            text(
+                """
                 SELECT public.sp_scheduler_complete_job_run_request(
                     CAST(:job_run_id AS uuid)
                 )
-                """),
+                """
+            ),
             {"job_run_id": str(job_run_id)},
         )
 
     def defer_manual_request(self, job_run_id: UUID) -> None:
         self.db.execute(
-            text("""
+            text(
+                """
                 SELECT public.sp_scheduler_defer_job_run_request(
                     CAST(:job_run_id AS uuid)
                 )
-                """),
+                """
+            ),
             {"job_run_id": str(job_run_id)},
         )
 
     def fail_manual_request(self, job_run_id: UUID, error_message: str) -> None:
         self.db.execute(
-            text("""
+            text(
+                """
                 SELECT public.sp_scheduler_fail_job_run_request(
                     CAST(:job_run_id AS uuid),
                     :error_message
                 )
-                """),
+                """
+            ),
             {
                 "job_run_id": str(job_run_id),
                 "error_message": error_message,
@@ -63,12 +69,14 @@ class SchedulerRepository:
         next_run_at: datetime | None,
     ) -> None:
         self.db.execute(
-            text("""
+            text(
+                """
                 SELECT sp_scheduler_update_next_run(
                     CAST(:job_id AS uuid),
                     :next_run_at
                 )
-                """),
+                """
+            ),
             {
                 "job_id": str(job_id),
                 "next_run_at": next_run_at,
@@ -83,13 +91,15 @@ class SchedulerRepository:
         started_at: datetime,
     ) -> None:
         self.db.execute(
-            text("""
+            text(
+                """
                 SELECT sp_start_scheduler_job(
                     CAST(:run_id AS uuid),
                     CAST(:job_id AS uuid),
                     :started_at
                 )
-                """),
+                """
+            ),
             {
                 "run_id": str(job_run_id),
                 "job_id": str(job_id),
@@ -111,7 +121,8 @@ class SchedulerRepository:
             database_status = "PARTIAL"
         payload = json.dumps(result, default=str) if result is not None else None
         self.db.execute(
-            text("""
+            text(
+                """
                 SELECT sp_complete_scheduler_job(
                     CAST(:run_id AS uuid),
                     :status,
@@ -119,7 +130,8 @@ class SchedulerRepository:
                     CAST(:result AS jsonb),
                     :completed_at
                 )
-                """),
+                """
+            ),
             {
                 "run_id": str(job_run_id),
                 "status": database_status,
@@ -137,13 +149,15 @@ class SchedulerRepository:
         completed_at: datetime,
     ) -> None:
         self.db.execute(
-            text("""
+            text(
+                """
                 SELECT sp_fail_scheduler_job(
                     CAST(:run_id AS uuid),
                     :error,
                     :completed_at
                 )
-                """),
+                """
+            ),
             {
                 "run_id": str(job_run_id),
                 "error": error_message,
@@ -164,7 +178,8 @@ class SchedulerRepository:
     ) -> dict[str, Any]:
         row = (
             self.db.execute(
-                text("""
+                text(
+                    """
                     SELECT *
                     FROM sp_register_scheduler_job(
                         :job_key,
@@ -175,7 +190,8 @@ class SchedulerRepository:
                         :interval_minutes,
                         :enabled_by_default
                     )
-                    """),
+                    """
+                ),
                 {
                     "job_key": job_key,
                     "job_name": job_name,

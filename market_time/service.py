@@ -28,7 +28,8 @@ class MarketTimeService:
         }
         if hours is None or not hours.calendar_name or not hours.timezone_name:
             return MarketClock(
-                **metadata, status=MarketStatus.UNKNOWN,
+                **metadata,
+                status=MarketStatus.UNKNOWN,
                 reason="Missing explicit exchange calendar or timezone mapping",
             )
         try:
@@ -42,7 +43,8 @@ class MarketTimeService:
         )
         if not window.coverage_start <= observed_at.date() < window.coverage_end:
             return MarketClock(
-                **metadata, status=MarketStatus.UNKNOWN,
+                **metadata,
+                status=MarketStatus.UNKNOWN,
                 reason="Instant outside calendar coverage",
             )
         sessions = sorted(window.sessions, key=lambda session: session.opens_at)
@@ -54,15 +56,20 @@ class MarketTimeService:
                     and session.break_start <= observed_at < session.break_end
                 ):
                     return MarketClock(
-                        **metadata, status=MarketStatus.CLOSED, session=session,
-                        next_open=session.break_end, next_close=session.closes_at,
+                        **metadata,
+                        status=MarketStatus.CLOSED,
+                        session=session,
+                        next_open=session.break_end,
+                        next_close=session.closes_at,
                     )
                 next_session = next(
                     (future for future in sessions if future.opens_at > observed_at),
                     None,
                 )
                 return MarketClock(
-                    **metadata, status=MarketStatus.OPEN, session=session,
+                    **metadata,
+                    status=MarketStatus.OPEN,
+                    session=session,
                     next_open=(
                         session.break_end
                         if session.break_start is not None
@@ -81,11 +88,13 @@ class MarketTimeService:
         )
         if next_session is None:
             return MarketClock(
-                **metadata, status=MarketStatus.UNKNOWN,
+                **metadata,
+                status=MarketStatus.UNKNOWN,
                 reason="No next opening within available calendar window",
             )
         return MarketClock(
-            **metadata, status=MarketStatus.CLOSED,
+            **metadata,
+            status=MarketStatus.CLOSED,
             next_open=next_session.opens_at,
             next_close=next_session.break_start or next_session.closes_at,
         )

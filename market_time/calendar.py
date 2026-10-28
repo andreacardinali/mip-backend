@@ -39,11 +39,13 @@ class ExchangeCalendarsProvider:
                         opens_at=row["open"].to_pydatetime(),
                         closes_at=row["close"].to_pydatetime(),
                         break_start=(
-                            None if row.isna()["break_start"]
+                            None
+                            if row.isna()["break_start"]
                             else row["break_start"].to_pydatetime()
                         ),
                         break_end=(
-                            None if row.isna()["break_end"]
+                            None
+                            if row.isna()["break_end"]
                             else row["break_end"].to_pydatetime()
                         ),
                     )

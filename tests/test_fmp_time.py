@@ -24,13 +24,19 @@ def test_fmp_timestamps_preserve_utc_and_require_verified_timezone():
 
 def test_filings_log_temporal_rejections_and_deduplicate_instants(caplog):
     row = {
-        "symbol": "TEST", "cik": "123", "formType": "8-K",
-        "filingDate": "2026-07-01", "acceptedDate": "2026-07-01T12:00:00Z",
+        "symbol": "TEST",
+        "cik": "123",
+        "formType": "8-K",
+        "filingDate": "2026-07-01",
+        "acceptedDate": "2026-07-01T12:00:00Z",
     }
-    result = normalize_filings_8k([
-        row, {**row, "acceptedDate": "2026-07-01T14:00:00+02:00"},
-        {**row, "acceptedDate": "2026-07-01 12:00:00"},
-    ])
+    result = normalize_filings_8k(
+        [
+            row,
+            {**row, "acceptedDate": "2026-07-01T14:00:00+02:00"},
+            {**row, "acceptedDate": "2026-07-01 12:00:00"},
+        ]
+    )
     assert len(result) == 1
     assert result[0]["accepted_at"] == datetime(2026, 7, 1, 12, tzinfo=UTC)
     assert "rejected timestamps count=1" in caplog.text
@@ -38,12 +44,21 @@ def test_filings_log_temporal_rejections_and_deduplicate_instants(caplog):
 
 @pytest.fixture
 def sync_module():
-    with patch.dict("sys.modules", {
-        "db": Mock(), "jobs.fmp.client": Mock(),
-    }):
-        return runpy.run_path(str(
-            Path(__file__).resolve().parents[1] / "jobs" / "fmp" / "fmp_daily_sync.py"
-        ))
+    with patch.dict(
+        "sys.modules",
+        {
+            "db": Mock(),
+            "jobs.fmp.client": Mock(),
+        },
+    ):
+        return runpy.run_path(
+            str(
+                Path(__file__).resolve().parents[1]
+                / "jobs"
+                / "fmp"
+                / "fmp_daily_sync.py"
+            )
+        )
 
 
 def test_date_only_catalyst_has_no_fabricated_instant(sync_module):
@@ -58,8 +73,10 @@ def test_date_only_catalyst_has_no_fabricated_instant(sync_module):
 
 def test_persistence_rejects_naive_instants_before_database(sync_module):
     db = Mock()
-    for function, field in (("_upsert_catalysts", "entity_date"),
-                            ("_upsert_filings", "accepted_at")):
+    for function, field in (
+        ("_upsert_catalysts", "entity_date"),
+        ("_upsert_filings", "accepted_at"),
+    ):
         with pytest.raises(TemporalNormalizationError):
             sync_module[function](db, [{field: datetime(2026, 7, 1), "payload": {}}])
     db.execute.assert_not_called()
