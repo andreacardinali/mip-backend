@@ -1,3 +1,4 @@
+import logging
 from datetime import UTC, date, datetime
 from urllib.parse import quote
 
@@ -27,6 +28,8 @@ from market_data.models import (
     PricePoint,
 )
 from market_time.holidays import normalize_exchange_code, normalize_holidays
+
+logger = logging.getLogger(__name__)
 
 _PROFILE_TYPES = frozenset(
     {
@@ -517,23 +520,50 @@ class EulerpoolProvider:
 
     def get_exchanges(self):
         if self._exchange_cache is None:
-            payload = self._get("/market/exchanges")
-            if not isinstance(payload, list):
-                raise ValueError("Exchange catalog must be a list")
-            self._exchange_cache = [
-                ExchangeReference(
-                    code=normalize_exchange_code(
-                        item.get("exchange_code") or item["code"]
-                    ),
-                    name=item.get("name"),
-                    country_code=item.get("country"),
-                    timezone=item.get("timezone"),
-                    source=self.name,
+            try:
+                payload = self._get("/market/exchanges")
+            except ValueError:
+                logger.error(
+                    "Exchange catalog parsing failed endpoint=/market/exchanges "
+                    "reason=invalid_json"
                 )
-                for item in payload
-                if isinstance(item, dict)
-                and (item.get("exchange_code") or item.get("code"))
-            ]
+                raise
+            if not isinstance(payload, list):
+                logger.error(
+                    "Exchange catalog parsing failed endpoint=/market/exchanges "
+                    "reason=unexpected_payload_type payload_type=%s",
+                    type(payload).__name__,
+                )
+                raise ValueError("Exchange catalog must be a list")
+            exchanges = []
+            for index, item in enumerate(payload):
+                if not isinstance(item, dict):
+                    continue
+                raw_code = item.get("exchange_code") or item.get("code")
+                if not raw_code:
+                    continue
+                try:
+                    code = normalize_exchange_code(raw_code)
+                except ValueError:
+                    logger.error(
+                        "Exchange catalog parsing failed endpoint=/market/exchanges "
+                        "reason=invalid_exchange_code row_index=%s code_type=%s "
+                        "code_length=%s",
+                        index,
+                        type(raw_code).__name__,
+                        len(raw_code) if isinstance(raw_code, str) else None,
+                    )
+                    raise
+                exchanges.append(
+                    ExchangeReference(
+                        code=code,
+                        name=item.get("name"),
+                        country_code=item.get("country"),
+                        timezone=item.get("timezone"),
+                        source=self.name,
+                    )
+                )
+            self._exchange_cache = exchanges
         return tuple(self._exchange_cache)
 
     def get_exchange_holidays(self, exchange_code):

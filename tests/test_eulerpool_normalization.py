@@ -20,6 +20,77 @@ from scripts.sync_exchange_holidays import acquire
 
 
 @pytest.mark.parametrize(
+    ("response_kwargs", "detail"),
+    [
+        ({"text": "secret-token"}, "reason=invalid_json"),
+        (
+            {"json": {"error": "secret-token"}},
+            "reason=unexpected_payload_type payload_type=dict",
+        ),
+        (
+            {"json": [{"code": "XNYS"}, {"code": "secret-token"}]},
+            "reason=invalid_exchange_code row_index=1 code_type=str code_length=12",
+        ),
+        (
+            {"json": [{"code": 123}]},
+            "reason=invalid_exchange_code row_index=0 code_type=int code_length=None",
+        ),
+    ],
+)
+def test_holiday_catalog_parse_failures_have_safe_diagnostics(
+    response_kwargs, detail, caplog
+):
+    session_factory = Mock()
+    with httpx.Client(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, **response_kwargs)
+        )
+    ) as client:
+        provider = EulerpoolProvider("secret-token", client=client)
+        with pytest.raises(RuntimeError) as failure:
+            sync_holidays(provider, [{"exchange": "XNYS"}], session_factory)
+        assert provider._exchange_cache is None
+        assert not client.is_closed
+    assert detail in caplog.text
+    assert "secret-token" not in caplog.text
+    assert "secret-token" not in str(failure.value)
+    session_factory.assert_not_called()
+
+
+def test_exchange_catalog_normalization_and_cache():
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json=[
+                {"exchange_code": " xnys ", "code": "ignored", "name": "NYSE"},
+                {"code": "xetr", "country": "DE", "timezone": "Europe/Berlin"},
+                {},
+                None,
+            ],
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        provider = EulerpoolProvider("secret-token", client=client)
+        expected = (
+            ExchangeReference(code="XNYS", name="NYSE", source="eulerpool"),
+            ExchangeReference(
+                code="XETR",
+                country_code="DE",
+                timezone="Europe/Berlin",
+                source="eulerpool",
+            ),
+        )
+        assert provider.get_exchanges() == expected
+        assert provider.get_exchanges() == expected
+        assert not client.is_closed
+    assert len(requests) == 1
+    assert requests[0].url.path == "/api/1/market/exchanges"
+
+
+@pytest.mark.parametrize(
     ("outcomes", "expected_status"),
     [
         ([Mock(), Mock()], "SUCCESS"),
