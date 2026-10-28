@@ -3,11 +3,11 @@ from __future__ import annotations
 import pytest
 
 from market_analysis.universes import UniverseDefinition, validate_constituents
+from market_sources.html_tables import HTMLTableParser
 from market_sources.models import UniverseMember
 from market_sources.universe.providers.wikipedia import (
     UNIVERSE_DEFINITIONS,
     _select_table,
-    _WikiTableParser,
     normalize_universe_symbol,
     parse_universe_members,
 )
@@ -24,7 +24,7 @@ def definition(*, minimum: int = 2, maximum: int = 3) -> UniverseDefinition:
 
 
 def test_parser_finds_wikitable_by_symbol_header() -> None:
-    parser = _WikiTableParser()
+    parser = HTMLTableParser()
     parser.feed(
         """
         <table class="wikitable sortable">
