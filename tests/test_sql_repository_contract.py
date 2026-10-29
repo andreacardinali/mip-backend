@@ -140,9 +140,38 @@ def test_alert_event_history_installer_matches_schema_and_owner_scope():
     assert "n.user_id = p_user_id" in installed.group()
     assert "ORDER BY e.created_at DESC, e.alert_event_id DESC" in installed.group()
     assert "'notification_status', n.status" in installed.group()
+    assert (
+        "'notification_skip_reason', e.payload ->> 'notification_skip_reason'"
+        in installed.group()
+    )
     assert "'sent_at', n.sent_at" in installed.group()
     assert "LIMIT least(greatest(coalesce(p_limit, 25), 1), 100)" in installed.group()
     assert "OFFSET greatest(coalesce(p_offset, 0), 0)" in installed.group()
+
+
+def test_alert_notification_skip_installer_matches_schema():
+    schema = (ROOT / "mip_schema.sql").read_text(encoding="utf-8")
+    installer = (ROOT / "oneshot/install_alert_event_history.sql").read_text(
+        encoding="utf-8"
+    )
+    pattern = r"FUNCTION public\.sp_alert_mark_notification_skipped\(.*?\$\$;"
+    snapshot = re.search(pattern, schema, re.DOTALL)
+    installed = re.search(pattern, installer, re.DOTALL)
+    assert snapshot is not None
+    assert installed is not None
+    assert " ".join(snapshot.group().split()) == " ".join(installed.group().split())
+    assert "p_status IS NULL OR p_status NOT IN" in installed.group()
+    assert "END;\n$$;" in installed.group()
+    for status in ("DISABLED", "PREFERENCE_DISABLED", "SOURCE_NOT_FOUND", "DUPLICATE"):
+        assert f"'{status}'" in installed.group()
+    assert (
+        "WHERE alert_event_id = p_event_id AND notification_id IS NULL"
+        in installed.group()
+    )
+    assert (
+        "jsonb_set(payload, '{notification_skip_reason}', to_jsonb(p_status))"
+        in installed.group()
+    )
 
 
 def test_consolidate_instrument_alias_conflicts_match_unique_index():

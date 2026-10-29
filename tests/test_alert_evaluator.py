@@ -318,6 +318,7 @@ def test_worker_keeps_rule_candidates_and_notifications_owner_scoped(
         call(alert_event_id=f"alert-{index}", notification_id=f"notification-{index}")
         for index in (1, 2)
     ]
+    repo.mark_notification_skipped.assert_not_called()
 
 
 @pytest.mark.parametrize("event_id", [None, "alert-1"])
@@ -351,6 +352,12 @@ def test_worker_respects_duplicate_registration_and_skipped_queue(
     assert result["notification_skipped"] == int(event_id is not None)
     assert queue.enqueue.call_count == int(event_id is not None)
     repo.mark_enqueued.assert_not_called()
+    if event_id is not None:
+        repo.mark_notification_skipped.assert_called_once_with(
+            alert_event_id=event_id, status=status
+        )
+    else:
+        repo.mark_notification_skipped.assert_not_called()
 
 
 def test_alert_repository_reads_json_candidates_and_preserves_null_signal():
@@ -376,6 +383,18 @@ def test_alert_repository_reads_json_candidates_and_preserves_null_signal():
         == "alert-1"
     )
     assert db.execute.call_args.args[1]["signal_id"] is None
+
+
+def test_alert_repository_persists_notification_skip_through_routine():
+    from alerts.repository import AlertRepository
+
+    db = MagicMock()
+    AlertRepository(db).mark_notification_skipped(
+        alert_event_id="alert-1", status="PREFERENCE_DISABLED"
+    )
+    statement, parameters = db.execute.call_args.args
+    assert "sp_alert_mark_notification_skipped" in str(statement)
+    assert parameters == {"event_id": "alert-1", "status": "PREFERENCE_DISABLED"}
 
 
 def test_worker_without_rules_does_not_fetch_candidates_or_create_queue(monkeypatch):

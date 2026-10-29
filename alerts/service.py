@@ -91,6 +91,9 @@ def evaluate_and_enqueue_market_alerts(
             )
             enqueued += 1
         else:
+            repo.mark_notification_skipped(
+                alert_event_id=event_id, status=result.status.value
+            )
             skipped += 1
     return {
         "status": "SUCCESS",

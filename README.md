@@ -280,7 +280,12 @@ function is included in `mip_schema.sql`; no live SQL or startup migration ran.
 
 History shows the saved event context and current queue status, not an audit
 trail of every delivery attempt. Events without a notification are labelled
-not queued; enqueue skip reasons are not persisted. Matches suppressed by
+not queued. Newly registered events persist the shared queue's skip reason:
+notifications disabled, preference disabled, destination unavailable or duplicate.
+The API exposes `notification_skip_reason`; older events retain an unknown reason.
+Reapply the updated history installer before deploying this worker version,
+even if history was already installed. No live SQL was executed.
+Matches suppressed by
 deduplication or cooldown create no event and do not appear. Notification errors
 and destination details are not exposed. Price events can have no signal ID.
 

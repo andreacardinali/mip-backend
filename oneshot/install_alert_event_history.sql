@@ -1,5 +1,18 @@
 BEGIN;
 
+CREATE OR REPLACE FUNCTION public.sp_alert_mark_notification_skipped(p_event_id uuid, p_status text) RETURNS void
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF p_status IS NULL OR p_status NOT IN ('DISABLED', 'PREFERENCE_DISABLED', 'SOURCE_NOT_FOUND', 'DUPLICATE') THEN
+        RAISE EXCEPTION 'Invalid notification skip reason';
+    END IF;
+    UPDATE public.alert_events
+    SET payload = jsonb_set(payload, '{notification_skip_reason}', to_jsonb(p_status))
+    WHERE alert_event_id = p_event_id AND notification_id IS NULL;
+END;
+$$;
+
 CREATE OR REPLACE FUNCTION public.sp_alert_list_user_events(p_user_id uuid, p_rule_id uuid, p_limit integer DEFAULT 25, p_offset integer DEFAULT 0) RETURNS SETOF jsonb
     LANGUAGE sql STABLE
     AS $$
@@ -12,6 +25,7 @@ CREATE OR REPLACE FUNCTION public.sp_alert_list_user_events(p_user_id uuid, p_ru
         'created_at', e.created_at,
         'notification_id', e.notification_id,
         'notification_status', n.status,
+        'notification_skip_reason', e.payload ->> 'notification_skip_reason',
         'sent_at', n.sent_at
     )
     FROM public.alert_events e

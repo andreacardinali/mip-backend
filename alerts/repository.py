@@ -117,6 +117,15 @@ class AlertRepository:
         ).scalar()
         return str(v) if v else None
 
+    def mark_notification_skipped(self, *, alert_event_id: str, status: str) -> None:
+        self.db.execute(
+            text(
+                "SELECT public.sp_alert_mark_notification_skipped("
+                "CAST(:event_id AS uuid), :status)"
+            ),
+            {"event_id": alert_event_id, "status": status},
+        )
+
     def mark_enqueued(self, *, alert_event_id: str, notification_id: str) -> None:
         self.db.execute(
             text(
