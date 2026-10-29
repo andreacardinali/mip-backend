@@ -8,6 +8,7 @@ from math import isfinite
 from typing import Any
 
 from alerts.models import AlertCandidate, AlertMatch, AlertRule
+from alerts.rule_configuration import effective_rule
 
 
 def _upper_set(value: Any) -> set[str]:
@@ -73,7 +74,10 @@ def _matches(rule: AlertRule, item: AlertCandidate) -> bool:
     ):
         return False
     if rule.alert_type == "SIGNAL_CHANGE":
-        return item.signal_event_id is not None
+        events = c.get("event_types", [])
+        return item.signal_event_id is not None and (
+            not events or item.event_type in events
+        )
     return (
         item.composite_score >= _number(c.get("min_composite_score"), 0.75)
         and item.consensus_score >= _number(c.get("min_consensus_score"), 0.0)
@@ -118,9 +122,12 @@ def evaluate_alerts(
         ):
             continue
         for item in items:
-            if rule.alert_type != "MARKET_SIGNAL" and not _fresh(rule, item, now):
+            selected = effective_rule(rule, item.instrument_id)
+            if selected is None:
                 continue
-            if not _matches(rule, item):
+            if selected.alert_type != "MARKET_SIGNAL" and not _fresh(selected, item, now):
+                continue
+            if not _matches(selected, item):
                 continue
             title = f"{item.symbol}: segnale {item.direction.upper()}"
             lines = [
@@ -137,14 +144,14 @@ def evaluate_alerts(
                 lines.extend(("", item.summary.strip()))
             if rule.alert_type in ("FIXED_PRICE", "PERCENT_MOVE"):
                 title = f"{item.symbol}: soglia di prezzo"
-                price_direction = rule.conditions.get(
+                price_direction = selected.conditions.get(
                     "price_direction",
                     "ANY" if rule.alert_type == "PERCENT_MOVE" else "UP",
                 )
                 lines = [
                     f"Regola: {rule.name}",
                     f"Prezzo: {item.last_price}",
-                    f"Soglia: {rule.conditions['threshold']} ({price_direction})",
+                    f"Soglia: {selected.conditions['threshold']} ({price_direction})",
                     f"Osservato: {item.observed_at}",
                 ]
                 if rule.alert_type == "PERCENT_MOVE":
@@ -187,7 +194,7 @@ def evaluate_alerts(
             }
             out.append(
                 AlertMatch(
-                    rule,
+                    selected,
                     item,
                     _fingerprint(rule, item),
                     title,

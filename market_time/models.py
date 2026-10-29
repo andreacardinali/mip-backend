@@ -62,3 +62,4 @@ class MarketClock:
     coverage_end: date | None = None
     source: str | None = None
     reason: str | None = None
+    previous_session: MarketSession | None = None

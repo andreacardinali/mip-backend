@@ -27,7 +27,7 @@ class ExchangeCalendarsProvider:
             coverage_end = calendar.last_session.date()
             if not coverage_start <= at.date() < coverage_end:
                 raise CalendarUnavailable("Instant outside calendar coverage")
-            start = max(coverage_start, at.date() - timedelta(days=2))
+            start = max(coverage_start, at.date() - timedelta(days=32))
             end = min(coverage_end, at.date() + timedelta(days=32))
             labels = calendar.sessions_in_range(start.isoformat(), end.isoformat())
             sessions = []

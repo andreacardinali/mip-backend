@@ -104,6 +104,29 @@ def test_unknown_timezone_is_rejected():
         as_utc(datetime(2026, 7, 1), source_timezone="Unknown/Exchange")
 
 
+def test_clock_previous_session_survives_weekend_and_holiday():
+    previous = MarketSession(
+        date(2026, 7, 2), datetime(2026, 7, 2, 13, 30, tzinfo=UTC),
+        datetime(2026, 7, 2, 20, tzinfo=UTC),
+    )
+    current = MarketSession(
+        date(2026, 7, 6), datetime(2026, 7, 6, 13, 30, tzinfo=UTC),
+        datetime(2026, 7, 6, 20, tzinfo=UTC),
+    )
+    repository = Mock()
+    repository.get_exchange.return_value = ExchangeHours("TEST", "XNYS", "UTC")
+    calendars = Mock()
+    calendars.window.return_value = CalendarWindow(
+        (previous, current), date(2026, 1, 1), date(2027, 1, 1), "test"
+    )
+    clock = MarketTimeService(repository, calendars).snapshot(
+        "TEST", at=datetime(2026, 7, 6, 14, tzinfo=UTC)
+    )
+    assert clock.status == MarketStatus.OPEN
+    assert clock.previous_session == previous
+    assert clock.session == current
+
+
 def test_exchange_repository_uses_only_explicit_mapping():
     db = Mock()
     db.execute.return_value.mappings.return_value.one_or_none.return_value = {

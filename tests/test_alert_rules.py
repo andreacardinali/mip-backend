@@ -117,6 +117,25 @@ def test_rule_payload_normalizes_strategy_codes():
     assert payload["conditions"]["min_composite_score"] == 0.75
 
 
+def test_instrument_override_is_validated_and_normalized():
+    instrument = "00000000-0000-0000-0000-000000000001"
+    payload = validate_rule_payload({
+        "name": "Watchlist", "conditions": {
+            "notification_mode": "DIGEST", "regular_session_only": True,
+            "instrument_overrides": {instrument: {
+                "strategy_codes": [" supertrend "], "min_composite_score": 0.9,
+            }},
+        },
+    })
+    override = payload["conditions"]["instrument_overrides"][instrument]
+    assert override["strategy_codes"] == ["SUPERTREND"]
+    assert override["min_composite_score"] == 0.9
+    with pytest.raises(ValueError):
+        validate_rule_payload({"name": "Bad", "conditions": {
+            "instrument_overrides": {instrument: {"enabled": "false"}},
+        }})
+
+
 @pytest.mark.parametrize("alert_type", ["FIXED_PRICE", "PERCENT_MOVE", "SIGNAL_CHANGE"])
 def test_monitoring_rule_scopes_and_types(alert_type):
     conditions = {

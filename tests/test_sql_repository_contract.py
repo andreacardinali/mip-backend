@@ -33,6 +33,21 @@ def sql_literals(relative_path):
         yield " ".join(node.args[0].value.split())
 
 
+def test_scan_members_include_collections_without_duplicate_instruments():
+    schema = (ROOT / "mip_schema.sql").read_text(encoding="utf-8")
+    installer = (ROOT / "oneshot/install_screener_monitoring_extensions.sql").read_text(
+        encoding="utf-8"
+    )
+    pattern = r"FUNCTION public\.sp_market_analysis_list_universe_members\(.*?\$\$;"
+    for source in (schema, installer):
+        routine = re.search(pattern, source, re.DOTALL).group()
+        assert "FROM public.instruments i" in routine
+        assert "public.watchlist_items wi" in routine
+        assert "pos.quantity <> 0" in routine
+        assert "p_universe_id AS universe_id" in routine
+        assert routine.count("EXISTS (") == 3
+
+
 @pytest.mark.parametrize("relative_path", RUNTIME_FILES)
 def test_runtime_sql_is_select_only_without_embedded_business_queries(relative_path):
     for sql in sql_literals(relative_path):

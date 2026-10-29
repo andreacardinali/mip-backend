@@ -58,6 +58,28 @@ def test_conflict_rejected():
     )
 
 
+def test_override_pauses_instrument_and_changes_threshold():
+    selected = replace(rule(threshold=100), alert_type="FIXED_PRICE")
+    candidate = item(last_price=110, observed_at="2026-10-29T12:00:00+00:00")
+    now = datetime(2026, 10, 29, 12, tzinfo=UTC)
+    for override in ({"enabled": False}, {"threshold": 120}):
+        conditions = {**selected.conditions, "instrument_overrides": {
+            candidate.instrument_id: override,
+        }}
+        assert not evaluate_alerts([replace(selected, conditions=conditions)], [candidate], now=now)
+    conditions = {**selected.conditions, "instrument_overrides": {
+        candidate.instrument_id: {"threshold": 105},
+    }}
+    match = evaluate_alerts([replace(selected, conditions=conditions)], [candidate], now=now)[0]
+    assert "105" in match.message
+
+
+def test_lifecycle_event_filter():
+    selected = replace(rule(event_types=["CLOSED"]), alert_type="SIGNAL_CHANGE")
+    candidate = item(signal_event_id="event", event_type="CREATED", observed_at="2026-10-29T12:00:00+00:00")
+    assert not evaluate_alerts([selected], [candidate], now=datetime(2026, 10, 29, 12, tzinfo=UTC))
+
+
 def test_strategy_filter_is_case_insensitive_and_matches_any_selected_strategy():
     matches = evaluate_alerts(
         [rule(strategy_codes=[" call_entry_setup ", "SUPERTREND"])],
@@ -293,6 +315,16 @@ def test_worker_keeps_rule_candidates_and_notifications_owner_scoped(
     monkeypatch.setattr(service, "AlertRepository", lambda db: repo)
     monkeypatch.setattr(service, "NotificationQueue", lambda db, **kwargs: queue)
 
+    clock = MagicMock()
+    from market_time.models import MarketStatus
+
+    clock.snapshot.return_value.status = MarketStatus.OPEN
+    clock.snapshot.return_value.previous_session.session_date = observed.date() - timedelta(days=1)
+    repo.instrument_exchange.return_value = "NASDAQ"
+    repo.session_reference.return_value = {
+        "close": 100, "ts": (observed - timedelta(days=1)).isoformat()
+    }
+    monkeypatch.setattr(service, "MarketTimeService", lambda *args: clock)
     result = service.evaluate_and_enqueue_market_alerts(None, max_candidates=17)
 
     assert result["candidates"] == result["matches"] == result["enqueued"] == 2

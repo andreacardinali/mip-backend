@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import hashlib
+import json
+from dataclasses import replace
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -7,6 +11,11 @@ from sqlalchemy.orm import Session
 from alerts.evaluator import evaluate_alerts
 from alerts.models import AlertCandidate
 from alerts.repository import AlertRepository
+from alerts.rule_configuration import effective_rule
+from market_time.calendar import ExchangeCalendarsProvider
+from market_time.models import MarketStatus
+from market_time.repository import SQLExchangeHoursRepository
+from market_time.service import MarketTimeService
 from notifications.queue import NotificationQueue
 
 
@@ -53,13 +62,72 @@ def evaluate_and_enqueue_market_alerts(
         }
     candidate_count = 0
     matches = []
+    market_time = MarketTimeService(SQLExchangeHoursRepository(db), ExchangeCalendarsProvider())
     for rule in rules:
         rows = repo.list_rule_candidates(rule.rule_id, limit=max_candidates)
         candidates = [_candidate(row) for row in rows]
         candidate_count += len(candidates)
-        matches.extend(evaluate_alerts([rule], candidates))
+        for candidate in candidates:
+            selected = effective_rule(rule, candidate.instrument_id)
+            if selected is None:
+                continue
+            session_key = None
+            needs_clock = (
+                selected.conditions.get("regular_session_only", False)
+                or selected.conditions.get("once_per_session", False)
+                or selected.alert_type == "PERCENT_MOVE"
+            )
+            if needs_clock:
+                exchange = repo.instrument_exchange(candidate.instrument_id)
+                if not exchange:
+                    if selected.alert_type == "PERCENT_MOVE" or selected.conditions.get("regular_session_only"):
+                        continue
+                else:
+                    clock = market_time.snapshot(exchange)
+                    if selected.conditions.get("regular_session_only") and clock.status != MarketStatus.OPEN:
+                        continue
+                    if clock.session:
+                        session_key = f"{exchange}:{clock.session.session_date}"
+                    if selected.alert_type == "PERCENT_MOVE":
+                        if not candidate.observed_at:
+                            continue
+                        observed_clock = market_time.snapshot(exchange, at=datetime.fromisoformat(candidate.observed_at))
+                        previous = observed_clock.previous_session
+                        if observed_clock.status == MarketStatus.UNKNOWN or previous is None:
+                            continue
+                        reference = repo.session_reference(candidate.instrument_id, previous.session_date)
+                        if not reference:
+                            continue
+                        candidate = replace(candidate, reference_price=float(reference["close"]), reference_at=str(reference["ts"]))
+            evaluated = evaluate_alerts([selected], [candidate])
+            if selected.alert_type in ("FIXED_PRICE", "PERCENT_MOVE") and selected.conditions.get("crossing_only", False):
+                if not candidate.observed_at or not candidate.last_price or candidate.last_price <= 0:
+                    continue
+                observed = datetime.fromisoformat(candidate.observed_at)
+                age = (datetime.now(UTC) - observed).total_seconds()
+                if not 0 <= age <= selected.conditions.get("max_age_minutes", 60) * 60:
+                    continue
+                state_key = hashlib.sha256(json.dumps({
+                    "threshold": selected.conditions.get("threshold"),
+                    "direction": selected.conditions.get("price_direction"),
+                    "reference_at": candidate.reference_at if selected.alert_type == "PERCENT_MOVE" else None,
+                }, sort_keys=True).encode()).hexdigest()
+                generation = repo.observe_threshold(
+                    rule_id=selected.rule_id, instrument_id=candidate.instrument_id,
+                    observed_at=candidate.observed_at, matched=bool(evaluated), state_key=state_key,
+                )
+                if generation is None:
+                    continue
+                evaluated = [replace(match, fingerprint=f"{state_key}:{generation}") for match in evaluated]
+            for match in evaluated:
+                context = {**match.context, "entry_price": candidate.last_price,
+                           "session_key": session_key,
+                           "once_per_session": selected.conditions.get("once_per_session", False),
+                           "direction_key": selected.conditions.get("price_direction", candidate.direction)}
+                matches.append(replace(match, context=context))
     queue = NotificationQueue(db, enabled=notifications_enabled)
     registered = enqueued = duplicates = skipped = 0
+    deliveries = []
     for m in matches:
         event_id = repo.register_match(
             rule_id=m.rule.rule_id,
@@ -72,29 +140,41 @@ def evaluate_and_enqueue_market_alerts(
             duplicates += 1
             continue
         registered += 1
+        deliveries.append((m, event_id))
+    groups = {}
+    for match, event_id in deliveries:
+        key = (
+            match.rule.user_id, match.rule.channel, match.rule.alert_type,
+            match.rule.severity,
+            None if match.rule.conditions.get("notification_mode") == "DIGEST" else event_id,
+        )
+        groups.setdefault(key, []).append((match, event_id))
+    for group in groups.values():
+        m, event_id = group[0]
+        digest = m.rule.conditions.get("notification_mode") == "DIGEST"
+        ids = [identifier for _, identifier in group]
+        digest_key = hashlib.sha256(":".join(sorted(ids)).encode()).hexdigest()
         result = queue.enqueue(
             user_id=m.rule.user_id,
-            notification_key=f"MARKET_ALERT:{event_id}",
+            notification_key=f"MARKET_ALERT_DIGEST:{digest_key}" if digest else f"MARKET_ALERT:{event_id}",
             notification_type=m.rule.alert_type,
             entity_id=None,
-            symbol=m.candidate.symbol,
+            symbol=None if digest else m.candidate.symbol,
             event_key=event_id,
             severity=m.rule.severity,
-            title=m.title,
-            message=m.message,
-            context=m.context,
+            title=f"Riepilogo alert ({len(group)})" if digest else m.title,
+            message="\n\n".join(match.message for match, _ in group) if digest else m.message,
+            context={"events": [match.context for match, _ in group]} if digest else m.context,
             channel=m.rule.channel,
         )
         if result.created and result.notification_id:
-            repo.mark_enqueued(
-                alert_event_id=event_id, notification_id=result.notification_id
-            )
+            for identifier in ids:
+                repo.mark_enqueued(alert_event_id=identifier, notification_id=result.notification_id)
             enqueued += 1
         else:
-            repo.mark_notification_skipped(
-                alert_event_id=event_id, status=result.status.value
-            )
-            skipped += 1
+            for identifier in ids:
+                repo.mark_notification_skipped(alert_event_id=identifier, status=result.status.value)
+            skipped += len(ids)
     return {
         "status": "SUCCESS",
         "rules": len(rules),

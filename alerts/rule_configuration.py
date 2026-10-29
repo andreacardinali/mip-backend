@@ -61,6 +61,12 @@ def validate_rule_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "threshold",
         "price_direction",
         "max_age_minutes",
+        "regular_session_only",
+        "crossing_only",
+        "once_per_session",
+        "notification_mode",
+        "event_types",
+        "instrument_overrides",
     }:
         raise ValueError("Invalid alert conditions")
     normalized: dict[str, Any] = {}
@@ -80,6 +86,26 @@ def validate_rule_payload(payload: dict[str, Any]) -> dict[str, Any]:
     if type(max_age) is not int or not 1 <= max_age <= 10080:
         raise ValueError("Invalid maximum data age")
     normalized["max_age_minutes"] = max_age
+    for key, default in (
+        ("regular_session_only", False),
+        ("crossing_only", True),
+        ("once_per_session", True),
+    ):
+        value = conditions.get(key, default)
+        if type(value) is not bool:
+            raise ValueError(f"{key} must be a boolean")
+        normalized[key] = value
+    mode = conditions.get("notification_mode", "IMMEDIATE")
+    if mode not in ("IMMEDIATE", "DIGEST"):
+        raise ValueError("Invalid notification mode")
+    normalized["notification_mode"] = mode
+    event_types = conditions.get("event_types", [])
+    if not isinstance(event_types, list) or any(
+        value not in ("CREATED", "CONFIRMED", "DIRECTION_CHANGED", "CLOSED", "EXPIRED")
+        for value in event_types
+    ):
+        raise ValueError("Invalid lifecycle event types")
+    normalized["event_types"] = list(dict.fromkeys(event_types))
     if alert_type in ("FIXED_PRICE", "PERCENT_MOVE"):
         threshold = conditions.get("threshold")
         if (
@@ -118,6 +144,35 @@ def validate_rule_payload(payload: dict[str, Any]) -> dict[str, Any]:
     if type(count) is not int or not 1 <= count <= 2147483647:
         raise ValueError("Minimum strategy count must be a positive integer")
     normalized["min_strategy_count"] = count
+    overrides = conditions.get("instrument_overrides", {})
+    if not isinstance(overrides, dict) or len(overrides) > 500:
+        raise ValueError("Invalid instrument overrides")
+    normalized_overrides = {}
+    for instrument_id, override in overrides.items():
+        try:
+            instrument_id = str(UUID(instrument_id))
+        except (ValueError, TypeError, AttributeError) as error:
+            raise ValueError("Invalid override instrument ID") from error
+        if not isinstance(override, dict) or override.keys() - {
+            "enabled", "threshold", "price_direction", "strategy_codes", "event_types",
+            "min_composite_score", "min_consensus_score", "max_conflict_score",
+            "min_strategy_count", "regular_session_only",
+        }:
+            raise ValueError("Invalid instrument override")
+        override_enabled = override.get("enabled", True)
+        if type(override_enabled) is not bool:
+            raise ValueError("Override enabled must be a boolean")
+        merged = {**normalized, **override}
+        merged.pop("instrument_overrides", None)
+        merged.pop("enabled", None)
+        checked = validate_rule_payload({
+            "name": name, "alert_type": alert_type, "conditions": merged,
+        })["conditions"]
+        normalized_overrides[instrument_id] = {
+            "enabled": override_enabled,
+            **{key: checked[key] for key in override if key != "enabled"},
+        }
+    normalized["instrument_overrides"] = normalized_overrides
     return {
         "name": name.strip(),
         "alert_type": alert_type,
@@ -127,3 +182,12 @@ def validate_rule_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "cooldown_minutes": cooldown,
         "enabled": enabled,
     }
+
+
+def effective_rule(rule, instrument_id: str):
+    from dataclasses import replace
+
+    override = rule.conditions.get("instrument_overrides", {}).get(instrument_id, {})
+    if override.get("enabled") is False:
+        return None
+    return replace(rule, conditions={**rule.conditions, **override})
