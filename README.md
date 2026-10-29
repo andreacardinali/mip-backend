@@ -216,12 +216,24 @@ delete it, preserving event history. Delivery uses the existing notification pip
 Before using this API on the live instance, review and manually apply
 `oneshot/install_alert_rule_management.sql` after backup and PostgreSQL validation.
 It installs only `sp_alert_list_user_rules`; no startup migration is performed.
-The schema snapshots contain the same routine. No live migration was run.
+`mip_schema.sql` contains the same routine. No live migration was run.
 
 Conditions accept symbols, directions, verdicts, origins and supporting strategy
 codes, plus normalized score thresholds (0 to 1), minimum strategy count and
 cooldown in minutes. Empty filter lists impose no restriction. Multiple selected
 strategy codes match any supporting strategy; the evaluator remains centralized.
+
+Offline checks for alert configuration, evaluation, API ownership/transactions and
+stored-routine contracts:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/test_alert_rules.py tests/test_alert_evaluator.py tests/test_sql_repository_contract.py -q -rs
+```
+
+API tests use simulated authentication and database sessions, never the live
+database. They require FastAPI and HTTPX from the declared dependencies; skipped
+API tests do not validate the endpoints. Real authentication, PostgreSQL ownership
+and notification delivery still require integration verification before activation.
 
 ### Scheduler Job Rename
 

@@ -57,18 +57,22 @@ def test_runtime_sp_calls_exist_in_schema():
                 )
 
 
-def test_alert_rule_management_installer_matches_snapshots():
+def test_alert_rule_management_installer_matches_schema():
     installer = (ROOT / "oneshot/install_alert_rule_management.sql").read_text(
         encoding="utf-8"
     )
     pattern = r"FUNCTION public\.sp_alert_list_user_rules\(.*?\$\$;"
     installed = re.search(pattern, installer, re.DOTALL)
     assert installed is not None
-    for filename in ("mip_schema.sql",):
-        schema = (ROOT / filename).read_text(encoding="utf-8")
-        snapshot = re.search(pattern, schema, re.DOTALL)
-        assert snapshot is not None
-        assert " ".join(installed.group().split()) == " ".join(snapshot.group().split())
+    schema = (ROOT / "mip_schema.sql").read_text(encoding="utf-8")
+    snapshot = re.search(pattern, schema, re.DOTALL)
+    assert snapshot is not None
+    installed_header, installed_body = installed.group().split("$$", 1)
+    snapshot_header, snapshot_body = snapshot.group().split("$$", 1)
+    assert re.sub(
+        r"\s*([()])\s*", r"\1", " ".join(installed_header.split())
+    ) == re.sub(r"\s*([()])\s*", r"\1", " ".join(snapshot_header.split()))
+    assert " ".join(installed_body.split()) == " ".join(snapshot_body.split())
     assert "WHERE r.user_id = p_user_id" in installed.group()
     assert "WHERE r.enabled" not in installed.group()
 

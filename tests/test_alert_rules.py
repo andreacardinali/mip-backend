@@ -1,7 +1,12 @@
 import json
-from unittest.mock import Mock
+import runpy
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from alerts.repository import AlertRepository
 from alerts.rule_configuration import validate_rule_payload
@@ -90,3 +95,151 @@ def test_rule_payload_normalizes_strategy_codes():
 def test_invalid_rule_payload_rejected(payload):
     with pytest.raises(ValueError):
         validate_rule_payload(payload)
+
+
+@pytest.fixture
+def alert_api():
+    pytest.importorskip("fastapi")
+    pytest.importorskip("httpx")
+    from fastapi import FastAPI, HTTPException
+    from fastapi.testclient import TestClient
+
+    owner = {"user_id": "00000000-0000-0000-0000-000000000001"}
+    authentication = {"user": owner}
+
+    def get_current_user():
+        if authentication["user"] is None:
+            raise HTTPException(status_code=401, detail="Not authenticated")
+        return authentication["user"]
+
+    database = Mock()
+    repository = Mock()
+    repository.save_user_rule.return_value = (
+        "00000000-0000-0000-0000-000000000002"
+    )
+    security = SimpleNamespace(CurrentUser=dict, get_current_user=get_current_user)
+    with patch.dict(
+        sys.modules,
+        {
+            "db": SimpleNamespace(SessionLocal=Mock(return_value=database)),
+            "auth.security": security,
+            "alerts.repository": SimpleNamespace(
+                AlertRepository=Mock(return_value=repository)
+            ),
+        },
+    ):
+        namespace = runpy.run_path(
+            str(Path(__file__).resolve().parents[1] / "routers" / "alerts.py")
+        )
+    app = FastAPI()
+    app.include_router(namespace["router"], prefix="/api/alerts")
+    with TestClient(app, raise_server_exceptions=False) as client:
+        yield client, namespace["SessionLocal"], database, repository, authentication
+
+
+def test_alert_api_lists_only_authenticated_owner(alert_api):
+    client, session_factory, database, repository, authentication = alert_api
+    repository.list_user_rules.return_value = [
+        {"rule_id": "rule-1", "name": "Entry", "enabled": False}
+    ]
+    response = client.get("/api/alerts")
+    assert response.status_code == 200
+    assert response.json()[0]["enabled"] is False
+    repository.list_user_rules.assert_called_once_with(
+        authentication["user"]["user_id"]
+    )
+    session_factory.assert_called_once_with()
+    database.close.assert_called_once_with()
+    database.commit.assert_not_called()
+
+
+@pytest.mark.parametrize("method", ["get", "post", "put"])
+def test_alert_api_requires_authentication(alert_api, method):
+    client, session_factory, _, _, authentication = alert_api
+    authentication["user"] = None
+    url = "/api/alerts"
+    if method == "put":
+        url += "/00000000-0000-0000-0000-000000000002"
+    options = {} if method == "get" else {"json": {"name": "Entry"}}
+    assert client.request(method, url, **options).status_code == 401
+    session_factory.assert_not_called()
+
+
+@pytest.mark.parametrize("method", ["post", "put"])
+def test_alert_api_saves_normalized_rule_for_authenticated_owner(alert_api, method):
+    client, _, database, repository, authentication = alert_api
+    rule_id = repository.save_user_rule.return_value
+    url = "/api/alerts" if method == "post" else f"/api/alerts/{rule_id}"
+    payload = {
+        "name": " Entry ",
+        "conditions": {"strategy_codes": [" call_entry_setup "]},
+    }
+    response = client.request(method, url, json=payload)
+    assert response.status_code == 200
+    assert response.json() == {"rule_id": rule_id}
+    repository.save_user_rule.assert_called_once_with(
+        authentication["user"]["user_id"],
+        None if method == "post" else rule_id,
+        validate_rule_payload(payload),
+    )
+    database.commit.assert_called_once_with()
+    database.rollback.assert_not_called()
+    database.close.assert_called_once_with()
+
+
+@pytest.mark.parametrize(
+    ("method", "url", "payload"),
+    [
+        ("post", "/api/alerts", {"name": "Entry", "user_id": "other-user"}),
+        ("post", "/api/alerts", {"name": " "}),
+        ("post", "/api/alerts", {"name": "Entry", "cooldown_minutes": -1}),
+        ("post", "/api/alerts", []),
+        ("put", "/api/alerts/not-a-uuid", {"name": "Entry"}),
+    ],
+)
+def test_alert_api_rejects_invalid_input_before_opening_session(
+    alert_api, method, url, payload
+):
+    client, session_factory, _, repository, _ = alert_api
+    assert client.request(method, url, json=payload).status_code == 422
+    session_factory.assert_not_called()
+    repository.save_user_rule.assert_not_called()
+
+
+def test_alert_api_missing_or_foreign_rule_rolls_back(alert_api):
+    client, _, database, repository, _ = alert_api
+    repository.save_user_rule.return_value = None
+    response = client.put(
+        "/api/alerts/00000000-0000-0000-0000-000000000002",
+        json={"name": "Entry"},
+    )
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Alert rule not found"}
+    database.commit.assert_not_called()
+    database.rollback.assert_called_once_with()
+    database.close.assert_called_once_with()
+
+
+@pytest.mark.parametrize("sqlstate", ["23505", "23503", None])
+def test_alert_api_database_errors_roll_back(alert_api, sqlstate):
+    client, _, database, repository, _ = alert_api
+    original = Exception("database error")
+    original.sqlstate = sqlstate
+    repository.save_user_rule.side_effect = IntegrityError("statement", {}, original)
+    response = client.post("/api/alerts", json={"name": "Entry"})
+    assert response.status_code == (409 if sqlstate == "23505" else 500)
+    if sqlstate == "23505":
+        assert response.json() == {"detail": "Alert rule name already exists"}
+    database.commit.assert_not_called()
+    database.rollback.assert_called_once_with()
+    database.close.assert_called_once_with()
+
+
+def test_alert_api_commit_failure_rolls_back(alert_api):
+    client, _, database, _, _ = alert_api
+    database.commit.side_effect = RuntimeError("commit failed")
+    response = client.post("/api/alerts", json={"name": "Entry"})
+    assert response.status_code == 500
+    database.commit.assert_called_once_with()
+    database.rollback.assert_called_once_with()
+    database.close.assert_called_once_with()
