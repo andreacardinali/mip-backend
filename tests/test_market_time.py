@@ -106,11 +106,13 @@ def test_unknown_timezone_is_rejected():
 
 def test_clock_previous_session_survives_weekend_and_holiday():
     previous = MarketSession(
-        date(2026, 7, 2), datetime(2026, 7, 2, 13, 30, tzinfo=UTC),
+        date(2026, 7, 2),
+        datetime(2026, 7, 2, 13, 30, tzinfo=UTC),
         datetime(2026, 7, 2, 20, tzinfo=UTC),
     )
     current = MarketSession(
-        date(2026, 7, 6), datetime(2026, 7, 6, 13, 30, tzinfo=UTC),
+        date(2026, 7, 6),
+        datetime(2026, 7, 6, 13, 30, tzinfo=UTC),
         datetime(2026, 7, 6, 20, tzinfo=UTC),
     )
     repository = Mock()

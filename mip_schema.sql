@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict JJkCKnzemjtYiSr0iYRcvdaLU4uNDG45gHwmrxbzWCtIHdabcN4PWFv6RUz4NTt
+\restrict iegz66Kv1IWDKWkbbMRaRLbb42QPmxXTqMsLU4rCULGrCNumefm5ALIVSGyyUkA
 
 -- Dumped from database version 18.6 (Debian 18.6-1.pgdg13+2)
 -- Dumped by pg_dump version 18.6 (Debian 18.6-1.pgdg13+2)
@@ -281,6 +281,17 @@ $$;
 
 
 --
+-- Name: sp_alert_instrument_exchange(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_alert_instrument_exchange(p_instrument_id uuid) RETURNS text
+    LANGUAGE sql STABLE
+    AS $$
+  SELECT exchange::text FROM public.instruments WHERE instrument_id=p_instrument_id
+$$;
+
+
+--
 -- Name: sp_alert_list_enabled_rules(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -452,6 +463,31 @@ $$;
 
 
 --
+-- Name: sp_alert_observe_threshold(uuid, uuid, timestamp with time zone, boolean, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_alert_observe_threshold(p_rule_id uuid, p_instrument_id uuid, p_observed_at timestamp with time zone, p_matched boolean, p_state_key text) RETURNS bigint
+    LANGUAGE plpgsql
+    AS $$
+DECLARE s public.alert_threshold_state%ROWTYPE;
+BEGIN
+  PERFORM pg_advisory_xact_lock(hashtextextended(p_rule_id::text || ':' || p_instrument_id::text, 0));
+  SELECT * INTO s FROM public.alert_threshold_state
+  WHERE rule_id=p_rule_id AND instrument_id=p_instrument_id FOR UPDATE;
+  IF FOUND AND p_observed_at<=s.observed_at THEN RETURN NULL; END IF;
+  INSERT INTO public.alert_threshold_state AS existing (rule_id,instrument_id,observed_at,matched,state_key)
+  VALUES(p_rule_id,p_instrument_id,p_observed_at,p_matched,p_state_key)
+  ON CONFLICT(rule_id,instrument_id) DO UPDATE SET
+    observed_at=excluded.observed_at, matched=excluded.matched, state_key=excluded.state_key,
+    generation=existing.generation + CASE WHEN existing.state_key<>excluded.state_key
+      OR (NOT existing.matched AND excluded.matched) THEN 1 ELSE 0 END
+  RETURNING * INTO s;
+  IF NOT s.matched THEN RETURN NULL; END IF;
+  RETURN s.generation;
+END $$;
+
+
+--
 -- Name: sp_alert_register_match(uuid, uuid, uuid, character varying, jsonb); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -460,57 +496,53 @@ CREATE FUNCTION public.sp_alert_register_match(p_rule_id uuid, p_instrument_id u
     AS $$
 DECLARE r public.alert_rules%ROWTYPE; e public.alert_events%ROWTYPE; v uuid;
 BEGIN
-    PERFORM pg_advisory_xact_lock(hashtextextended(p_rule_id::text || ':' || p_instrument_id::text, 0));
-    SELECT * INTO r FROM public.alert_rules WHERE rule_id=p_rule_id AND enabled FOR SHARE;
-    IF NOT FOUND THEN RETURN NULL; END IF;
-    SELECT * INTO e FROM public.alert_events WHERE rule_id=p_rule_id AND instrument_id=p_instrument_id ORDER BY created_at DESC LIMIT 1;
-    IF FOUND AND (e.fingerprint=p_fingerprint OR e.created_at>now()-make_interval(mins=>r.cooldown_minutes)) THEN RETURN NULL; END IF;
-    IF coalesce((p_payload->>'once_per_session')::boolean, false)
-       AND p_payload->>'session_key' IS NOT NULL AND EXISTS (
-        SELECT 1 FROM public.alert_events a
-        WHERE a.rule_id=p_rule_id AND a.instrument_id=p_instrument_id
-          AND a.payload->>'session_key'=p_payload->>'session_key'
-          AND a.payload->>'direction_key' IS NOT DISTINCT FROM p_payload->>'direction_key'
-    ) THEN RETURN NULL; END IF;
-    INSERT INTO public.alert_events(rule_id,user_id,instrument_id,signal_id,fingerprint,payload)
-    VALUES(p_rule_id,r.user_id,p_instrument_id,p_signal_id,p_fingerprint,coalesce(p_payload,'{}'))
-    ON CONFLICT(rule_id,instrument_id,fingerprint) DO NOTHING RETURNING alert_event_id INTO v;
-    RETURN v;
+  PERFORM pg_advisory_xact_lock(hashtextextended(p_rule_id::text || ':' || p_instrument_id::text, 0));
+  SELECT * INTO r FROM public.alert_rules WHERE rule_id=p_rule_id AND enabled FOR SHARE;
+  IF NOT FOUND THEN RETURN NULL; END IF;
+  SELECT * INTO e FROM public.alert_events WHERE rule_id=p_rule_id AND instrument_id=p_instrument_id ORDER BY created_at DESC LIMIT 1;
+  IF FOUND AND (e.fingerprint=p_fingerprint OR e.created_at>now()-make_interval(mins=>r.cooldown_minutes)) THEN RETURN NULL; END IF;
+  IF coalesce((p_payload->>'once_per_session')::boolean, false)
+     AND p_payload->>'session_key' IS NOT NULL AND EXISTS (
+    SELECT 1 FROM public.alert_events a
+    WHERE a.rule_id=p_rule_id AND a.instrument_id=p_instrument_id
+      AND a.payload->>'session_key'=p_payload->>'session_key'
+      AND a.payload->>'direction_key' IS NOT DISTINCT FROM p_payload->>'direction_key'
+  ) THEN RETURN NULL; END IF;
+  INSERT INTO public.alert_events(rule_id,user_id,instrument_id,signal_id,fingerprint,payload)
+  VALUES(p_rule_id,r.user_id,p_instrument_id,p_signal_id,p_fingerprint,coalesce(p_payload,'{}'))
+  ON CONFLICT(rule_id,instrument_id,fingerprint) DO NOTHING RETURNING alert_event_id INTO v;
+  RETURN v;
 END $$;
 
-CREATE FUNCTION public.sp_alert_instrument_exchange(p_instrument_id uuid) RETURNS text
-LANGUAGE sql STABLE AS $$
-    SELECT exchange::text FROM public.instruments WHERE instrument_id=p_instrument_id
+
+--
+-- Name: sp_alert_session_reference(uuid, date); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_alert_session_reference(p_instrument_id uuid, p_session_date date) RETURNS jsonb
+    LANGUAGE sql STABLE
+    AS $$
+  SELECT jsonb_build_object('close', close, 'ts', ts)
+  FROM public.price_history
+  WHERE instrument_id=p_instrument_id AND close>0
+    AND (ts AT TIME ZONE 'UTC')::date=p_session_date
+  ORDER BY ts DESC, price_id DESC LIMIT 1
 $$;
 
-CREATE FUNCTION public.sp_alert_session_reference(p_instrument_id uuid, p_opens_at timestamptz, p_closes_at timestamptz) RETURNS jsonb
-LANGUAGE sql STABLE AS $$
-    SELECT jsonb_build_object('close', close, 'ts', ts)
-    FROM public.price_history
-    WHERE instrument_id=p_instrument_id AND close>0
-            AND ts >= p_opens_at AND ts <= p_closes_at
-    ORDER BY ts DESC, price_id DESC LIMIT 1
-$$;
 
-CREATE FUNCTION public.sp_alert_observe_threshold(p_rule_id uuid, p_instrument_id uuid,
-    p_observed_at timestamptz, p_matched boolean, p_state_key text) RETURNS bigint
-LANGUAGE plpgsql AS $$
-DECLARE s public.alert_threshold_state%ROWTYPE;
-BEGIN
-    PERFORM pg_advisory_xact_lock(hashtextextended(p_rule_id::text || ':' || p_instrument_id::text, 0));
-    SELECT * INTO s FROM public.alert_threshold_state
-    WHERE rule_id=p_rule_id AND instrument_id=p_instrument_id FOR UPDATE;
-    IF FOUND AND p_observed_at<=s.observed_at THEN RETURN NULL; END IF;
-    INSERT INTO public.alert_threshold_state AS existing (rule_id,instrument_id,observed_at,matched,state_key)
-    VALUES(p_rule_id,p_instrument_id,p_observed_at,p_matched,p_state_key)
-    ON CONFLICT(rule_id,instrument_id) DO UPDATE SET
-        observed_at=excluded.observed_at, matched=excluded.matched, state_key=excluded.state_key,
-        generation=existing.generation + CASE WHEN existing.state_key<>excluded.state_key
-            OR (NOT existing.matched AND excluded.matched) THEN 1 ELSE 0 END
-    RETURNING * INTO s;
-    IF NOT s.matched THEN RETURN NULL; END IF;
-    RETURN s.generation;
-END $$;
+--
+-- Name: sp_alert_session_reference(uuid, timestamp with time zone, timestamp with time zone); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_alert_session_reference(p_instrument_id uuid, p_opens_at timestamp with time zone, p_closes_at timestamp with time zone) RETURNS jsonb
+    LANGUAGE sql STABLE
+    AS $$
+  SELECT jsonb_build_object('close', close, 'ts', ts)
+  FROM public.price_history
+  WHERE instrument_id=p_instrument_id AND close>0
+    AND ts >= p_opens_at AND ts <= p_closes_at
+  ORDER BY ts DESC, price_id DESC LIMIT 1
+$$;
 
 
 --
@@ -5154,48 +5186,137 @@ $$;
 
 
 --
+-- Name: sp_market_analysis_list_signal_performance(uuid, character varying, character varying, integer, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_market_analysis_list_signal_performance(p_instrument_id uuid DEFAULT NULL::uuid, p_strategy_code character varying DEFAULT NULL::character varying, p_status character varying DEFAULT NULL::character varying, p_limit integer DEFAULT 100, p_offset integer DEFAULT 0) RETURNS SETOF jsonb
+    LANGUAGE sql STABLE
+    AS $$
+    WITH cycles AS (
+        SELECT entry.*, terminal.event_type AS end_reason,
+            terminal.observed_at AS exit_at, terminal.payload AS exit_payload
+        FROM public.market_analysis_signal_events entry
+        LEFT JOIN LATERAL (
+            SELECT event_type, observed_at, payload
+            FROM public.market_analysis_signal_events next_event
+            WHERE next_event.instrument_id = entry.instrument_id
+              AND next_event.strategy_code = entry.strategy_code
+              AND next_event.timeframe = entry.timeframe
+              AND (next_event.performance_recorded_at, next_event.signal_event_id) >
+                  (entry.performance_recorded_at, entry.signal_event_id)
+              AND next_event.event_type IN ('CREATED', 'DIRECTION_CHANGED', 'CLOSED', 'EXPIRED')
+            ORDER BY next_event.performance_recorded_at, next_event.signal_event_id LIMIT 1
+        ) terminal ON true
+        WHERE entry.event_type IN ('CREATED', 'DIRECTION_CHANGED')
+          AND entry.new_direction IN ('LONG', 'SHORT')
+          AND (p_instrument_id IS NULL OR entry.instrument_id = p_instrument_id)
+          AND (p_strategy_code IS NULL OR entry.strategy_code = p_strategy_code)
+          AND (p_status IS NULL OR p_status = CASE WHEN terminal.event_type IS NULL THEN 'OPEN' ELSE 'CLOSED' END)
+        ORDER BY entry.performance_recorded_at DESC, entry.signal_event_id DESC
+        LIMIT LEAST(GREATEST(p_limit, 1), 1000) OFFSET GREATEST(p_offset, 0)
+    ), valued AS (
+        SELECT cycles.*, i.symbol, i.exchange, i.currency_code,
+            (payload->'performance'->>'price')::numeric AS entry_price,
+            CASE WHEN end_reason IS NOT NULL THEN exit_payload->'performance'
+                 ELSE jsonb_build_object('price', mark.close, 'price_at', mark.ts, 'source',
+                     CASE WHEN mark.close IS NULL THEN 'UNAVAILABLE' ELSE 'PRICE_HISTORY_ASOF' END)
+            END AS valuation
+        FROM cycles
+        JOIN public.instruments i USING (instrument_id)
+        LEFT JOIN LATERAL (
+            SELECT close, ts FROM public.price_history
+            WHERE instrument_id = cycles.instrument_id AND ts >= cycles.observed_at
+              AND ts <= CURRENT_TIMESTAMP AND close > 0 AND cycles.end_reason IS NULL
+            ORDER BY ts DESC, price_id DESC LIMIT 1
+        ) mark ON true
+    )
+    SELECT jsonb_build_object(
+        'performance_id', signal_event_id, 'signal_id', signal_id,
+        'instrument_id', instrument_id, 'symbol', symbol, 'exchange', exchange,
+        'currency_code', currency_code, 'strategy_code', strategy_code, 'timeframe', timeframe,
+        'direction', new_direction, 'status', CASE WHEN end_reason IS NULL THEN 'OPEN' ELSE 'CLOSED' END,
+        'end_reason', end_reason, 'entry_at', observed_at, 'exit_at', exit_at,
+        'entry_price', entry_price, 'valuation_price', (valuation->>'price')::numeric,
+        'entry_price_at', payload->'performance'->'price_at',
+        'valuation_price_at', valuation->'price_at',
+        'entry_price_source', payload->'performance'->>'source',
+        'valuation_price_source', valuation->>'source',
+        'historical_backfill', COALESCE((payload->'performance'->>'historical_backfill')::boolean, false),
+        'return_pct', CASE WHEN entry_price > 0 AND (valuation->>'price')::numeric > 0
+            AND (valuation->>'price_at')::timestamptz >= observed_at
+            AND (exit_at IS NULL OR exit_at >= observed_at)
+            THEN ((valuation->>'price')::numeric / entry_price - 1) * 100
+                * CASE WHEN new_direction = 'SHORT' THEN -1 ELSE 1 END ELSE NULL END
+    ) FROM valued ORDER BY performance_recorded_at DESC, signal_event_id DESC;
+$$;
+
+
+--
 -- Name: sp_market_analysis_list_universe_members(uuid); Type: FUNCTION; Schema: public; Owner: -
 --
 
 CREATE FUNCTION public.sp_market_analysis_list_universe_members(p_universe_id uuid) RETURNS TABLE(universe_id uuid, instrument_id uuid, entity_id uuid, symbol character varying, exchange character varying, currency_code character, isin character varying)
     LANGUAGE sql STABLE
     AS $$
-    SELECT
-        p_universe_id AS universe_id,
-        i.instrument_id,
-        i.entity_id,
-        i.symbol,
-        i.exchange,
-        i.currency_code,
-        (
-            SELECT id.identity_value
-            FROM public.instrument_identities ii
-            JOIN public.identities id
-              ON id.identity_id = ii.identity_id
-            JOIN public.identity_types it
-              ON it.identity_type_id = id.identity_type_id
-            WHERE ii.instrument_id = i.instrument_id
-              AND it.target_kind = 'INSTRUMENT'
-              AND UPPER(it.code) = 'ISIN'
-            ORDER BY
-                ii.is_primary DESC,
-                ii.verified_at DESC NULLS LAST,
-                ii.created_at DESC,
-                id.identity_id
-            LIMIT 1
-        ) AS isin
-    FROM public.instruments i
-    WHERE EXISTS (
-        SELECT 1 FROM public.market_universe_members mum
-        WHERE mum.instrument_id = i.instrument_id
-          AND mum.universe_id = p_universe_id AND mum.valid_to IS NULL
-    ) OR EXISTS (
-        SELECT 1 FROM public.watchlist_items wi WHERE wi.entity_id = i.entity_id
-    ) OR EXISTS (
-        SELECT 1 FROM public.positions pos
-        WHERE pos.instrument_id = i.instrument_id AND pos.quantity <> 0
-    )
-    ORDER BY i.symbol, i.exchange NULLS LAST, i.instrument_id;
+SELECT p_universe_id AS universe_id, i.instrument_id, i.entity_id, i.symbol,
+    i.exchange, i.currency_code,
+    (SELECT id.identity_value
+     FROM public.instrument_identities ii
+     JOIN public.identities id ON id.identity_id = ii.identity_id
+     JOIN public.identity_types it ON it.identity_type_id = id.identity_type_id
+     WHERE ii.instrument_id = i.instrument_id AND it.target_kind = 'INSTRUMENT'
+       AND UPPER(it.code) = 'ISIN'
+     ORDER BY ii.is_primary DESC, ii.verified_at DESC NULLS LAST,
+         ii.created_at DESC, id.identity_id LIMIT 1) AS isin
+FROM public.instruments i
+WHERE EXISTS (SELECT 1 FROM public.market_universe_members mum
+    WHERE mum.instrument_id = i.instrument_id AND mum.universe_id = p_universe_id
+      AND mum.valid_to IS NULL)
+ OR EXISTS (SELECT 1 FROM public.watchlist_items wi WHERE wi.entity_id = i.entity_id)
+ OR EXISTS (SELECT 1 FROM public.positions pos
+    WHERE pos.instrument_id = i.instrument_id AND pos.quantity <> 0)
+ORDER BY i.symbol, i.exchange NULLS LAST, i.instrument_id;
+$$;
+
+
+--
+-- Name: sp_market_analysis_performance_price(uuid, timestamp with time zone, jsonb, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_market_analysis_performance_price(p_instrument_id uuid, p_observed_at timestamp with time zone, p_payload jsonb, p_use_exit_signal boolean DEFAULT false) RETURNS jsonb
+    LANGUAGE plpgsql STABLE
+    AS $$
+DECLARE
+    v_price numeric;
+    v_price_at timestamptz;
+    v_source text := 'UNAVAILABLE';
+BEGIN
+    IF jsonb_typeof(p_payload->'reference_price') = 'number' THEN
+        v_price := (p_payload->>'reference_price')::numeric;
+        IF v_price > 0 THEN
+            v_price_at := p_observed_at;
+            v_source := 'SIGNAL_REFERENCE';
+        END IF;
+    END IF;
+    IF v_source = 'UNAVAILABLE' AND p_use_exit_signal
+       AND p_payload->>'exit_signal_id' IS NOT NULL THEN
+        SELECT reference_price, observed_at INTO v_price, v_price_at
+        FROM public.trading_signals
+        WHERE signal_id::text = p_payload->>'exit_signal_id'
+          AND instrument_id = p_instrument_id
+          AND observed_at <= p_observed_at AND reference_price > 0;
+        IF FOUND THEN v_source := 'EXIT_SIGNAL_REFERENCE'; END IF;
+    END IF;
+    IF v_source = 'UNAVAILABLE' THEN
+        SELECT close, ts INTO v_price, v_price_at
+        FROM public.price_history
+        WHERE instrument_id = p_instrument_id AND ts <= p_observed_at AND close > 0
+        ORDER BY ts DESC, price_id DESC LIMIT 1;
+        IF FOUND THEN v_source := 'PRICE_HISTORY_ASOF'; END IF;
+    END IF;
+    IF v_source = 'UNAVAILABLE' THEN v_price := NULL; v_price_at := NULL; END IF;
+    RETURN jsonb_build_object('price', v_price, 'price_at', v_price_at, 'source', v_source);
+END;
 $$;
 
 
@@ -10963,6 +11084,23 @@ $$;
 
 
 --
+-- Name: trg_market_analysis_capture_performance_price(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.trg_market_analysis_capture_performance_price() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    NEW.payload := NEW.payload || jsonb_build_object('performance',
+        public.sp_market_analysis_performance_price(
+            NEW.instrument_id, NEW.observed_at, NEW.payload, true
+        ) || jsonb_build_object('historical_backfill', false));
+    RETURN NEW;
+END;
+$$;
+
+
+--
 -- Name: trg_market_screener_populate_signal_fields(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -11142,6 +11280,20 @@ CREATE TABLE public.alert_rules (
     CONSTRAINT alert_rules_alert_type_check CHECK (((alert_type)::text = ANY ((ARRAY['MARKET_SIGNAL'::character varying, 'FIXED_PRICE'::character varying, 'PERCENT_MOVE'::character varying, 'SIGNAL_CHANGE'::character varying])::text[]))),
     CONSTRAINT alert_rules_cooldown_minutes_check CHECK ((cooldown_minutes >= 0)),
     CONSTRAINT alert_rules_severity_check CHECK (((severity)::text = ANY ((ARRAY['LOW'::character varying, 'MEDIUM'::character varying, 'HIGH'::character varying, 'CRITICAL'::character varying])::text[])))
+);
+
+
+--
+-- Name: alert_threshold_state; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.alert_threshold_state (
+    rule_id uuid NOT NULL,
+    instrument_id uuid NOT NULL,
+    observed_at timestamp with time zone NOT NULL,
+    matched boolean NOT NULL,
+    state_key text NOT NULL,
+    generation bigint DEFAULT 1 NOT NULL
 );
 
 
@@ -11771,7 +11923,8 @@ CREATE TABLE public.market_analysis_signal_events (
     observed_at timestamp with time zone NOT NULL,
     payload jsonb DEFAULT '{}'::jsonb NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    performance_recorded_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL
 );
 
 
@@ -12809,6 +12962,14 @@ ALTER TABLE ONLY public.alert_rules
 
 ALTER TABLE ONLY public.alert_rules
     ADD CONSTRAINT alert_rules_user_id_name_key UNIQUE (user_id, name);
+
+
+--
+-- Name: alert_threshold_state alert_threshold_state_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.alert_threshold_state
+    ADD CONSTRAINT alert_threshold_state_pkey PRIMARY KEY (rule_id, instrument_id);
 
 
 --
@@ -14173,6 +14334,13 @@ CREATE INDEX ix_scheduler_manual_run_pending ON public.scheduler_manual_run_requ
 
 
 --
+-- Name: ix_signal_events_performance_cycles; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_signal_events_performance_cycles ON public.market_analysis_signal_events USING btree (instrument_id, strategy_code, timeframe, performance_recorded_at, signal_event_id);
+
+
+--
 -- Name: ix_sync_mapping_external_lookup; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -14579,6 +14747,13 @@ CREATE TRIGGER trg_llm_response_cache_timestamps BEFORE INSERT OR UPDATE ON publ
 
 
 --
+-- Name: market_analysis_signal_events trg_market_analysis_capture_performance_price; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_market_analysis_capture_performance_price BEFORE INSERT ON public.market_analysis_signal_events FOR EACH ROW EXECUTE FUNCTION public.trg_market_analysis_capture_performance_price();
+
+
+--
 -- Name: market_analysis_scan_failures trg_market_analysis_scan_failures_created_at; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -14913,6 +15088,22 @@ CREATE TRIGGER trg_watchlists_updated_at BEFORE INSERT OR UPDATE ON public.watch
 
 ALTER TABLE ONLY public.alert_events
     ADD CONSTRAINT alert_events_rule_id_fkey FOREIGN KEY (rule_id) REFERENCES public.alert_rules(rule_id) ON DELETE CASCADE;
+
+
+--
+-- Name: alert_threshold_state alert_threshold_state_instrument_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.alert_threshold_state
+    ADD CONSTRAINT alert_threshold_state_instrument_id_fkey FOREIGN KEY (instrument_id) REFERENCES public.instruments(instrument_id) ON DELETE CASCADE;
+
+
+--
+-- Name: alert_threshold_state alert_threshold_state_rule_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.alert_threshold_state
+    ADD CONSTRAINT alert_threshold_state_rule_id_fkey FOREIGN KEY (rule_id) REFERENCES public.alert_rules(rule_id) ON DELETE CASCADE;
 
 
 --
@@ -15699,20 +15890,9 @@ ALTER TABLE ONLY public.watchlists
     ADD CONSTRAINT watchlists_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(user_id) ON DELETE CASCADE;
 
 
-CREATE TABLE public.alert_threshold_state (
-    rule_id uuid NOT NULL REFERENCES public.alert_rules(rule_id) ON DELETE CASCADE,
-    instrument_id uuid NOT NULL REFERENCES public.instruments(instrument_id) ON DELETE CASCADE,
-    observed_at timestamptz NOT NULL,
-    matched boolean NOT NULL,
-    state_key text NOT NULL,
-    generation bigint NOT NULL DEFAULT 1,
-    PRIMARY KEY (rule_id, instrument_id)
-);
-
-
 --
 -- PostgreSQL database dump complete
 --
 
-\unrestrict JJkCKnzemjtYiSr0iYRcvdaLU4uNDG45gHwmrxbzWCtIHdabcN4PWFv6RUz4NTt
+\unrestrict iegz66Kv1IWDKWkbbMRaRLbb42QPmxXTqMsLU4rCULGrCNumefm5ALIVSGyyUkA
 

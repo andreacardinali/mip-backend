@@ -154,9 +154,16 @@ def validate_rule_payload(payload: dict[str, Any]) -> dict[str, Any]:
         except (ValueError, TypeError, AttributeError) as error:
             raise ValueError("Invalid override instrument ID") from error
         if not isinstance(override, dict) or override.keys() - {
-            "enabled", "threshold", "price_direction", "strategy_codes", "event_types",
-            "min_composite_score", "min_consensus_score", "max_conflict_score",
-            "min_strategy_count", "regular_session_only",
+            "enabled",
+            "threshold",
+            "price_direction",
+            "strategy_codes",
+            "event_types",
+            "min_composite_score",
+            "min_consensus_score",
+            "max_conflict_score",
+            "min_strategy_count",
+            "regular_session_only",
         }:
             raise ValueError("Invalid instrument override")
         override_enabled = override.get("enabled", True)
@@ -165,9 +172,13 @@ def validate_rule_payload(payload: dict[str, Any]) -> dict[str, Any]:
         merged = {**normalized, **override}
         merged.pop("instrument_overrides", None)
         merged.pop("enabled", None)
-        checked = validate_rule_payload({
-            "name": name, "alert_type": alert_type, "conditions": merged,
-        })["conditions"]
+        checked = validate_rule_payload(
+            {
+                "name": name,
+                "alert_type": alert_type,
+                "conditions": merged,
+            }
+        )["conditions"]
         normalized_overrides[instrument_id] = {
             "enabled": override_enabled,
             **{key: checked[key] for key in override if key != "enabled"},

@@ -49,7 +49,11 @@ class MarketTimeService:
             )
         sessions = sorted(window.sessions, key=lambda session: session.opens_at)
         metadata["previous_session"] = next(
-            (session for session in reversed(sessions) if session.closes_at <= observed_at),
+            (
+                session
+                for session in reversed(sessions)
+                if session.closes_at <= observed_at
+            ),
             None,
         )
         for session in sessions:
