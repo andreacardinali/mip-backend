@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict mfskejnV7gCgE6bSVDuYjrgbZujGbf2gqleWQM3tARYWXE1PbOa9oAMFnukyOWg
+\restrict TeI66ejnKfBnx9GixkEJl155dqsShvwz2ld0UAqUaL6CNMhLhsWGXtNIpZVkGhb
 
 -- Dumped from database version 18.6 (Debian 18.6-1.pgdg13+2)
 -- Dumped by pg_dump version 18.6 (Debian 18.6-1.pgdg13+2)
@@ -278,19 +278,9 @@ CREATE FUNCTION public.sp_alert_list_enabled_rules() RETURNS TABLE(rule_id uuid,
 -- Name: sp_alert_list_user_rules(uuid); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.sp_alert_list_user_rules(p_user_id uuid)
-RETURNS TABLE(
-    rule_id uuid,
-    name character varying,
-    alert_type character varying,
-    severity character varying,
-    channel character varying,
-    conditions jsonb,
-    cooldown_minutes integer,
-    enabled boolean
-)
-LANGUAGE sql STABLE
-AS $$
+CREATE FUNCTION public.sp_alert_list_user_rules(p_user_id uuid) RETURNS TABLE(rule_id uuid, name character varying, alert_type character varying, severity character varying, channel character varying, conditions jsonb, cooldown_minutes integer, enabled boolean)
+    LANGUAGE sql STABLE
+    AS $$
     SELECT r.rule_id, r.name, r.alert_type, r.severity, r.channel,
            r.conditions, r.cooldown_minutes, r.enabled
     FROM public.alert_rules r
@@ -6692,8 +6682,8 @@ CREATE FUNCTION public.sp_market_screener_list_alert_candidates(p_limit integer)
     FROM (
         SELECT signal_id, instrument_id, symbol, direction, origin,
                composite_score, consensus_score, conflict_score,
-             strategy_count, verdict, summary, evidence,
-             supporting_strategies AS strategy_codes
+               strategy_count, verdict, summary, evidence,
+               supporting_strategies AS strategy_codes
         FROM public.market_screener_opportunities
         WHERE active
         ORDER BY ranking_position, opportunity_id
@@ -9052,13 +9042,20 @@ DECLARE
     v_snapshot_id uuid;
     v_payload jsonb;
 BEGIN
-    IF p_exchange_code !~ '^[A-Z0-9]{4}$' OR p_exchange_code IS NULL
-        OR p_provider_exchange IS NULL OR btrim(p_provider_exchange) = ''
-        OR p_source IS NULL OR p_as_of IS NULL OR p_updated_at IS NULL
-        OR p_fetched_at IS NULL OR p_payload IS NULL
-        OR jsonb_typeof(p_payload) IS DISTINCT FROM 'object' THEN
+    IF p_exchange_code IS NULL
+        OR p_exchange_code !~ '^[A-Z0-9]{4,20}$'
+        OR p_provider_exchange IS NULL
+        OR btrim(p_provider_exchange) = ''
+        OR p_source IS NULL
+        OR p_as_of IS NULL
+        OR p_updated_at IS NULL
+        OR p_fetched_at IS NULL
+        OR p_payload IS NULL
+        OR jsonb_typeof(p_payload) IS DISTINCT FROM 'object'
+    THEN
         RAISE EXCEPTION 'Invalid holiday snapshot metadata';
     END IF;
+
     SELECT count(*) INTO v_count FROM public.external_systems
     WHERE lower(code) = lower(p_source) AND active;
     IF v_count <> 1 THEN
@@ -9760,6 +9757,21 @@ CREATE FUNCTION public.sp_upsert_exchange(p_exchange character varying, p_exchan
 BEGIN
 
     IF p_exchange IS NULL THEN
+        RETURN;
+    END IF;
+
+    IF EXISTS (
+        SELECT 1 FROM public.exchange_source_mappings
+        WHERE raw_payload->>'authority' = 'eulerpool_catalog'
+    ) THEN
+        IF NOT EXISTS (
+            SELECT 1 FROM public.exchange_source_mappings
+            WHERE exchange = p_exchange
+              AND source_exchange_code = p_exchange
+              AND raw_payload->>'authority' = 'eulerpool_catalog'
+        ) THEN
+            RAISE EXCEPTION 'Unknown canonical exchange %; register a provider alias or refresh the Eulerpool catalog', p_exchange;
+        END IF;
         RETURN;
     END IF;
 
@@ -11127,14 +11139,14 @@ CREATE TABLE public.etf_constituents (
 CREATE TABLE public.exchange_holiday_snapshots (
     snapshot_id uuid DEFAULT gen_random_uuid() NOT NULL,
     exchange character varying(20) NOT NULL,
-    exchange_code character varying(4) NOT NULL,
+    exchange_code character varying(20) NOT NULL,
     source text NOT NULL,
     provider_exchange text NOT NULL,
     as_of date NOT NULL,
     provider_updated_at timestamp with time zone NOT NULL,
     fetched_at timestamp with time zone NOT NULL,
     raw_payload jsonb NOT NULL,
-    CONSTRAINT exchange_holiday_snapshots_exchange_code_check CHECK (((exchange_code)::text ~ '^[A-Z0-9]{4}$'::text)),
+    CONSTRAINT exchange_holiday_snapshots_exchange_code_check CHECK (((exchange_code)::text ~ '^[A-Z0-9]{4,20}$'::text)),
     CONSTRAINT exchange_holiday_snapshots_raw_payload_check CHECK ((jsonb_typeof(raw_payload) = 'object'::text))
 );
 
@@ -15443,5 +15455,5 @@ ALTER TABLE ONLY public.watchlists
 -- PostgreSQL database dump complete
 --
 
-\unrestrict mfskejnV7gCgE6bSVDuYjrgbZujGbf2gqleWQM3tARYWXE1PbOa9oAMFnukyOWg
+\unrestrict TeI66ejnKfBnx9GixkEJl155dqsShvwz2ld0UAqUaL6CNMhLhsWGXtNIpZVkGhb
 
