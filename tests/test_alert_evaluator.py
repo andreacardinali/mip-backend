@@ -59,7 +59,8 @@ def test_strategy_filter_is_case_insensitive_and_matches_any_selected_strategy()
     )
     assert len(matches) == 1
     assert matches[0].context["strategy_codes"] == [
-        "CALL_ENTRY_SETUP", "TREND_PULLBACK"
+        "CALL_ENTRY_SETUP",
+        "TREND_PULLBACK",
     ]
 
 
@@ -113,5 +114,8 @@ def test_ranked_candidate_preserves_strategy_codes():
         }
     )
     assert candidate.strategy_codes == ("CALL_ENTRY_SETUP", "TREND_PULLBACK")
-    assert len(evaluate_alerts([rule(strategy_codes=["CALL_ENTRY_SETUP"])], [candidate])) == 1
+    assert (
+        len(evaluate_alerts([rule(strategy_codes=["CALL_ENTRY_SETUP"])], [candidate]))
+        == 1
+    )
     assert evaluate_alerts([rule(strategy_codes=["SWING_EXIT"])], [candidate]) == []
