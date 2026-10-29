@@ -23,6 +23,22 @@ def test_gui_handles_missing_signal_arrays() -> None:
     assert "selected.signal_reasons ?? []" in page
 
 
+def test_gui_exports_authorized_results_with_native_grid_csv() -> None:
+    page = Path("../mip-frontend/src/pages/ScreenerPage.tsx").read_text(
+        encoding="utf-8"
+    )
+    grid = re.search(r"<DataGrid\b(.*?)\n\s*/>", page, re.DOTALL)
+    assert grid is not None
+    options = grid.group(1)
+    assert re.search(r"\brows\s*=\s*\{rows\}", options)
+    assert re.search(r"\bshowToolbar\b", options)
+    assert re.search(r'fileName\s*:\s*"mip-screener"', options)
+    assert re.search(r"utf8WithBom\s*:\s*true", options)
+    assert re.search(r"escapeFormulas\s*:\s*true", options)
+    assert re.search(r"disableToolbarButton\s*:\s*true", options)
+    assert "createObjectURL" not in page
+
+
 @pytest.mark.parametrize("outcome", ["success", "missing", "failure"])
 def test_signal_history_uses_owner_scoped_source_instrument(outcome) -> None:
     tree = ast.parse(Path("routers/market_screener.py").read_text(encoding="utf-8"))
