@@ -124,6 +124,30 @@ def test_monitoring_notification_preferences_installer_matches_schema(name):
         assert "WHERE portfolio_id IS NULL" in installed.group()
 
 
+@pytest.mark.parametrize("name", ["sp_alert_delete_rule", "sp_alert_set_rule_enabled"])
+def test_alert_management_actions_installer_matches_schema_and_owner(name):
+    schema = (ROOT / "mip_schema.sql").read_text(encoding="utf-8")
+    installer = (ROOT / "oneshot/install_alert_rule_management.sql").read_text(
+        encoding="utf-8"
+    )
+    pattern = rf"FUNCTION public\.{name}\(.*?\$\$;"
+    snapshot = re.search(pattern, schema, re.DOTALL)
+    installed = re.search(pattern, installer, re.DOTALL)
+    assert snapshot is not None
+    assert installed is not None
+    assert " ".join(snapshot.group().split()) == " ".join(installed.group().split())
+    assert "WHERE rule_id = p_rule_id AND user_id = p_user_id;" in installed.group()
+    assert "RETURN FOUND;" in installed.group()
+    assert "END;\n$$;" in installed.group()
+    if name == "sp_alert_set_rule_enabled":
+        assert "SET enabled = p_enabled" in installed.group()
+        assert "IF p_enabled IS NULL THEN" in installed.group()
+        assert "conditions =" not in installed.group()
+    else:
+        assert "DELETE FROM public.alert_rules" in installed.group()
+        assert "REFERENCES public.alert_rules(rule_id) ON DELETE CASCADE" in schema
+
+
 def test_alert_event_history_installer_matches_schema_and_owner_scope():
     schema = (ROOT / "mip_schema.sql").read_text(encoding="utf-8")
     installer = (ROOT / "oneshot/install_alert_event_history.sql").read_text(

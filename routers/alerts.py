@@ -1,6 +1,7 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from pydantic import BaseModel, ConfigDict, StrictBool
 from sqlalchemy.exc import IntegrityError
 
 from alerts.repository import AlertRepository
@@ -9,6 +10,12 @@ from auth.security import CurrentUser, get_current_user
 from db import SessionLocal
 
 router = APIRouter()
+
+
+class RuleEnabledPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: StrictBool
 
 
 @router.get("")
@@ -79,3 +86,46 @@ def update_rule(
     current_user: CurrentUser = Depends(get_current_user),
 ):
     return _save_rule(payload, current_user["user_id"], rule_id)
+
+
+@router.patch("/{rule_id}/enabled", status_code=204)
+def set_rule_enabled(
+    rule_id: UUID,
+    payload: RuleEnabledPayload,
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    database = SessionLocal()
+    try:
+        changed = AlertRepository(database).set_user_rule_enabled(
+            current_user["user_id"], str(rule_id), payload.enabled
+        )
+        if not changed:
+            raise HTTPException(status_code=404, detail="Alert rule not found")
+        database.commit()
+        return Response(status_code=204)
+    except Exception:
+        database.rollback()
+        raise
+    finally:
+        database.close()
+
+
+@router.delete("/{rule_id}", status_code=204)
+def delete_rule(
+    rule_id: UUID,
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    database = SessionLocal()
+    try:
+        deleted = AlertRepository(database).delete_user_rule(
+            current_user["user_id"], str(rule_id)
+        )
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Alert rule not found")
+        database.commit()
+        return Response(status_code=204)
+    except Exception:
+        database.rollback()
+        raise
+    finally:
+        database.close()

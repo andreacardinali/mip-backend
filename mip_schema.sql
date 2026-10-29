@@ -410,6 +410,40 @@ $$;
 
 
 --
+-- Name: sp_alert_delete_rule(uuid, uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_alert_delete_rule(p_rule_id uuid, p_user_id uuid) RETURNS boolean
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    DELETE FROM public.alert_rules
+    WHERE rule_id = p_rule_id AND user_id = p_user_id;
+    RETURN FOUND;
+END;
+$$;
+
+
+--
+-- Name: sp_alert_set_rule_enabled(uuid, uuid, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_alert_set_rule_enabled(p_rule_id uuid, p_user_id uuid, p_enabled boolean) RETURNS boolean
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF p_enabled IS NULL THEN
+        RAISE EXCEPTION 'Enabled state is required';
+    END IF;
+    UPDATE public.alert_rules
+    SET enabled = p_enabled
+    WHERE rule_id = p_rule_id AND user_id = p_user_id;
+    RETURN FOUND;
+END;
+$$;
+
+
+--
 -- Name: sp_alert_mark_enqueued(uuid, uuid); Type: FUNCTION; Schema: public; Owner: -
 --
 

@@ -206,17 +206,27 @@ It does not reconcile existing exchange rows.
 
 ### Alert Rule Management
 
-Account settings manage monitoring alert rules through authenticated
-`GET /api/alerts`, `POST /api/alerts` and `PUT /api/alerts/{rule_id}`.
+Account settings, watchlist details, portfolio details and Screener share monitoring
+rule controls through authenticated `GET /api/alerts`, `POST /api/alerts` and
+`PUT /api/alerts/{rule_id}`. Collection views show their dedicated rules;
+account settings retain access to all scopes.
 Rules are scoped to the authenticated user, including disabled rules. Creation
 reuses `sp_alert_upsert_rule`: submitting an existing name updates that user's rule.
-Updates by UUID never modify another user's rule. Disable a rule rather than
-delete it, preserving event history. Delivery uses the existing notification pipeline.
+Updates by UUID never modify another user's rule. Quick activation uses
+`PATCH /api/alerts/{rule_id}/enabled` with a strict boolean `enabled` and changes
+no conditions. `DELETE /api/alerts/{rule_id}` removes the rule and its event history
+via the existing cascade constraint; the UI requires explicit confirmation.
+Both operations return 204 on success or 404 for missing/foreign rules.
+Disable rather than delete to preserve history. Disabling prevents new matches,
+but does not cancel notifications already queued. Delivery uses the existing pipeline.
 
 Before using this API on the live instance, review and manually apply
 `oneshot/install_alert_rule_management.sql` after backup and PostgreSQL validation.
-It installs only `sp_alert_list_user_rules`; no startup migration is performed.
-`mip_schema.sql` contains the same routine. No live migration was run.
+Reapply it even if an older version was installed: it now installs
+`sp_alert_list_user_rules`, `sp_alert_set_rule_enabled` and `sp_alert_delete_rule`.
+No startup migration is performed. `mip_schema.sql` contains the same routines.
+No live migration was run. SQL contract tests compare definitions and ownership
+guards, but do not substitute for PostgreSQL syntax and runtime validation.
 
 Conditions accept symbols, directions, verdicts, origins and supporting strategy
 codes, plus normalized score thresholds (0 to 1), minimum strategy count and

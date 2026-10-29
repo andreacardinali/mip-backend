@@ -83,6 +83,26 @@ def test_save_foreign_or_missing_rule_returns_none():
     )
 
 
+@pytest.mark.parametrize("enabled", [True, False])
+def test_set_rule_enabled_uses_owner_scoped_routine(enabled):
+    database = Mock()
+    database.execute.return_value.scalar.return_value = True
+    assert AlertRepository(database).set_user_rule_enabled("owner", "rule", enabled)
+    statement, parameters = database.execute.call_args.args
+    assert "sp_alert_set_rule_enabled" in str(statement)
+    assert parameters == {"user_id": "owner", "rule_id": "rule", "enabled": enabled}
+
+
+@pytest.mark.parametrize("found", [True, False])
+def test_delete_rule_uses_owner_scoped_routine(found):
+    database = Mock()
+    database.execute.return_value.scalar.return_value = found
+    assert AlertRepository(database).delete_user_rule("owner", "rule") is found
+    statement, parameters = database.execute.call_args.args
+    assert "sp_alert_delete_rule" in str(statement)
+    assert parameters == {"user_id": "owner", "rule_id": "rule"}
+
+
 def test_rule_payload_normalizes_strategy_codes():
     payload = validate_rule_payload(
         {
@@ -190,6 +210,74 @@ def alert_api():
     app.include_router(namespace["router"], prefix="/api/alerts")
     with TestClient(app, raise_server_exceptions=False) as client:
         yield client, namespace["SessionLocal"], database, repository, authentication
+
+
+@pytest.mark.parametrize("action", ["enabled", "delete"])
+@pytest.mark.parametrize("outcome", ["success", "missing", "error"])
+def test_rule_management_api_owner_and_transaction(alert_api, action, outcome):
+    client, _, database, repository, authentication = alert_api
+    rule_id = "00000000-0000-0000-0000-000000000002"
+    method = (
+        repository.set_user_rule_enabled
+        if action == "enabled"
+        else repository.delete_user_rule
+    )
+    method.return_value = outcome == "success"
+    if outcome == "error":
+        method.side_effect = RuntimeError("database error")
+    response = (
+        client.patch(f"/api/alerts/{rule_id}/enabled", json={"enabled": False})
+        if action == "enabled"
+        else client.delete(f"/api/alerts/{rule_id}")
+    )
+    assert (
+        response.status_code == {"success": 204, "missing": 404, "error": 500}[outcome]
+    )
+    arguments = (authentication["user"]["user_id"], rule_id)
+    if action == "enabled":
+        arguments += (False,)
+    method.assert_called_once_with(*arguments)
+    if outcome == "success":
+        assert response.content == b""
+        database.commit.assert_called_once_with()
+        database.rollback.assert_not_called()
+    else:
+        database.commit.assert_not_called()
+        database.rollback.assert_called_once_with()
+    database.close.assert_called_once_with()
+
+
+@pytest.mark.parametrize("action", ["enabled", "delete"])
+def test_rule_management_requires_authentication(alert_api, action):
+    client, session_factory, _, _, authentication = alert_api
+    authentication["user"] = None
+    rule_id = "00000000-0000-0000-0000-000000000002"
+    response = (
+        client.patch(f"/api/alerts/{rule_id}/enabled", json={"enabled": True})
+        if action == "enabled"
+        else client.delete(f"/api/alerts/{rule_id}")
+    )
+    assert response.status_code == 401
+    session_factory.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"enabled": None},
+        {"enabled": "false"},
+        {"enabled": 0},
+        {"enabled": True, "user_id": "other"},
+    ],
+)
+def test_rule_enabled_rejects_invalid_payload(alert_api, payload):
+    client, session_factory, _, _, _ = alert_api
+    response = client.patch(
+        "/api/alerts/00000000-0000-0000-0000-000000000002/enabled", json=payload
+    )
+    assert response.status_code == 422
+    session_factory.assert_not_called()
 
 
 def test_alert_api_lists_events_for_authenticated_owner(alert_api):

@@ -64,6 +64,28 @@ class AlertRepository:
         ).scalar()
         return str(saved_id) if saved_id else None
 
+    def set_user_rule_enabled(self, user_id: str, rule_id: str, enabled: bool) -> bool:
+        return bool(
+            self.db.execute(
+                text(
+                    "SELECT public.sp_alert_set_rule_enabled("
+                    "CAST(:rule_id AS uuid), CAST(:user_id AS uuid), :enabled)"
+                ),
+                {"rule_id": rule_id, "user_id": user_id, "enabled": enabled},
+            ).scalar()
+        )
+
+    def delete_user_rule(self, user_id: str, rule_id: str) -> bool:
+        return bool(
+            self.db.execute(
+                text(
+                    "SELECT public.sp_alert_delete_rule("
+                    "CAST(:rule_id AS uuid), CAST(:user_id AS uuid))"
+                ),
+                {"rule_id": rule_id, "user_id": user_id},
+            ).scalar()
+        )
+
     def list_enabled_rules(self) -> list[AlertRule]:
         rows = self.db.execute(
             text("SELECT * FROM public.sp_alert_list_enabled_rules()")
