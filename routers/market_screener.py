@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from uuid import UUID
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from auth.security import CurrentUser, get_current_user
 from db import SessionLocal
+from market_analysis.lifecycle_repository import SignalLifecycleRepository
 from market_screener.api_repository import MarketScreenerApiRepository
 
 router = APIRouter()
@@ -69,6 +72,26 @@ def list_screener_snapshot_items(
     db = SessionLocal()
     try:
         return MarketScreenerApiRepository(db).list_snapshot_items(snapshot_id)
+    finally:
+        db.close()
+
+
+@router.get("/{opportunity_id}/signal-events")
+def list_screener_signal_events(
+    opportunity_id: UUID,
+    limit: int = Query(100, ge=1, le=1000),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    db = SessionLocal()
+    try:
+        opportunity = MarketScreenerApiRepository(db).get_opportunity(
+            user_id=current_user["user_id"], opportunity_id=str(opportunity_id)
+        )
+        if opportunity is None:
+            raise HTTPException(404, "Opportunity not found")
+        return SignalLifecycleRepository(db).list_events(
+            instrument_id=opportunity["source_instrument_id"], limit=limit
+        )
     finally:
         db.close()
 

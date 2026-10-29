@@ -69,9 +69,9 @@ def test_alert_rule_management_installer_matches_schema():
     assert snapshot is not None
     installed_header, installed_body = installed.group().split("$$", 1)
     snapshot_header, snapshot_body = snapshot.group().split("$$", 1)
-    assert re.sub(
-        r"\s*([()])\s*", r"\1", " ".join(installed_header.split())
-    ) == re.sub(r"\s*([()])\s*", r"\1", " ".join(snapshot_header.split()))
+    assert re.sub(r"\s*([()])\s*", r"\1", " ".join(installed_header.split())) == re.sub(
+        r"\s*([()])\s*", r"\1", " ".join(snapshot_header.split())
+    )
     assert " ".join(installed_body.split()) == " ".join(snapshot_body.split())
     assert "WHERE r.user_id = p_user_id" in installed.group()
     assert "WHERE r.enabled" not in installed.group()

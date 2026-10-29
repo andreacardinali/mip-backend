@@ -356,6 +356,31 @@ Offline coverage lives in `tests/test_market_analysis_scan.py`,
 and `tests/test_wikipedia_provider.py`. No database migration or job activation
 is needed for this separation.
 
+### Screener signal history
+
+The Screener opportunity detail now includes signal lifecycle history for its
+source instrument, across strategies and timeframes. The authenticated
+`GET /api/screener/{opportunity_id}/signal-events` route resolves the opportunity
+through `MarketScreenerApiRepository` with the current user, then delegates to
+`SignalLifecycleRepository` and the existing
+`sp_market_analysis_list_signal_events` routine. Unknown opportunities return
+404; invalid UUIDs and limits return 422. `limit` defaults to 100 (range 1-1000).
+Database ordering is newest first by observation time and creation time.
+
+The UI displays timestamps in the browser's local timezone, strategy, timeframe,
+event, status/direction transitions and reason, with loading, empty, error and
+refresh states. This is an event audit, not a legacy entry/exit trade ledger;
+there is no history deletion action. No new SQL installer is required when the
+existing routine from `mip_schema.sql` is installed. No live database changes
+were performed.
+
+Offline tests are in `tests/test_market_screener_signal_runtime_contract.py`.
+They exercise source-instrument selection, owner forwarding, missing
+opportunities, session cleanup and reuse of the stored routine. HTTP tests cover
+authentication and parameter validation when FastAPI/Pydantic and HTTPX are
+installed; otherwise those cases are skipped. Frontend source-contract checks
+do not replace a TypeScript build or interactive UI validation.
+
 ### Multi-category discovery refresh
 
 The discovery refresh job now requests Reddit trending, gainers, losers and most

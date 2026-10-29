@@ -114,9 +114,7 @@ def alert_api():
 
     database = Mock()
     repository = Mock()
-    repository.save_user_rule.return_value = (
-        "00000000-0000-0000-0000-000000000002"
-    )
+    repository.save_user_rule.return_value = "00000000-0000-0000-0000-000000000002"
     security = SimpleNamespace(CurrentUser=dict, get_current_user=get_current_user)
     with patch.dict(
         sys.modules,
