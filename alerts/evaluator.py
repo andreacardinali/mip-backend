@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Iterable
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from math import isfinite
 from typing import Any
 
@@ -203,7 +203,7 @@ def _fresh(rule: AlertRule, item: AlertCandidate, now: datetime | None) -> bool:
         observed = datetime.fromisoformat(item.observed_at or "")
         if observed.tzinfo is None:
             return False
-        current = now or datetime.now(timezone.utc)
+        current = now or datetime.now(UTC)
         if (
             not timedelta(0)
             <= current - observed

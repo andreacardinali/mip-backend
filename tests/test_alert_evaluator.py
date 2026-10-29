@@ -1,8 +1,10 @@
+from dataclasses import replace
+from datetime import UTC, datetime
+
+import pytest
+
 from alerts.evaluator import evaluate_alerts
 from alerts.models import AlertCandidate, AlertRule
-from dataclasses import replace
-from datetime import datetime, timezone
-import pytest
 
 
 def rule(**c):
@@ -152,7 +154,7 @@ def test_price_monitoring_thresholds(alert_type, direction, price, expected):
         observed_at="2026-10-29T12:00:00+00:00",
     )
     matches = evaluate_alerts(
-        [selected], [candidate], now=datetime(2026, 10, 29, 12, tzinfo=timezone.utc)
+        [selected], [candidate], now=datetime(2026, 10, 29, 12, tzinfo=UTC)
     )
     assert bool(matches) == expected
     if matches:
@@ -185,7 +187,7 @@ def test_missing_or_stale_price_is_not_an_alert(overrides):
     assert not evaluate_alerts(
         [selected],
         [replace(candidate, **overrides)],
-        now=datetime(2026, 10, 29, 12, tzinfo=timezone.utc),
+        now=datetime(2026, 10, 29, 12, tzinfo=UTC),
     )
 
 
@@ -198,7 +200,7 @@ def test_lifecycle_exits_do_not_require_active_opportunity_scores():
         observed_at="2026-10-29T12:00:00+00:00",
         strategy_codes=("SWING_EXIT",),
     )
-    now = datetime(2026, 10, 29, 12, tzinfo=timezone.utc)
+    now = datetime(2026, 10, 29, 12, tzinfo=UTC)
     matches = evaluate_alerts([selected], [candidate], now=now)
     assert len(matches) == 1
     assert (
@@ -232,7 +234,7 @@ def test_price_candidate_mapping_and_default_percent_direction():
     matches = evaluate_alerts(
         [replace(rule(threshold=5), alert_type="PERCENT_MOVE")],
         [candidate],
-        now=datetime(2026, 10, 29, 12, tzinfo=timezone.utc),
+        now=datetime(2026, 10, 29, 12, tzinfo=UTC),
     )
     assert len(matches) == 1
     assert "ANY" in matches[0].message
