@@ -26,7 +26,8 @@ def test_gui_handles_missing_signal_arrays() -> None:
 def test_signal_history_uses_owner_scoped_source_instrument(outcome) -> None:
     tree = ast.parse(Path("routers/market_screener.py").read_text(encoding="utf-8"))
     function = next(
-        node for node in tree.body
+        node
+        for node in tree.body
         if isinstance(node, ast.FunctionDef)
         and node.name == "list_screener_signal_events"
     )
@@ -71,7 +72,10 @@ def test_signal_history_uses_owner_scoped_source_instrument(outcome) -> None:
             list_events=list_events
         ),
     }
-    exec(compile(ast.Module(body=[function], type_ignores=[]), "route", "exec"), namespace)
+    exec(
+        compile(ast.Module(body=[function], type_ignores=[]), "route", "exec"),
+        namespace,
+    )
     route = namespace["list_screener_signal_events"]
     if outcome == "missing":
         with pytest.raises(RouteError) as error:
@@ -82,9 +86,12 @@ def test_signal_history_uses_owner_scoped_source_instrument(outcome) -> None:
         with pytest.raises(RuntimeError, match="database unavailable"):
             route(opportunity_id, limit=20, current_user={"user_id": "owner"})
     else:
-        assert route(opportunity_id, limit=20, current_user={"user_id": "owner"}) == events
+        assert (
+            route(opportunity_id, limit=20, current_user={"user_id": "owner"}) == events
+        )
     assert calls[0] == (
-        "opportunity", {"user_id": "owner", "opportunity_id": str(opportunity_id)}
+        "opportunity",
+        {"user_id": "owner", "opportunity_id": str(opportunity_id)},
     )
     if outcome != "missing":
         assert calls[1] == ("events", {"instrument_id": "source", "limit": 20})
@@ -102,15 +109,20 @@ def test_signal_history_repository_reuses_stored_routine() -> None:
         calls.append((str(statement), params))
         return SimpleNamespace(scalars=lambda: iter(events))
 
-    assert repository(SimpleNamespace(execute=execute)).list_events(
-        instrument_id="source", limit=20
-    ) == events
+    assert (
+        repository(SimpleNamespace(execute=execute)).list_events(
+            instrument_id="source", limit=20
+        )
+        == events
+    )
     assert "public.sp_market_analysis_list_signal_events(" in calls[0][0]
     assert calls[0][1] == {"instrument": "source", "strategy": None, "limit": 20}
 
 
 def test_gui_loads_signal_history_only_for_selected_detail() -> None:
-    page = Path("../mip-frontend/src/pages/ScreenerPage.tsx").read_text(encoding="utf-8")
+    page = Path("../mip-frontend/src/pages/ScreenerPage.tsx").read_text(
+        encoding="utf-8"
+    )
     service = Path("../mip-frontend/src/services/marketScreener.ts").read_text(
         encoding="utf-8"
     )
@@ -171,7 +183,9 @@ def test_signal_history_http_contract(monkeypatch, scenario, expected_status) ->
             )
         },
         "market_analysis.lifecycle_repository": {
-            "SignalLifecycleRepository": lambda db: SimpleNamespace(list_events=list_events)
+            "SignalLifecycleRepository": lambda db: SimpleNamespace(
+                list_events=list_events
+            )
         },
     }
     with monkeypatch.context() as patch:
@@ -182,8 +196,10 @@ def test_signal_history_http_contract(monkeypatch, scenario, expected_status) ->
         router = runpy.run_path("routers/market_screener.py")["router"]
     app = fastapi.FastAPI()
     app.include_router(router, prefix="/api/screener")
-    opportunity_id = "invalid" if scenario == "invalid_id" else (
-        "00000000-0000-0000-0000-000000000001"
+    opportunity_id = (
+        "invalid"
+        if scenario == "invalid_id"
+        else ("00000000-0000-0000-0000-000000000001")
     )
     limit = 0 if scenario == "low_limit" else 1001 if scenario == "high_limit" else 20
     with TestClient(app, raise_server_exceptions=False) as client:
