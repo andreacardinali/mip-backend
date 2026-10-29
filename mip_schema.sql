@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict AMz3pTNThvOunmT5yz4rqolPk3hoTCXwARbYazefnLvjxC4xZB9m2D83WHomMj7
+\restrict JJkCKnzemjtYiSr0iYRcvdaLU4uNDG45gHwmrxbzWCtIHdabcN4PWFv6RUz4NTt
 
 -- Dumped from database version 18.6 (Debian 18.6-1.pgdg13+2)
 -- Dumped by pg_dump version 18.6 (Debian 18.6-1.pgdg13+2)
@@ -266,6 +266,21 @@ $$;
 
 
 --
+-- Name: sp_alert_delete_rule(uuid, uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_alert_delete_rule(p_rule_id uuid, p_user_id uuid) RETURNS boolean
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    DELETE FROM public.alert_rules
+    WHERE rule_id = p_rule_id AND user_id = p_user_id;
+    RETURN FOUND;
+END;
+$$;
+
+
+--
 -- Name: sp_alert_list_enabled_rules(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -410,40 +425,6 @@ $$;
 
 
 --
--- Name: sp_alert_delete_rule(uuid, uuid); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION public.sp_alert_delete_rule(p_rule_id uuid, p_user_id uuid) RETURNS boolean
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-    DELETE FROM public.alert_rules
-    WHERE rule_id = p_rule_id AND user_id = p_user_id;
-    RETURN FOUND;
-END;
-$$;
-
-
---
--- Name: sp_alert_set_rule_enabled(uuid, uuid, boolean); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION public.sp_alert_set_rule_enabled(p_rule_id uuid, p_user_id uuid, p_enabled boolean) RETURNS boolean
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-    IF p_enabled IS NULL THEN
-        RAISE EXCEPTION 'Enabled state is required';
-    END IF;
-    UPDATE public.alert_rules
-    SET enabled = p_enabled
-    WHERE rule_id = p_rule_id AND user_id = p_user_id;
-    RETURN FOUND;
-END;
-$$;
-
-
---
 -- Name: sp_alert_mark_enqueued(uuid, uuid); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -469,6 +450,7 @@ BEGIN
 END;
 $$;
 
+
 --
 -- Name: sp_alert_register_match(uuid, uuid, uuid, character varying, jsonb); Type: FUNCTION; Schema: public; Owner: -
 --
@@ -476,6 +458,25 @@ $$;
 CREATE FUNCTION public.sp_alert_register_match(p_rule_id uuid, p_instrument_id uuid, p_signal_id uuid, p_fingerprint character varying, p_payload jsonb) RETURNS uuid
     LANGUAGE plpgsql
     AS $$ DECLARE r public.alert_rules%ROWTYPE; e public.alert_events%ROWTYPE; v uuid; BEGIN SELECT * INTO r FROM public.alert_rules WHERE rule_id=p_rule_id AND enabled FOR SHARE; IF NOT FOUND THEN RETURN NULL;END IF; SELECT * INTO e FROM public.alert_events WHERE rule_id=p_rule_id AND instrument_id=p_instrument_id ORDER BY created_at DESC LIMIT 1; IF FOUND AND (e.fingerprint=p_fingerprint OR e.created_at>now()-make_interval(mins=>r.cooldown_minutes)) THEN RETURN NULL;END IF; INSERT INTO public.alert_events(rule_id,user_id,instrument_id,signal_id,fingerprint,payload) VALUES(p_rule_id,r.user_id,p_instrument_id,p_signal_id,p_fingerprint,coalesce(p_payload,'{}')) ON CONFLICT(rule_id,instrument_id,fingerprint) DO NOTHING RETURNING alert_event_id INTO v; RETURN v; END $$;
+
+
+--
+-- Name: sp_alert_set_rule_enabled(uuid, uuid, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_alert_set_rule_enabled(p_rule_id uuid, p_user_id uuid, p_enabled boolean) RETURNS boolean
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF p_enabled IS NULL THEN
+        RAISE EXCEPTION 'Enabled state is required';
+    END IF;
+    UPDATE public.alert_rules
+    SET enabled = p_enabled
+    WHERE rule_id = p_rule_id AND user_id = p_user_id;
+    RETURN FOUND;
+END;
+$$;
 
 
 --
@@ -15642,5 +15643,5 @@ ALTER TABLE ONLY public.watchlists
 -- PostgreSQL database dump complete
 --
 
-\unrestrict AMz3pTNThvOunmT5yz4rqolPk3hoTCXwARbYazefnLvjxC4xZB9m2D83WHomMj7
+\unrestrict JJkCKnzemjtYiSr0iYRcvdaLU4uNDG45gHwmrxbzWCtIHdabcN4PWFv6RUz4NTt
 
