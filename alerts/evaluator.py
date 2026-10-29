@@ -47,7 +47,9 @@ def _matches(rule: AlertRule, item: AlertCandidate) -> bool:
         threshold = _number(c.get("threshold"), float("nan"))
         if not isfinite(threshold) or threshold <= 0:
             return False
-        direction = c.get("price_direction", "UP")
+        direction = c.get(
+            "price_direction", "ANY" if rule.alert_type == "PERCENT_MOVE" else "UP"
+        )
         if direction == "ANY" and rule.alert_type == "PERCENT_MOVE":
             return abs(value) >= threshold
         if direction == "DOWN":
@@ -135,10 +137,14 @@ def evaluate_alerts(
                 lines.extend(("", item.summary.strip()))
             if rule.alert_type in ("FIXED_PRICE", "PERCENT_MOVE"):
                 title = f"{item.symbol}: soglia di prezzo"
+                price_direction = rule.conditions.get(
+                    "price_direction",
+                    "ANY" if rule.alert_type == "PERCENT_MOVE" else "UP",
+                )
                 lines = [
                     f"Regola: {rule.name}",
                     f"Prezzo: {item.last_price}",
-                    f"Soglia: {rule.conditions['threshold']} ({rule.conditions['price_direction']})",
+                    f"Soglia: {rule.conditions['threshold']} ({price_direction})",
                     f"Osservato: {item.observed_at}",
                 ]
                 if rule.alert_type == "PERCENT_MOVE":

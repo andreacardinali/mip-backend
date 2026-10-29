@@ -97,6 +97,30 @@ def test_consolidate_instrument_alias_conflicts_match_unique_index():
     assert "pg_get_functiondef(" in migration
 
 
+def test_collection_monitoring_installer_matches_schema_and_owner_scope():
+    schema = (ROOT / "mip_schema.sql").read_text(encoding="utf-8")
+    installer = (ROOT / "oneshot/install_collection_monitoring.sql").read_text(
+        encoding="utf-8"
+    )
+    pattern = r"FUNCTION public\.sp_alert_list_rule_candidates\(.*?\$\$;"
+    snapshot = re.search(pattern, schema, re.DOTALL).group()
+    installed = re.search(pattern, installer, re.DOTALL).group()
+    assert " ".join(snapshot.split()) == " ".join(installed.split())
+    assert "w.user_id = r.user_id AND wi.entity_id = i.entity_id" in installed
+    assert "p.user_id = r.user_id AND pos.instrument_id = i.instrument_id" in installed
+    assert "pos.quantity <> 0" in installed
+    assert "w.watchlist_id = r.scope_id" in installed
+    assert "p.portfolio_id = r.scope_id" in installed
+    assert "o.active OR r.alert_type = 'SIGNAL_CHANGE'" in installed
+    assert "e.event_type <> 'OBSERVED'" in installed
+    assert "date_trunc('day', i.price_as_of, 'UTC')" in installed
+    assert "ph.close > 0" in installed
+    assert "r.conditions->'excluded_symbols'" in installed
+    assert "ALTER COLUMN signal_id DROP NOT NULL" in installer
+    table = schema.split("CREATE TABLE public.alert_events (", 1)[1].split(");", 1)[0]
+    assert "signal_id uuid NOT NULL" not in table
+
+
 @pytest.mark.parametrize("already_fixed", [False, True])
 def test_consolidate_instrument_deletes_source_before_metadata_update(already_fixed):
     schema = (ROOT / "mip_schema.sql").read_text(encoding="utf-8")

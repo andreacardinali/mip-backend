@@ -13,19 +13,29 @@ from notifications.queue import NotificationQueue
 
 def _candidate(r: dict[str, Any]) -> AlertCandidate:
     return AlertCandidate(
-        str(r["signal_id"]),
+        str(r["signal_id"]) if r.get("signal_id") else None,
         str(r["instrument_id"]),
         str(r["symbol"]),
         str(r.get("direction") or "NEUTRAL"),
         str(r["origin"]) if r.get("origin") else None,
-        float(r["composite_score"]) / 100,
-        float(r["consensus_score"]) / 100,
-        float(r["conflict_score"]) / 100,
+        float(r.get("composite_score") or 0) / 100,
+        float(r.get("consensus_score") or 0) / 100,
+        float(r.get("conflict_score") or 0) / 100,
         int(r.get("strategy_count") or 1),
         str(r["verdict"]) if r.get("verdict") else None,
         str(r["summary"]) if r.get("summary") else None,
         dict(r.get("evidence") or {}),
         tuple(r.get("strategy_codes") or ()),
+        observed_at=str(r["observed_at"]) if r.get("observed_at") else None,
+        last_price=float(r["last_price"]) if r.get("last_price") is not None else None,
+        reference_price=(
+            float(r["reference_price"])
+            if r.get("reference_price") is not None
+            else None
+        ),
+        reference_at=str(r["reference_at"]) if r.get("reference_at") else None,
+        signal_event_id=str(r["signal_event_id"]) if r.get("signal_event_id") else None,
+        event_type=str(r["event_type"]) if r.get("event_type") else None,
     )
 
 

@@ -181,7 +181,6 @@ def test_missing_or_stale_price_is_not_an_alert(overrides):
         reference_price=100,
         observed_at="2026-10-29T12:00:00+00:00",
         reference_at="2026-10-28T16:00:00+00:00",
-        **{},
     )
     assert not evaluate_alerts(
         [selected],
@@ -213,3 +212,27 @@ def test_lifecycle_exits_do_not_require_active_opportunity_scores():
         [candidate],
         now=now,
     )
+
+
+def test_price_candidate_mapping_and_default_percent_direction():
+    from alerts.service import _candidate
+
+    candidate = _candidate(
+        {
+            "signal_id": None,
+            "instrument_id": "instrument-1",
+            "symbol": "MSFT",
+            "last_price": "94",
+            "reference_price": "100",
+            "observed_at": "2026-10-29T12:00:00+00:00",
+            "reference_at": "2026-10-28T16:00:00+00:00",
+        }
+    )
+    assert candidate.signal_id is None
+    matches = evaluate_alerts(
+        [replace(rule(threshold=5), alert_type="PERCENT_MOVE")],
+        [candidate],
+        now=datetime(2026, 10, 29, 12, tzinfo=timezone.utc),
+    )
+    assert len(matches) == 1
+    assert "ANY" in matches[0].message
