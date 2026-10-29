@@ -70,12 +70,24 @@ class AlertRepository:
             for r in rows
         ]
 
+    def list_rule_candidates(
+        self, rule_id: str, *, limit: int = 500
+    ) -> list[dict[str, Any]]:
+        rows = self.db.execute(
+            text(
+                "SELECT public.sp_alert_list_rule_candidates("
+                "CAST(:rule_id AS uuid), :limit)"
+            ),
+            {"rule_id": rule_id, "limit": limit},
+        ).scalars()
+        return [dict(row) for row in rows]
+
     def register_match(
         self,
         *,
         rule_id: str,
         instrument_id: str,
-        signal_id: str,
+        signal_id: str | None,
         fingerprint: str,
         payload: dict[str, Any],
     ) -> str | None:

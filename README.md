@@ -223,6 +223,35 @@ codes, plus normalized score thresholds (0 to 1), minimum strategy count and
 cooldown in minutes. Empty filter lists impose no restriction. Multiple selected
 strategy codes match any supporting strategy; the evaluator remains centralized.
 
+### Collection Monitoring Runtime
+
+The existing market alert evaluation job now loads candidates per enabled rule
+through `sp_alert_list_rule_candidates`, rather than sharing a global Screener
+candidate list. Watchlist and portfolio membership and ownership are selected in
+the stored routine; each rule is evaluated only against its own returned rows.
+The `candidates` metric counts rows across rules, including repeated instruments.
+`max_candidates` limits each rule separately.
+
+Before running this updated job, review and manually apply
+`oneshot/install_collection_monitoring.sql` after backup and PostgreSQL validation.
+It installs the candidate routine, permits the four alert types and makes event
+`signal_id` nullable for price monitoring. `mip_schema.sql` contains the matching
+definition. No live SQL was executed and no startup migration is installed.
+
+Supported types are `MARKET_SIGNAL`, `FIXED_PRICE`, `PERCENT_MOVE` and
+`SIGNAL_CHANGE`. Scope accepts `SCREENER`, `WATCHLIST`, `PORTFOLIO` or `ALL`;
+`scope_id` optionally narrows watchlist or portfolio rules to one owned collection.
+Price rules use fresh instrument prices. Percent movement uses the latest stored
+positive close before the observation's UTC day, within seven days, not an
+exchange-session close. Fixed-price monitoring tests threshold satisfaction per
+observation with the existing cooldown; it is not a persistent crossing/rearm engine.
+Lifecycle monitoring excludes `OBSERVED` events and uses event creation time.
+
+Delivery retains the central queue and passes the actual rule type, including
+for events without a signal ID. The existing preference API does not yet list
+these alert types; without a matching subscription, the queue uses the configured
+channel/source fallback. Account monitoring controls remain a frontend follow-up.
+
 Offline checks for alert configuration, evaluation, API ownership/transactions and
 stored-routine contracts:
 

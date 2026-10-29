@@ -7,7 +7,6 @@ from sqlalchemy.orm import Session
 from alerts.evaluator import evaluate_alerts
 from alerts.models import AlertCandidate
 from alerts.repository import AlertRepository
-from market_screener.repository import MarketScreenerRepository
 from notifications.queue import NotificationQueue
 
 
@@ -52,9 +51,13 @@ def evaluate_and_enqueue_market_alerts(
             "matches": 0,
             "enqueued": 0,
         }
-    rows = MarketScreenerRepository(db).list_alert_candidates(limit=max_candidates)
-    candidates = [_candidate(dict(r)) for r in rows]
-    matches = evaluate_alerts(rules, candidates)
+    candidate_count = 0
+    matches = []
+    for rule in rules:
+        rows = repo.list_rule_candidates(rule.rule_id, limit=max_candidates)
+        candidates = [_candidate(row) for row in rows]
+        candidate_count += len(candidates)
+        matches.extend(evaluate_alerts([rule], candidates))
     queue = NotificationQueue(db, enabled=notifications_enabled)
     registered = enqueued = duplicates = skipped = 0
     for m in matches:
@@ -72,7 +75,7 @@ def evaluate_and_enqueue_market_alerts(
         result = queue.enqueue(
             user_id=m.rule.user_id,
             notification_key=f"MARKET_ALERT:{event_id}",
-            notification_type="MARKET_SIGNAL",
+            notification_type=m.rule.alert_type,
             entity_id=None,
             symbol=m.candidate.symbol,
             event_key=event_id,
@@ -92,7 +95,7 @@ def evaluate_and_enqueue_market_alerts(
     return {
         "status": "SUCCESS",
         "rules": len(rules),
-        "candidates": len(candidates),
+        "candidates": candidate_count,
         "matches": len(matches),
         "registered": registered,
         "enqueued": enqueued,
