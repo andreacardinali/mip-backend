@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -91,6 +92,28 @@ def list_screener_signal_events(
             raise HTTPException(404, "Opportunity not found")
         return SignalLifecycleRepository(db).list_events(
             instrument_id=opportunity["source_instrument_id"], limit=limit
+        )
+    finally:
+        db.close()
+
+
+@router.get("/performance")
+def list_screener_signal_performance(
+    instrument_id: UUID | None = None,
+    strategy_code: str | None = Query(None, min_length=1, max_length=100),
+    status: Literal["OPEN", "CLOSED"] | None = None,
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    db = SessionLocal()
+    try:
+        return SignalLifecycleRepository(db).list_performance(
+            instrument_id=str(instrument_id) if instrument_id else None,
+            strategy_code=strategy_code.strip().upper() if strategy_code else None,
+            status=status,
+            limit=limit,
+            offset=offset,
         )
     finally:
         db.close()

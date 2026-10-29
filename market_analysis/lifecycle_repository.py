@@ -57,3 +57,27 @@ class SignalLifecycleRepository:
             {"instrument": instrument_id, "strategy": strategy_code, "limit": limit},
         ).scalars()
         return [dict(x) for x in rows]
+
+    def list_performance(
+        self,
+        instrument_id: str | None = None,
+        strategy_code: str | None = None,
+        status: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict]:
+        rows = self.db.execute(
+            text(
+                "SELECT payload FROM public.sp_market_analysis_list_signal_performance("
+                "CAST(:instrument AS uuid),CAST(:strategy AS varchar),CAST(:status AS varchar),"
+                "CAST(:limit AS integer),CAST(:offset AS integer)) payload"
+            ),
+            {
+                "instrument": instrument_id,
+                "strategy": strategy_code,
+                "status": status,
+                "limit": limit,
+                "offset": offset,
+            },
+        ).scalars()
+        return [dict(row) for row in rows]

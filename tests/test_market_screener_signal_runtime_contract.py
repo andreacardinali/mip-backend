@@ -9,6 +9,24 @@ from uuid import UUID
 import pytest
 
 
+def test_performance_installer_preserves_asof_prices_and_direction_cycles() -> None:
+    sql = Path("oneshot/install_signal_performance_history.sql").read_text(encoding="utf-8")
+    assert "BEFORE INSERT ON public.market_analysis_signal_events" in sql
+    assert "performance_recorded_at timestamptz NOT NULL DEFAULT clock_timestamp()" in sql
+    assert "COALESCE((payload->>'processed_at')::timestamptz, created_at)" in sql
+    assert "ORDER BY next_event.performance_recorded_at, next_event.signal_event_id" in sql
+    assert "WHERE NOT payload ? 'performance'" in sql
+    assert "instrument_id, observed_at, payload, false" in sql
+    assert "ts <= p_observed_at" in sql
+    assert "observed_at <= p_observed_at" in sql
+    assert "'CREATED', 'DIRECTION_CHANGED', 'CLOSED', 'EXPIRED'" in sql
+    assert "new_direction IN ('LONG', 'SHORT')" in sql
+    assert "CASE WHEN new_direction = 'SHORT' THEN -1 ELSE 1 END" in sql
+    assert "(valuation->>'price_at')::timestamptz >= observed_at" in sql
+    assert "exit_at >= observed_at" in sql
+    assert "OFFSET GREATEST(p_offset, 0)" in sql
+
+
 def test_api_enriches_existing_opportunity_payloads() -> None:
     repository = Path("market_screener/api_repository.py").read_text(encoding="utf-8")
     assert repository.count("sp_market_screener_enrich_opportunity_payload") == 2
@@ -134,6 +152,80 @@ def test_signal_history_repository_reuses_stored_routine() -> None:
     )
     assert "public.sp_market_analysis_list_signal_events(" in calls[0][0]
     assert calls[0][1] == {"instrument": "source", "strategy": None, "limit": 20}
+
+
+def test_performance_repository_reuses_stored_routine() -> None:
+    repository = runpy.run_path("market_analysis/lifecycle_repository.py")["SignalLifecycleRepository"]
+    calls = []
+    rows = [{"performance_id": "cycle", "return_pct": None}]
+
+    def execute(statement, params):
+        calls.append((str(statement), params))
+        return SimpleNamespace(scalars=lambda: iter(rows))
+
+    assert repository(SimpleNamespace(execute=execute)).list_performance(
+        instrument_id="source", strategy_code="SWING", status="CLOSED", limit=25, offset=50
+    ) == rows
+    assert "public.sp_market_analysis_list_signal_performance(" in calls[0][0]
+    assert calls[0][1] == {
+        "instrument": "source", "strategy": "SWING", "status": "CLOSED", "limit": 25, "offset": 50
+    }
+
+
+@pytest.mark.parametrize(
+    ("scenario", "expected_status"),
+    [("success", 200), ("failure", 500), ("unauthenticated", 401),
+     ("invalid_id", 422), ("invalid_status", 422), ("negative_offset", 422), ("high_limit", 422)],
+)
+def test_performance_http_contract(monkeypatch, scenario, expected_status) -> None:
+    fastapi = pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    calls = []
+
+    def current_user():
+        if scenario == "unauthenticated":
+            raise fastapi.HTTPException(401, "Authentication required")
+        return {"user_id": "owner"}
+
+    def list_performance(**kwargs):
+        calls.append(kwargs)
+        if scenario == "failure":
+            raise RuntimeError("database unavailable")
+        return [{"performance_id": "cycle", "return_pct": None}]
+
+    modules = {
+        "auth.security": {"CurrentUser": dict, "get_current_user": current_user},
+        "db": {"SessionLocal": lambda: SimpleNamespace(close=lambda: calls.append("close"))},
+        "market_screener.api_repository": {"MarketScreenerApiRepository": lambda db: None},
+        "market_analysis.lifecycle_repository": {
+            "SignalLifecycleRepository": lambda db: SimpleNamespace(list_performance=list_performance)
+        },
+    }
+    with monkeypatch.context() as patch:
+        for name, attributes in modules.items():
+            module = ModuleType(name)
+            module.__dict__.update(attributes)
+            patch.setitem(sys.modules, name, module)
+        router = runpy.run_path("routers/market_screener.py")["router"]
+    app = fastapi.FastAPI()
+    app.include_router(router, prefix="/api/screener")
+    params = {"strategy_code": "swing", "status": "CLOSED", "limit": 25, "offset": 50}
+    invalid = {"invalid_id": ("instrument_id", "invalid"), "invalid_status": ("status", "INVALID"),
+               "negative_offset": ("offset", -1), "high_limit": ("limit", 1001)}
+    if scenario in invalid:
+        key, value = invalid[scenario]
+        params[key] = value
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.get("/api/screener/performance", params=params)
+    assert response.status_code == expected_status
+    if scenario in ("success", "failure"):
+        assert calls == [{"instrument_id": None, "strategy_code": "SWING", "status": "CLOSED",
+                          "limit": 25, "offset": 50}, "close"]
+    else:
+        assert calls == []
+    if scenario == "success":
+        assert response.json() == [{"performance_id": "cycle", "return_pct": None}]
 
 
 @pytest.mark.parametrize("source_format", ["original", "multiline", "single_quotes"])
