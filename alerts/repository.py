@@ -15,7 +15,9 @@ class AlertRepository:
 
     def list_user_rules(self, user_id: str) -> list[dict[str, Any]]:
         rows = self.db.execute(
-            text("SELECT * FROM public.sp_alert_list_user_rules(CAST(:user_id AS uuid))"),
+            text(
+                "SELECT * FROM public.sp_alert_list_user_rules(CAST(:user_id AS uuid))"
+            ),
             {"user_id": user_id},
         ).mappings()
         return [
