@@ -25,6 +25,7 @@ def _candidate(r: dict[str, Any]) -> AlertCandidate:
         str(r["verdict"]) if r.get("verdict") else None,
         str(r["summary"]) if r.get("summary") else None,
         dict(r.get("evidence") or {}),
+        tuple(r.get("strategy_codes") or ()),
     )
 
 

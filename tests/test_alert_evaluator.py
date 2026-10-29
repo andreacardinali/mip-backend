@@ -52,6 +52,23 @@ def test_conflict_rejected():
     )
 
 
+def test_strategy_filter_is_case_insensitive_and_matches_any_selected_strategy():
+    matches = evaluate_alerts(
+        [rule(strategy_codes=[" call_entry_setup ", "SUPERTREND"])],
+        [item(strategy_codes=("CALL_ENTRY_SETUP", "TREND_PULLBACK"))],
+    )
+    assert len(matches) == 1
+    assert matches[0].context["strategy_codes"] == [
+        "CALL_ENTRY_SETUP", "TREND_PULLBACK"
+    ]
+
+
+def test_strategy_filter_rejects_missing_or_different_strategies():
+    selected = rule(strategy_codes=["CALL_ENTRY_SETUP"])
+    assert evaluate_alerts([selected], [item()]) == []
+    assert evaluate_alerts([selected], [item(strategy_codes=("SWING_EXIT",))]) == []
+
+
 def test_fingerprint_changes():
     assert (
         evaluate_alerts([rule()], [item(direction="BUY")])[0].fingerprint
@@ -79,3 +96,22 @@ def test_ranked_candidate_normalizes_scores():
     assert candidate.conflict_score == 0.12
     assert len(evaluate_alerts([rule(min_composite_score=0.8)], [candidate])) == 1
     assert evaluate_alerts([rule(max_conflict_score=0.1)], [candidate]) == []
+
+
+def test_ranked_candidate_preserves_strategy_codes():
+    from alerts.service import _candidate
+
+    candidate = _candidate(
+        {
+            "signal_id": "signal",
+            "instrument_id": "instrument",
+            "symbol": "MSFT",
+            "composite_score": 86,
+            "consensus_score": 78,
+            "conflict_score": 12,
+            "strategy_codes": ["CALL_ENTRY_SETUP", "TREND_PULLBACK"],
+        }
+    )
+    assert candidate.strategy_codes == ("CALL_ENTRY_SETUP", "TREND_PULLBACK")
+    assert len(evaluate_alerts([rule(strategy_codes=["CALL_ENTRY_SETUP"])], [candidate])) == 1
+    assert evaluate_alerts([rule(strategy_codes=["SWING_EXIT"])], [candidate]) == []

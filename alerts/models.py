@@ -30,6 +30,7 @@ class AlertCandidate:
     verdict: str | None
     summary: str | None
     evidence: dict[str, Any] = field(default_factory=dict)
+    strategy_codes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

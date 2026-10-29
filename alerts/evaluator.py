@@ -31,6 +31,11 @@ def _matches(rule: AlertRule, item: AlertCandidate) -> bool:
         allowed = _upper_set(c.get(key))
         if allowed and value.upper() not in allowed:
             return False
+    strategies = _upper_set(c.get("strategy_codes"))
+    if strategies and not strategies.intersection(
+        code.upper() for code in item.strategy_codes
+    ):
+        return False
     return (
         item.composite_score >= _number(c.get("min_composite_score"), 0.75)
         and item.consensus_score >= _number(c.get("min_consensus_score"), 0.0)
@@ -89,6 +94,7 @@ def evaluate_alerts(
                 "consensus_score": item.consensus_score,
                 "conflict_score": item.conflict_score,
                 "strategy_count": item.strategy_count,
+                "strategy_codes": list(item.strategy_codes),
                 "verdict": item.verdict,
                 "summary": item.summary,
                 "evidence": item.evidence,
