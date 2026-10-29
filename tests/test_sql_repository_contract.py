@@ -64,7 +64,7 @@ def test_alert_rule_management_installer_matches_snapshots():
     pattern = r"FUNCTION public\.sp_alert_list_user_rules\(.*?\$\$;"
     installed = re.search(pattern, installer, re.DOTALL)
     assert installed is not None
-    for filename in "mip_schema.sql":
+    for filename in ("mip_schema.sql",):
         schema = (ROOT / filename).read_text(encoding="utf-8")
         snapshot = re.search(pattern, schema, re.DOTALL)
         assert snapshot is not None
