@@ -25,3 +25,4 @@ build/
 *.zip
 
 sql/
+.github/copilot-instructions.md

@@ -7,6 +7,7 @@ from sqlalchemy import text
 
 from db import engine
 from routers.admin import router as admin_router
+from routers.alerts import router as alerts_router
 from routers.auth import router as auth_router
 from routers.catalysts import router as catalysts_router
 from routers.entities import router as entities_router
@@ -43,6 +44,7 @@ app.add_middleware(
 )
 
 app.include_router(admin_router, prefix="/api/admin", tags=["admin"])
+app.include_router(alerts_router, prefix="/api/alerts", tags=["alerts"])
 app.include_router(auth_router, prefix="/api/auth", tags=["auth"])
 app.include_router(entities_router, prefix="/api/entities", tags=["entities"])
 app.include_router(imports_router, prefix="/api/import", tags=["import"])

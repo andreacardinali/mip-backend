@@ -14,6 +14,7 @@ RUNTIME_FILES = (
     "routers/market_data.py",
     "auth/security.py",
     "market_screener/repository.py",
+    "alerts/repository.py",
     "alerts/service.py",
     "scheduler.py",
     "scheduler_repository.py",
@@ -54,6 +55,22 @@ def test_runtime_sp_calls_exist_in_schema():
                     relative_path,
                     name,
                 )
+
+
+def test_alert_rule_management_installer_matches_snapshots():
+    installer = (ROOT / "oneshot/install_alert_rule_management.sql").read_text(
+        encoding="utf-8"
+    )
+    pattern = r"FUNCTION public\.sp_alert_list_user_rules\(.*?\$\$;"
+    installed = re.search(pattern, installer, re.DOTALL)
+    assert installed is not None
+    for filename in ("mip_schema.sql", "mip_schema2.sql"):
+        schema = (ROOT / filename).read_text(encoding="utf-8")
+        snapshot = re.search(pattern, schema, re.DOTALL)
+        assert snapshot is not None
+        assert " ".join(installed.group().split()) == " ".join(snapshot.group().split())
+    assert "WHERE r.user_id = p_user_id" in installed.group()
+    assert "WHERE r.enabled" not in installed.group()
 
 
 def test_consolidate_instrument_alias_conflicts_match_unique_index():

@@ -13,6 +13,43 @@ class AlertRepository:
     def __init__(self, db: Session) -> None:
         self.db = db
 
+    def list_user_rules(self, user_id: str) -> list[dict[str, Any]]:
+        rows = self.db.execute(
+            text("SELECT * FROM public.sp_alert_list_user_rules(CAST(:user_id AS uuid))"),
+            {"user_id": user_id},
+        ).mappings()
+        return [
+            {
+                **dict(row),
+                "rule_id": str(row["rule_id"]),
+            }
+            for row in rows
+        ]
+
+    def save_user_rule(
+        self, user_id: str, rule_id: str | None, payload: dict[str, Any]
+    ) -> str | None:
+        saved_id = self.db.execute(
+            text(
+                "SELECT public.sp_alert_upsert_rule("
+                "CAST(:rule_id AS uuid), CAST(:user_id AS uuid), :name, "
+                ":alert_type, :severity, :channel, CAST(:conditions AS jsonb), "
+                ":cooldown_minutes, :enabled)"
+            ),
+            {
+                "rule_id": rule_id,
+                "user_id": user_id,
+                "name": payload["name"],
+                "alert_type": "MARKET_SIGNAL",
+                "severity": payload["severity"],
+                "channel": payload["channel"],
+                "conditions": json.dumps(payload["conditions"]),
+                "cooldown_minutes": payload["cooldown_minutes"],
+                "enabled": payload["enabled"],
+            },
+        ).scalar()
+        return str(saved_id) if saved_id else None
+
     def list_enabled_rules(self) -> list[AlertRule]:
         rows = self.db.execute(
             text("SELECT * FROM public.sp_alert_list_enabled_rules()")

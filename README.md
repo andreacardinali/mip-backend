@@ -204,6 +204,25 @@ with `--upgrade --apply`. The upgrade widens holiday exchange codes and replaces
 the holiday storage, canonical exchange upsert and catalog synchronization functions.
 It does not reconcile existing exchange rows.
 
+### Alert Rule Management
+
+Account settings manage the existing MARKET_SIGNAL alert rules through authenticated
+`GET /api/alerts`, `POST /api/alerts` and `PUT /api/alerts/{rule_id}`.
+Rules are scoped to the authenticated user, including disabled rules. Creation
+reuses `sp_alert_upsert_rule`: submitting an existing name updates that user's rule.
+Updates by UUID never modify another user's rule. Disable a rule rather than
+delete it, preserving event history. Delivery uses the existing notification pipeline.
+
+Before using this API on the live instance, review and manually apply
+`oneshot/install_alert_rule_management.sql` after backup and PostgreSQL validation.
+It installs only `sp_alert_list_user_rules`; no startup migration is performed.
+The schema snapshots contain the same routine. No live migration was run.
+
+Conditions accept symbols, directions, verdicts, origins and supporting strategy
+codes, plus normalized score thresholds (0 to 1), minimum strategy count and
+cooldown in minutes. Empty filter lists impose no restriction. Multiple selected
+strategy codes match any supporting strategy; the evaluator remains centralized.
+
 ### Scheduler Job Rename
 
 Stop backend/scheduler writers before applying the migration, and complete it
