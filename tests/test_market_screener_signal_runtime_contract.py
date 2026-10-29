@@ -1,4 +1,5 @@
 import ast
+import re
 import runpy
 import sys
 from pathlib import Path
@@ -119,16 +120,38 @@ def test_signal_history_repository_reuses_stored_routine() -> None:
     assert calls[0][1] == {"instrument": "source", "strategy": None, "limit": 20}
 
 
-def test_gui_loads_signal_history_only_for_selected_detail() -> None:
+@pytest.mark.parametrize("source_format", ["original", "multiline", "single_quotes"])
+def test_gui_loads_signal_history_only_for_selected_detail(source_format) -> None:
     page = Path("../mip-frontend/src/pages/ScreenerPage.tsx").read_text(
         encoding="utf-8"
     )
     service = Path("../mip-frontend/src/services/marketScreener.ts").read_text(
         encoding="utf-8"
     )
-    assert 'queryKey: ["market-screener-signal-events", selectedId]' in page
-    assert 'queryFn: () => getScreenerSignalEvents(selectedId ?? "")' in page
-    assert "enabled: Boolean(selectedId && detailQuery.data)" in page
+    query = re.search(
+        r"const\s+signalEventsQuery\s*=\s*useQuery\s*\(\s*\{(.*?)\}\s*\)",
+        page,
+        re.DOTALL,
+    )
+    assert query is not None, "Signal history query is missing from ScreenerPage"
+    options = query.group(1)
+    if source_format == "multiline":
+        options = re.sub(r"\s+", "\n", options)
+        options = re.sub(r"selectedId\s*\]", "selectedId,\n]", options)
+    elif source_format == "single_quotes":
+        options = options.replace('"', "'")
+    assert re.search(
+        r"""queryKey\s*:\s*\[\s*['"]market-screener-signal-events['"]\s*,\s*selectedId\s*,?\s*\]""",
+        options,
+    )
+    assert re.search(
+        r"""queryFn\s*:\s*\(\s*\)\s*=>\s*getScreenerSignalEvents\s*\(\s*selectedId\s*\?\?\s*(?:""|'')\s*\)""",
+        options,
+    )
+    assert re.search(
+        r"enabled\s*:\s*Boolean\s*\(\s*selectedId\s*&&\s*detailQuery\s*\.\s*data\s*\)",
+        options,
+    )
     assert "row.signal_event_id" in page
     assert "/screener/${id}/signal-events" in service
 
