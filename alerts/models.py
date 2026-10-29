@@ -18,7 +18,7 @@ class AlertRule:
 
 @dataclass(frozen=True, slots=True)
 class AlertCandidate:
-    signal_id: str
+    signal_id: str | None
     instrument_id: str
     symbol: str
     direction: str
@@ -31,6 +31,12 @@ class AlertCandidate:
     summary: str | None
     evidence: dict[str, Any] = field(default_factory=dict)
     strategy_codes: tuple[str, ...] = ()
+    observed_at: str | None = None
+    last_price: float | None = None
+    reference_price: float | None = None
+    reference_at: str | None = None
+    signal_event_id: str | None = None
+    event_type: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

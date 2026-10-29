@@ -77,6 +77,43 @@ def test_rule_payload_normalizes_strategy_codes():
     assert payload["conditions"]["min_composite_score"] == 0.75
 
 
+@pytest.mark.parametrize("alert_type", ["FIXED_PRICE", "PERCENT_MOVE", "SIGNAL_CHANGE"])
+def test_monitoring_rule_scopes_and_types(alert_type):
+    conditions = {
+        "scope": "PORTFOLIO",
+        "scope_id": "00000000-0000-0000-0000-000000000001",
+    }
+    if alert_type != "SIGNAL_CHANGE":
+        conditions.update(threshold=5, price_direction="DOWN")
+    payload = validate_rule_payload(
+        {"name": "Monitor", "alert_type": alert_type, "conditions": conditions}
+    )
+    assert payload["alert_type"] == alert_type
+    assert payload["conditions"]["scope"] == "PORTFOLIO"
+    database = Mock()
+    AlertRepository(database).save_user_rule("owner", None, payload)
+    assert database.execute.call_args.args[1]["alert_type"] == alert_type
+
+
+@pytest.mark.parametrize(
+    "conditions",
+    [
+        {"threshold": 0},
+        {"threshold": float("nan")},
+        {"threshold": 10**1000},
+        {"threshold": 5, "price_direction": "SIDEWAYS"},
+        {"threshold": 5, "scope": "PRIVATE"},
+        {"threshold": 5, "scope": "PORTFOLIO", "scope_id": "invalid"},
+        {"threshold": 5, "max_age_minutes": 0},
+    ],
+)
+def test_invalid_price_monitoring_rejected(conditions):
+    with pytest.raises(ValueError):
+        validate_rule_payload(
+            {"name": "Monitor", "alert_type": "FIXED_PRICE", "conditions": conditions}
+        )
+
+
 @pytest.mark.parametrize(
     "payload",
     [

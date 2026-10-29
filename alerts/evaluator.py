@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Iterable
+from datetime import datetime, timedelta, timezone
+from math import isfinite
 from typing import Any
 
 from alerts.models import AlertCandidate, AlertMatch, AlertRule
@@ -21,6 +23,38 @@ def _number(value: Any, default: float) -> float:
 
 def _matches(rule: AlertRule, item: AlertCandidate) -> bool:
     c = rule.conditions
+    if item.symbol.upper() in _upper_set(c.get("excluded_symbols")):
+        return False
+    if rule.alert_type in ("FIXED_PRICE", "PERCENT_MOVE"):
+        allowed = _upper_set(c.get("symbols"))
+        if allowed and item.symbol.upper() not in allowed:
+            return False
+        if (
+            item.last_price is None
+            or not isfinite(item.last_price)
+            or item.last_price <= 0
+        ):
+            return False
+        value = item.last_price
+        if rule.alert_type == "PERCENT_MOVE":
+            if (
+                item.reference_price is None
+                or not isfinite(item.reference_price)
+                or item.reference_price <= 0
+            ):
+                return False
+            value = (value / item.reference_price - 1) * 100
+        threshold = _number(c.get("threshold"), float("nan"))
+        if not isfinite(threshold) or threshold <= 0:
+            return False
+        direction = c.get("price_direction", "UP")
+        if direction == "ANY" and rule.alert_type == "PERCENT_MOVE":
+            return abs(value) >= threshold
+        if direction == "DOWN":
+            return value <= (
+                -threshold if rule.alert_type == "PERCENT_MOVE" else threshold
+            )
+        return direction == "UP" and value >= threshold
     checks = (
         ("symbols", item.symbol),
         ("directions", item.direction),
@@ -36,6 +70,8 @@ def _matches(rule: AlertRule, item: AlertCandidate) -> bool:
         code.upper() for code in item.strategy_codes
     ):
         return False
+    if rule.alert_type == "SIGNAL_CHANGE":
+        return item.signal_event_id is not None
     return (
         item.composite_score >= _number(c.get("min_composite_score"), 0.75)
         and item.consensus_score >= _number(c.get("min_consensus_score"), 0.0)
@@ -53,20 +89,35 @@ def _fingerprint(rule: AlertRule, item: AlertCandidate) -> str:
         "score": round(item.composite_score, 2),
         "consensus": round(item.consensus_score, 2),
     }
+    if rule.alert_type != "MARKET_SIGNAL":
+        state.update(
+            alert_type=rule.alert_type,
+            observation=item.signal_event_id or item.observed_at,
+        )
     return hashlib.sha256(
         json.dumps(state, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
 
 
 def evaluate_alerts(
-    rules: Iterable[AlertRule], candidates: Iterable[AlertCandidate]
+    rules: Iterable[AlertRule],
+    candidates: Iterable[AlertCandidate],
+    *,
+    now: datetime | None = None,
 ) -> list[AlertMatch]:
     items = list(candidates)
     out = []
     for rule in rules:
-        if rule.alert_type.upper() != "MARKET_SIGNAL":
+        if rule.alert_type not in (
+            "MARKET_SIGNAL",
+            "FIXED_PRICE",
+            "PERCENT_MOVE",
+            "SIGNAL_CHANGE",
+        ):
             continue
         for item in items:
+            if rule.alert_type != "MARKET_SIGNAL" and not _fresh(rule, item, now):
+                continue
             if not _matches(rule, item):
                 continue
             title = f"{item.symbol}: segnale {item.direction.upper()}"
@@ -82,7 +133,36 @@ def evaluate_alerts(
                 lines.append(f"Verdetto: {item.verdict}")
             if item.summary:
                 lines.extend(("", item.summary.strip()))
+            if rule.alert_type in ("FIXED_PRICE", "PERCENT_MOVE"):
+                title = f"{item.symbol}: soglia di prezzo"
+                lines = [
+                    f"Regola: {rule.name}",
+                    f"Prezzo: {item.last_price}",
+                    f"Soglia: {rule.conditions['threshold']} ({rule.conditions['price_direction']})",
+                    f"Osservato: {item.observed_at}",
+                ]
+                if rule.alert_type == "PERCENT_MOVE":
+                    change = (item.last_price / item.reference_price - 1) * 100
+                    lines.append(f"Variazione: {change:+.2f}%")
+            elif rule.alert_type == "SIGNAL_CHANGE":
+                title = f"{item.symbol}: {item.event_type}"
+                lines = [
+                    f"Regola: {rule.name}",
+                    f"Evento: {item.event_type}",
+                    f"Direzione: {item.direction}",
+                    f"Strategie: {', '.join(item.strategy_codes)}",
+                    item.summary or "",
+                ]
             context = {
+                "alert_type": rule.alert_type,
+                "scope": rule.conditions.get("scope", "SCREENER"),
+                "scope_id": rule.conditions.get("scope_id"),
+                "observed_at": item.observed_at,
+                "last_price": item.last_price,
+                "reference_price": item.reference_price,
+                "reference_at": item.reference_at,
+                "signal_event_id": item.signal_event_id,
+                "event_type": item.event_type,
                 "rule_id": rule.rule_id,
                 "rule_name": rule.name,
                 "signal_id": item.signal_id,
@@ -110,3 +190,25 @@ def evaluate_alerts(
                 )
             )
     return out
+
+
+def _fresh(rule: AlertRule, item: AlertCandidate, now: datetime | None) -> bool:
+    try:
+        observed = datetime.fromisoformat(item.observed_at or "")
+        if observed.tzinfo is None:
+            return False
+        current = now or datetime.now(timezone.utc)
+        if (
+            not timedelta(0)
+            <= current - observed
+            <= timedelta(minutes=rule.conditions.get("max_age_minutes", 60))
+        ):
+            return False
+        if rule.alert_type == "PERCENT_MOVE":
+            reference = datetime.fromisoformat(item.reference_at or "")
+            return reference.tzinfo is not None and timedelta(
+                0
+            ) < observed - reference <= timedelta(days=7)
+        return True
+    except (ValueError, TypeError, OverflowError):
+        return False

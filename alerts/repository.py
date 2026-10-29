@@ -42,7 +42,7 @@ class AlertRepository:
                 "rule_id": rule_id,
                 "user_id": user_id,
                 "name": payload["name"],
-                "alert_type": "MARKET_SIGNAL",
+                "alert_type": payload.get("alert_type", "MARKET_SIGNAL"),
                 "severity": payload["severity"],
                 "channel": payload["channel"],
                 "conditions": json.dumps(payload["conditions"]),
