@@ -9,6 +9,7 @@ from typing import Any
 
 from alerts.models import AlertCandidate, AlertMatch, AlertRule
 from alerts.rule_configuration import effective_rule
+from market_time.normalization import as_utc
 
 
 def _upper_set(value: Any) -> set[str]:
@@ -20,6 +21,39 @@ def _number(value: Any, default: float) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def observation_time(item: AlertCandidate) -> datetime | None:
+    try:
+        return as_utc(datetime.fromisoformat(item.observed_at or ""))
+    except (ValueError, TypeError, OverflowError):
+        return None
+
+
+def candidate_is_eligible(
+    rule: AlertRule, item: AlertCandidate, *, now: datetime | None = None
+) -> bool:
+    if item.symbol.upper() in _upper_set(rule.conditions.get("excluded_symbols")):
+        return False
+    allowed = _upper_set(rule.conditions.get("symbols"))
+    if allowed and item.symbol.upper() not in allowed:
+        return False
+    if rule.alert_type != "MARKET_SIGNAL" and not _fresh(rule, item, now):
+        return False
+    if rule.alert_type in ("FIXED_PRICE", "PERCENT_MOVE"):
+        if (
+            item.last_price is None
+            or not isfinite(item.last_price)
+            or item.last_price <= 0
+        ):
+            return False
+        if rule.alert_type == "PERCENT_MOVE" and (
+            item.reference_price is None
+            or not isfinite(item.reference_price)
+            or item.reference_price <= 0
+        ):
+            return False
+    return True
 
 
 def _matches(rule: AlertRule, item: AlertCandidate) -> bool:
@@ -125,7 +159,7 @@ def evaluate_alerts(
             selected = effective_rule(rule, item.instrument_id)
             if selected is None:
                 continue
-            if selected.alert_type != "MARKET_SIGNAL" and not _fresh(selected, item, now):
+            if not candidate_is_eligible(selected, item, now=now):
                 continue
             if not _matches(selected, item):
                 continue
@@ -207,8 +241,8 @@ def evaluate_alerts(
 
 def _fresh(rule: AlertRule, item: AlertCandidate, now: datetime | None) -> bool:
     try:
-        observed = datetime.fromisoformat(item.observed_at or "")
-        if observed.tzinfo is None:
+        observed = observation_time(item)
+        if observed is None:
             return False
         current = now or datetime.now(UTC)
         if (

@@ -8,7 +8,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from alerts.evaluator import evaluate_alerts
+from alerts.evaluator import candidate_is_eligible, evaluate_alerts, observation_time
 from alerts.models import AlertCandidate
 from alerts.repository import AlertRepository
 from alerts.rule_configuration import effective_rule
@@ -62,7 +62,10 @@ def evaluate_and_enqueue_market_alerts(
         }
     candidate_count = 0
     matches = []
-    market_time = MarketTimeService(SQLExchangeHoursRepository(db), ExchangeCalendarsProvider())
+    now = datetime.now(UTC)
+    market_time = MarketTimeService(
+        SQLExchangeHoursRepository(db), ExchangeCalendarsProvider()
+    )
     for rule in rules:
         rows = repo.list_rule_candidates(rule.rule_id, limit=max_candidates)
         candidates = [_candidate(row) for row in rows]
@@ -78,52 +81,95 @@ def evaluate_and_enqueue_market_alerts(
                 or selected.alert_type == "PERCENT_MOVE"
             )
             if needs_clock:
+                observed = observation_time(candidate)
+                if observed is None or observed > now:
+                    continue
                 exchange = repo.instrument_exchange(candidate.instrument_id)
                 if not exchange:
-                    if selected.alert_type == "PERCENT_MOVE" or selected.conditions.get("regular_session_only"):
-                        continue
-                else:
-                    clock = market_time.snapshot(exchange)
-                    if selected.conditions.get("regular_session_only") and clock.status != MarketStatus.OPEN:
-                        continue
-                    if clock.session:
-                        session_key = f"{exchange}:{clock.session.session_date}"
-                    if selected.alert_type == "PERCENT_MOVE":
-                        if not candidate.observed_at:
-                            continue
-                        observed_clock = market_time.snapshot(exchange, at=datetime.fromisoformat(candidate.observed_at))
-                        previous = observed_clock.previous_session
-                        if observed_clock.status == MarketStatus.UNKNOWN or previous is None:
-                            continue
-                        reference = repo.session_reference(candidate.instrument_id, previous.session_date)
-                        if not reference:
-                            continue
-                        candidate = replace(candidate, reference_price=float(reference["close"]), reference_at=str(reference["ts"]))
-            evaluated = evaluate_alerts([selected], [candidate])
-            if selected.alert_type in ("FIXED_PRICE", "PERCENT_MOVE") and selected.conditions.get("crossing_only", False):
-                if not candidate.observed_at or not candidate.last_price or candidate.last_price <= 0:
                     continue
-                observed = datetime.fromisoformat(candidate.observed_at)
-                age = (datetime.now(UTC) - observed).total_seconds()
-                if not 0 <= age <= selected.conditions.get("max_age_minutes", 60) * 60:
+                observed_clock = market_time.snapshot(exchange, at=observed)
+                if observed_clock.status == MarketStatus.UNKNOWN:
                     continue
-                state_key = hashlib.sha256(json.dumps({
-                    "threshold": selected.conditions.get("threshold"),
-                    "direction": selected.conditions.get("price_direction"),
-                    "reference_at": candidate.reference_at if selected.alert_type == "PERCENT_MOVE" else None,
-                }, sort_keys=True).encode()).hexdigest()
+                session = observed_clock.session or observed_clock.previous_session
+                if session is None:
+                    continue
+                session_key = f"{exchange}:{session.session_date}"
+                if selected.conditions.get("regular_session_only"):
+                    clock = market_time.snapshot(exchange, at=now)
+                    if (
+                        clock.status != MarketStatus.OPEN
+                        or observed_clock.status != MarketStatus.OPEN
+                        or clock.session is None
+                        or clock.session.session_date != session.session_date
+                    ):
+                        continue
+                if selected.alert_type == "PERCENT_MOVE":
+                    previous = observed_clock.previous_session
+                    if previous is None:
+                        continue
+                    reference = repo.session_reference(
+                        candidate.instrument_id, previous.opens_at, previous.closes_at
+                    )
+                    if not reference:
+                        continue
+                    candidate = replace(
+                        candidate,
+                        reference_price=float(reference["close"]),
+                        reference_at=str(reference["ts"]),
+                    )
+            if not candidate_is_eligible(selected, candidate, now=now):
+                continue
+            direction_key = selected.conditions.get(
+                "price_direction", candidate.direction
+            )
+            if selected.alert_type == "PERCENT_MOVE" and direction_key == "ANY":
+                direction_key = (
+                    "UP"
+                    if candidate.last_price >= candidate.reference_price
+                    else "DOWN"
+                )
+            evaluated = evaluate_alerts([selected], [candidate], now=now)
+            if selected.alert_type in (
+                "FIXED_PRICE",
+                "PERCENT_MOVE",
+            ) and selected.conditions.get("crossing_only", False):
+                state_key = hashlib.sha256(
+                    json.dumps(
+                        {
+                            "threshold": selected.conditions.get("threshold"),
+                            "direction": direction_key,
+                            "reference_at": (
+                                candidate.reference_at
+                                if selected.alert_type == "PERCENT_MOVE"
+                                else None
+                            ),
+                        },
+                        sort_keys=True,
+                    ).encode()
+                ).hexdigest()
                 generation = repo.observe_threshold(
-                    rule_id=selected.rule_id, instrument_id=candidate.instrument_id,
-                    observed_at=candidate.observed_at, matched=bool(evaluated), state_key=state_key,
+                    rule_id=selected.rule_id,
+                    instrument_id=candidate.instrument_id,
+                    observed_at=candidate.observed_at,
+                    matched=bool(evaluated),
+                    state_key=state_key,
                 )
                 if generation is None:
                     continue
-                evaluated = [replace(match, fingerprint=f"{state_key}:{generation}") for match in evaluated]
+                evaluated = [
+                    replace(match, fingerprint=f"{state_key}:{generation}")
+                    for match in evaluated
+                ]
             for match in evaluated:
-                context = {**match.context, "entry_price": candidate.last_price,
-                           "session_key": session_key,
-                           "once_per_session": selected.conditions.get("once_per_session", False),
-                           "direction_key": selected.conditions.get("price_direction", candidate.direction)}
+                context = {
+                    **match.context,
+                    "entry_price": candidate.last_price,
+                    "session_key": session_key,
+                    "once_per_session": selected.conditions.get(
+                        "once_per_session", False
+                    ),
+                    "direction_key": direction_key,
+                }
                 matches.append(replace(match, context=context))
     queue = NotificationQueue(db, enabled=notifications_enabled)
     registered = enqueued = duplicates = skipped = 0
@@ -144,9 +190,15 @@ def evaluate_and_enqueue_market_alerts(
     groups = {}
     for match, event_id in deliveries:
         key = (
-            match.rule.user_id, match.rule.channel, match.rule.alert_type,
+            match.rule.user_id,
+            match.rule.channel,
+            match.rule.alert_type,
             match.rule.severity,
-            None if match.rule.conditions.get("notification_mode") == "DIGEST" else event_id,
+            (
+                None
+                if match.rule.conditions.get("notification_mode") == "DIGEST"
+                else event_id
+            ),
         )
         groups.setdefault(key, []).append((match, event_id))
     for group in groups.values():
@@ -156,24 +208,40 @@ def evaluate_and_enqueue_market_alerts(
         digest_key = hashlib.sha256(":".join(sorted(ids)).encode()).hexdigest()
         result = queue.enqueue(
             user_id=m.rule.user_id,
-            notification_key=f"MARKET_ALERT_DIGEST:{digest_key}" if digest else f"MARKET_ALERT:{event_id}",
+            notification_key=(
+                f"MARKET_ALERT_DIGEST:{digest_key}"
+                if digest
+                else f"MARKET_ALERT:{event_id}"
+            ),
             notification_type=m.rule.alert_type,
             entity_id=None,
             symbol=None if digest else m.candidate.symbol,
             event_key=event_id,
             severity=m.rule.severity,
             title=f"Riepilogo alert ({len(group)})" if digest else m.title,
-            message="\n\n".join(match.message for match, _ in group) if digest else m.message,
-            context={"events": [match.context for match, _ in group]} if digest else m.context,
+            message=(
+                "\n\n".join(match.message for match, _ in group)
+                if digest
+                else m.message
+            ),
+            context=(
+                {"events": [match.context for match, _ in group]}
+                if digest
+                else m.context
+            ),
             channel=m.rule.channel,
         )
         if result.created and result.notification_id:
             for identifier in ids:
-                repo.mark_enqueued(alert_event_id=identifier, notification_id=result.notification_id)
+                repo.mark_enqueued(
+                    alert_event_id=identifier, notification_id=result.notification_id
+                )
             enqueued += 1
         else:
             for identifier in ids:
-                repo.mark_notification_skipped(alert_event_id=identifier, status=result.status.value)
+                repo.mark_notification_skipped(
+                    alert_event_id=identifier, status=result.status.value
+                )
             skipped += len(ids)
     return {
         "status": "SUCCESS",

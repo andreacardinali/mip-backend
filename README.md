@@ -251,11 +251,36 @@ definition. No live SQL was executed and no startup migration is installed.
 Supported types are `MARKET_SIGNAL`, `FIXED_PRICE`, `PERCENT_MOVE` and
 `SIGNAL_CHANGE`. Scope accepts `SCREENER`, `WATCHLIST`, `PORTFOLIO` or `ALL`;
 `scope_id` optionally narrows watchlist or portfolio rules to one owned collection.
-Price rules use fresh instrument prices. Percent movement uses the latest stored
-positive close before the observation's UTC day, within seven days, not an
-exchange-session close. Fixed-price monitoring tests threshold satisfaction per
-observation with the existing cooldown; it is not a persistent crossing/rearm engine.
+Price rules use fresh instrument prices. Percent movement uses the last positive
+stored price within the previous exchange session's UTC opening/closing bounds,
+within seven days. This is not guaranteed to be the official closing auction
+price. Missing exchange calendars or in-session reference data skip evaluation.
+Daily bars timestamped outside those bounds are not used as a fallback.
 Lifecycle monitoring excludes `OBSERVED` events and uses event creation time.
+
+Review and manually apply `oneshot/install_screener_monitoring_extensions.sql`
+after the collection monitoring and history installers, with backup and PostgreSQL
+validation, before activating this worker. The matching definitions are in
+`mip_schema.sql`; no startup migration or live SQL execution is performed.
+This installer also extends shared scan ingestion to watchlist instruments and
+nonzero portfolio positions outside the selected universe. Alert selection remains
+rule/owner scoped in `sp_alert_list_rule_candidates`.
+
+Rules support UUID-keyed `instrument_overrides`, including instrument pause,
+threshold, direction and strategy/lifecycle filters. `crossing_only` defaults to
+true for newly saved rules: the first valid matching observation may alert, then
+an observed non-match rearms persistent state. Continued matches reuse a generation;
+older or repeated observations, stale/invalid prices and excluded instruments
+cannot rearm it. Changed thresholds, percent references or movement direction
+create a distinct state. Existing cooldown and event deduplication still apply.
+
+`regular_session_only` requires both observation and evaluation to belong to the
+same open session. `once_per_session` defaults to true for newly saved rules and
+suppresses events by instrument, observed session and actual direction; missing
+calendar context skips evaluation. `notification_mode` accepts `IMMEDIATE` or
+`DIGEST`; digest combines events from one worker run by owner, channel, type and
+severity through the existing queue, not a scheduled daily summary. Legacy rules
+without these options retain their existing crossing/session defaults.
 
 Delivery retains the central queue and passes the actual rule type, including
 for events without a signal ID. Account settings provide type, scope, optional

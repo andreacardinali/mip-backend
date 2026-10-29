@@ -38,12 +38,12 @@ LANGUAGE sql STABLE AS $$
   SELECT exchange::text FROM public.instruments WHERE instrument_id=p_instrument_id
 $$;
 
-CREATE OR REPLACE FUNCTION public.sp_alert_session_reference(p_instrument_id uuid, p_session_date date) RETURNS jsonb
+CREATE OR REPLACE FUNCTION public.sp_alert_session_reference(p_instrument_id uuid, p_opens_at timestamptz, p_closes_at timestamptz) RETURNS jsonb
 LANGUAGE sql STABLE AS $$
   SELECT jsonb_build_object('close', close, 'ts', ts)
   FROM public.price_history
   WHERE instrument_id=p_instrument_id AND close>0
-    AND (ts AT TIME ZONE 'UTC')::date=p_session_date
+    AND ts >= p_opens_at AND ts <= p_closes_at
   ORDER BY ts DESC, price_id DESC LIMIT 1
 $$;
 
@@ -55,13 +55,13 @@ BEGIN
   PERFORM pg_advisory_xact_lock(hashtextextended(p_rule_id::text || ':' || p_instrument_id::text, 0));
   SELECT * INTO s FROM public.alert_threshold_state
   WHERE rule_id=p_rule_id AND instrument_id=p_instrument_id FOR UPDATE;
-  IF FOUND AND p_observed_at<s.observed_at THEN RETURN NULL; END IF;
-  INSERT INTO public.alert_threshold_state AS current (rule_id,instrument_id,observed_at,matched,state_key)
+  IF FOUND AND p_observed_at<=s.observed_at THEN RETURN NULL; END IF;
+  INSERT INTO public.alert_threshold_state AS existing (rule_id,instrument_id,observed_at,matched,state_key)
   VALUES(p_rule_id,p_instrument_id,p_observed_at,p_matched,p_state_key)
   ON CONFLICT(rule_id,instrument_id) DO UPDATE SET
     observed_at=excluded.observed_at, matched=excluded.matched, state_key=excluded.state_key,
-    generation=current.generation + CASE WHEN current.state_key<>excluded.state_key
-      OR (NOT current.matched AND excluded.matched) THEN 1 ELSE 0 END
+    generation=existing.generation + CASE WHEN existing.state_key<>excluded.state_key
+      OR (NOT existing.matched AND excluded.matched) THEN 1 ELSE 0 END
   RETURNING * INTO s;
   IF NOT s.matched THEN RETURN NULL; END IF;
   RETURN s.generation;

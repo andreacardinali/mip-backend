@@ -48,6 +48,35 @@ def test_scan_members_include_collections_without_duplicate_instruments():
         assert routine.count("EXISTS (") == 3
 
 
+@pytest.mark.parametrize(
+    "name",
+    [
+        "sp_alert_instrument_exchange",
+        "sp_alert_session_reference",
+        "sp_alert_observe_threshold",
+        "sp_alert_register_match",
+    ],
+)
+def test_monitoring_extensions_installer_matches_schema(name):
+    schema = (ROOT / "mip_schema.sql").read_text(encoding="utf-8")
+    installer = (ROOT / "oneshot/install_screener_monitoring_extensions.sql").read_text(
+        encoding="utf-8"
+    )
+    pattern = rf"FUNCTION public\.{name}\(.*?\$\$;"
+    snapshot = re.search(pattern, schema, re.DOTALL)
+    installed = re.search(pattern, installer, re.DOTALL)
+    assert snapshot is not None
+    assert installed is not None
+    assert " ".join(snapshot.group().split()) == " ".join(installed.group().split())
+    if name == "sp_alert_session_reference":
+        assert "ts >= p_opens_at AND ts <= p_closes_at" in installed.group()
+        assert "AT TIME ZONE" not in installed.group()
+    if name == "sp_alert_observe_threshold":
+        assert "p_observed_at<=s.observed_at" in installed.group()
+        assert "pg_advisory_xact_lock" in installed.group()
+        assert "NOT existing.matched AND excluded.matched" in installed.group()
+
+
 @pytest.mark.parametrize("relative_path", RUNTIME_FILES)
 def test_runtime_sql_is_select_only_without_embedded_business_queries(relative_path):
     for sql in sql_literals(relative_path):

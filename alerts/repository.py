@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import text
@@ -12,23 +13,49 @@ from alerts.models import AlertRule
 class AlertRepository:
     def instrument_exchange(self, instrument_id: str) -> str | None:
         return self.db.execute(
-            text("SELECT public.sp_alert_instrument_exchange(CAST(:instrument_id AS uuid))"),
+            text(
+                "SELECT public.sp_alert_instrument_exchange(CAST(:instrument_id AS uuid))"
+            ),
             {"instrument_id": instrument_id},
         ).scalar()
 
-    def session_reference(self, instrument_id: str, session_date) -> dict[str, Any] | None:
+    def session_reference(
+        self, instrument_id: str, opens_at: datetime, closes_at: datetime
+    ) -> dict[str, Any] | None:
         value = self.db.execute(
-            text("SELECT public.sp_alert_session_reference(CAST(:instrument_id AS uuid), CAST(:session_date AS date))"),
-            {"instrument_id": instrument_id, "session_date": session_date},
+            text(
+                "SELECT public.sp_alert_session_reference("
+                "CAST(:instrument_id AS uuid), CAST(:opens_at AS timestamptz), "
+                "CAST(:closes_at AS timestamptz))"
+            ),
+            {
+                "instrument_id": instrument_id,
+                "opens_at": opens_at,
+                "closes_at": closes_at,
+            },
         ).scalar()
         return dict(value) if value else None
 
-    def observe_threshold(self, *, rule_id: str, instrument_id: str,
-                          observed_at: str, matched: bool, state_key: str) -> int | None:
+    def observe_threshold(
+        self,
+        *,
+        rule_id: str,
+        instrument_id: str,
+        observed_at: str,
+        matched: bool,
+        state_key: str,
+    ) -> int | None:
         return self.db.execute(
-            text("SELECT public.sp_alert_observe_threshold(CAST(:rule_id AS uuid), CAST(:instrument_id AS uuid), CAST(:observed_at AS timestamptz), :matched, :state_key)"),
-            {"rule_id": rule_id, "instrument_id": instrument_id,
-             "observed_at": observed_at, "matched": matched, "state_key": state_key},
+            text(
+                "SELECT public.sp_alert_observe_threshold(CAST(:rule_id AS uuid), CAST(:instrument_id AS uuid), CAST(:observed_at AS timestamptz), :matched, :state_key)"
+            ),
+            {
+                "rule_id": rule_id,
+                "instrument_id": instrument_id,
+                "observed_at": observed_at,
+                "matched": matched,
+                "state_key": state_key,
+            },
         ).scalar()
 
     def list_user_events(
