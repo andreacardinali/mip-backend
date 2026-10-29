@@ -124,6 +124,27 @@ def test_monitoring_notification_preferences_installer_matches_schema(name):
         assert "WHERE portfolio_id IS NULL" in installed.group()
 
 
+def test_alert_event_history_installer_matches_schema_and_owner_scope():
+    schema = (ROOT / "mip_schema.sql").read_text(encoding="utf-8")
+    installer = (ROOT / "oneshot/install_alert_event_history.sql").read_text(
+        encoding="utf-8"
+    )
+    pattern = r"FUNCTION public\.sp_alert_list_user_events\(.*?\$\$;"
+    snapshot = re.search(pattern, schema, re.DOTALL)
+    installed = re.search(pattern, installer, re.DOTALL)
+    assert snapshot is not None
+    assert installed is not None
+    assert " ".join(snapshot.group().split()) == " ".join(installed.group().split())
+    assert "r.user_id = p_user_id" in installed.group()
+    assert "e.user_id = p_user_id AND e.rule_id = p_rule_id" in installed.group()
+    assert "n.user_id = p_user_id" in installed.group()
+    assert "ORDER BY e.created_at DESC, e.alert_event_id DESC" in installed.group()
+    assert "'notification_status', n.status" in installed.group()
+    assert "'sent_at', n.sent_at" in installed.group()
+    assert "LIMIT least(greatest(coalesce(p_limit, 25), 1), 100)" in installed.group()
+    assert "OFFSET greatest(coalesce(p_offset, 0), 0)" in installed.group()
+
+
 def test_consolidate_instrument_alias_conflicts_match_unique_index():
     schema = (ROOT / "mip_schema.sql").read_text(encoding="utf-8")
     function = schema.split("CREATE FUNCTION public.sp_consolidate_instrument(", 1)[

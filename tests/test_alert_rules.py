@@ -24,6 +24,26 @@ def test_list_rules_uses_user_scoped_stored_routine():
     assert result[0]["enabled"] is False
 
 
+def test_list_events_uses_owner_scoped_routine_and_pagination():
+    database = Mock()
+    database.execute.return_value.scalars.return_value = [
+        {"alert_event_id": "event-1", "signal_id": None, "notification_status": None}
+    ]
+    result = AlertRepository(database).list_user_events(
+        "owner", "rule-1", limit=26, offset=25
+    )
+    statement, parameters = database.execute.call_args.args
+    assert "sp_alert_list_user_events" in str(statement)
+    assert parameters == {
+        "user_id": "owner",
+        "rule_id": "rule-1",
+        "limit": 26,
+        "offset": 25,
+    }
+    assert result[0]["signal_id"] is None
+    assert result[0]["notification_status"] is None
+
+
 def test_save_rule_keeps_owner_and_strategy_conditions():
     database = Mock()
     database.execute.return_value.scalar.return_value = "rule-1"
@@ -170,6 +190,49 @@ def alert_api():
     app.include_router(namespace["router"], prefix="/api/alerts")
     with TestClient(app, raise_server_exceptions=False) as client:
         yield client, namespace["SessionLocal"], database, repository, authentication
+
+
+def test_alert_api_lists_events_for_authenticated_owner(alert_api):
+    client, _, database, repository, authentication = alert_api
+    rule_id = "00000000-0000-0000-0000-000000000002"
+    repository.list_user_events.return_value = [{"alert_event_id": "event-1"}]
+    response = client.get(f"/api/alerts/{rule_id}/events?limit=26&offset=25")
+    assert response.status_code == 200
+    assert response.json() == [{"alert_event_id": "event-1"}]
+    repository.list_user_events.assert_called_once_with(
+        authentication["user"]["user_id"], rule_id, limit=26, offset=25
+    )
+    database.close.assert_called_once_with()
+    database.commit.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "query", ["limit=0", "limit=101", "offset=-1", "offset=100001"]
+)
+def test_alert_event_api_rejects_invalid_pagination(alert_api, query):
+    client, session_factory, _, repository, _ = alert_api
+    response = client.get(
+        f"/api/alerts/00000000-0000-0000-0000-000000000002/events?{query}"
+    )
+    assert response.status_code == 422
+    session_factory.assert_not_called()
+    repository.list_user_events.assert_not_called()
+
+
+def test_alert_event_api_requires_authentication(alert_api):
+    client, session_factory, _, _, authentication = alert_api
+    authentication["user"] = None
+    response = client.get("/api/alerts/00000000-0000-0000-0000-000000000002/events")
+    assert response.status_code == 401
+    session_factory.assert_not_called()
+
+
+def test_alert_event_api_closes_session_on_failure(alert_api):
+    client, _, database, repository, _ = alert_api
+    repository.list_user_events.side_effect = RuntimeError("database error")
+    response = client.get("/api/alerts/00000000-0000-0000-0000-000000000002/events")
+    assert response.status_code == 500
+    database.close.assert_called_once_with()
 
 
 def test_alert_api_lists_only_authenticated_owner(alert_api):

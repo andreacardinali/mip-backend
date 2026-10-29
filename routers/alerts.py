@@ -1,6 +1,6 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.exc import IntegrityError
 
 from alerts.repository import AlertRepository
@@ -16,6 +16,22 @@ def list_rules(current_user: CurrentUser = Depends(get_current_user)):
     database = SessionLocal()
     try:
         return AlertRepository(database).list_user_rules(current_user["user_id"])
+    finally:
+        database.close()
+
+
+@router.get("/{rule_id}/events")
+def list_events(
+    rule_id: UUID,
+    limit: int = Query(default=25, ge=1, le=100),
+    offset: int = Query(default=0, ge=0, le=100000),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    database = SessionLocal()
+    try:
+        return AlertRepository(database).list_user_events(
+            current_user["user_id"], str(rule_id), limit=limit, offset=offset
+        )
     finally:
         database.close()
 

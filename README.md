@@ -264,6 +264,26 @@ Users can disable each type or select an enabled notification destination; exist
 ownership and minimum-severity validation remain unchanged. Without a matching
 subscription, the queue still uses its configured channel/source fallback.
 
+### Alert Event History
+
+Account rule settings expose paginated event history through authenticated
+`GET /api/alerts/{rule_id}/events?limit=25&offset=0`. The endpoint calls only
+`sp_alert_list_user_events`, which filters rule, event and notification ownership.
+Missing or foreign rules return an empty list. Limits are 1 to 100 and offsets
+are 0 to 100000. Events are ordered by creation time and event UUID descending;
+offset pagination can shift when new events arrive. Refresh returns to page one.
+
+Before using history, review and manually apply
+`oneshot/install_alert_event_history.sql` after backup and PostgreSQL validation,
+after the alert management and collection monitoring installers. The matching
+function is included in `mip_schema.sql`; no live SQL or startup migration ran.
+
+History shows the saved event context and current queue status, not an audit
+trail of every delivery attempt. Events without a notification are labelled
+not queued; enqueue skip reasons are not persisted. Matches suppressed by
+deduplication or cooldown create no event and do not appear. Notification errors
+and destination details are not exposed. Price events can have no signal ID.
+
 Offline checks for alert configuration, evaluation, API ownership/transactions and
 stored-routine contracts:
 

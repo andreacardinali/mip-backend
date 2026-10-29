@@ -10,6 +10,18 @@ from alerts.models import AlertRule
 
 
 class AlertRepository:
+    def list_user_events(
+        self, user_id: str, rule_id: str, *, limit: int = 25, offset: int = 0
+    ) -> list[dict[str, Any]]:
+        rows = self.db.execute(
+            text(
+                "SELECT public.sp_alert_list_user_events("
+                "CAST(:user_id AS uuid), CAST(:rule_id AS uuid), :limit, :offset)"
+            ),
+            {"user_id": user_id, "rule_id": rule_id, "limit": limit, "offset": offset},
+        ).scalars()
+        return [dict(row) for row in rows]
+
     def __init__(self, db: Session) -> None:
         self.db = db
 
