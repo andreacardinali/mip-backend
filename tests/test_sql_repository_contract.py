@@ -77,6 +77,53 @@ def test_alert_rule_management_installer_matches_schema():
     assert "WHERE r.enabled" not in installed.group()
 
 
+@pytest.mark.parametrize(
+    "name",
+    ["sp_get_user_notification_preferences", "sp_upsert_user_notification_preference"],
+)
+def test_monitoring_notification_preferences_installer_matches_schema(name):
+    schema = (ROOT / "mip_schema.sql").read_text(encoding="utf-8")
+    installer = (
+        ROOT / "oneshot/install_monitoring_notification_preferences.sql"
+    ).read_text(encoding="utf-8")
+    pattern = rf"FUNCTION public\.{name}\(.*?\$\$;"
+    snapshot = re.search(pattern, schema, re.DOTALL)
+    installed = re.search(pattern, installer, re.DOTALL)
+    assert snapshot is not None
+    assert installed is not None
+    assert " ".join(snapshot.group().split()) == " ".join(installed.group().split())
+    for notification_type in (
+        "MARKET_SIGNAL",
+        "FIXED_PRICE",
+        "PERCENT_MOVE",
+        "SIGNAL_CHANGE",
+    ):
+        assert f"'{notification_type}'" in installed.group()
+    if name == "sp_get_user_notification_preferences":
+        assert "ns.user_id = p_user_id" in installed.group()
+        assert "ns.portfolio_id IS NULL" in installed.group()
+        assert "COALESCE(ns.enabled, nt.default_enabled)" in installed.group()
+        assert "COALESCE(ns.source_id, ds.source_id)" in installed.group()
+        for notification_type in (
+            "MARKET_SIGNAL",
+            "FIXED_PRICE",
+            "PERCENT_MOVE",
+            "SIGNAL_CHANGE",
+        ):
+            assert re.search(
+                rf"\('{notification_type}'::varchar,.*?::text, true\)",
+                installed.group(),
+                re.DOTALL,
+            )
+    else:
+        assert "us.user_id = p_user_id" in installed.group()
+        assert "v_severity_min NOT IN ('LOW', 'MEDIUM', 'HIGH', 'CRITICAL')" in (
+            installed.group()
+        )
+        assert "ON CONFLICT (user_id, event_type)" in installed.group()
+        assert "WHERE portfolio_id IS NULL" in installed.group()
+
+
 def test_consolidate_instrument_alias_conflicts_match_unique_index():
     schema = (ROOT / "mip_schema.sql").read_text(encoding="utf-8")
     function = schema.split("CREATE FUNCTION public.sp_consolidate_instrument(", 1)[

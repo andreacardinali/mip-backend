@@ -206,7 +206,7 @@ It does not reconcile existing exchange rows.
 
 ### Alert Rule Management
 
-Account settings manage the existing MARKET_SIGNAL alert rules through authenticated
+Account settings manage monitoring alert rules through authenticated
 `GET /api/alerts`, `POST /api/alerts` and `PUT /api/alerts/{rule_id}`.
 Rules are scoped to the authenticated user, including disabled rules. Creation
 reuses `sp_alert_upsert_rule`: submitting an existing name updates that user's rule.
@@ -248,9 +248,21 @@ observation with the existing cooldown; it is not a persistent crossing/rearm en
 Lifecycle monitoring excludes `OBSERVED` events and uses event creation time.
 
 Delivery retains the central queue and passes the actual rule type, including
-for events without a signal ID. The existing preference API does not yet list
-these alert types; without a matching subscription, the queue uses the configured
-channel/source fallback. Account monitoring controls remain a frontend follow-up.
+for events without a signal ID. Account settings provide type, scope, optional
+owned collection, excluded symbols, price thresholds and maximum data age controls.
+Collection choices reuse the existing watchlist and portfolio APIs.
+
+To expose all four monitoring types in the existing notification preferences API,
+review and manually apply
+`oneshot/install_monitoring_notification_preferences.sql` after backup and
+PostgreSQL validation. Apply it after the alert management and collection monitoring
+installers above, before using the updated Account controls. It replaces only
+`sp_get_user_notification_preferences` and `sp_upsert_user_notification_preference`;
+the same definitions are present in `mip_schema.sql`. No live SQL was executed.
+Monitoring preferences default to enabled, preserving existing fallback delivery.
+Users can disable each type or select an enabled notification destination; existing
+ownership and minimum-severity validation remain unchanged. Without a matching
+subscription, the queue still uses its configured channel/source fallback.
 
 Offline checks for alert configuration, evaluation, API ownership/transactions and
 stored-routine contracts:

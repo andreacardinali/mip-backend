@@ -4147,7 +4147,15 @@ WITH notification_types(notification_type, label, description, default_enabled) 
         ('BREAKING_CATALYST'::varchar, 'Catalyst urgenti'::varchar,
          'Notizie ed eventi rilevanti appena rilevati.'::text, true),
         ('DAILY_MOVER'::varchar, 'Movimenti giornalieri'::varchar,
-         'Variazioni di prezzo rilevanti rilevate durante la giornata.'::text, false)
+         'Variazioni di prezzo rilevanti rilevate durante la giornata.'::text, false),
+        ('MARKET_SIGNAL'::varchar, 'Segnali di mercato'::varchar,
+         'Segnali corrispondenti alle regole di monitoraggio.'::text, true),
+        ('FIXED_PRICE'::varchar, 'Soglie di prezzo'::varchar,
+         'Prezzi che soddisfano le soglie delle regole di monitoraggio.'::text, true),
+        ('PERCENT_MOVE'::varchar, 'Variazioni percentuali'::varchar,
+         'Variazioni rispetto alla chiusura storica di riferimento.'::text, true),
+        ('SIGNAL_CHANGE'::varchar, 'Cambi del segnale'::varchar,
+         'Eventi del ciclo di vita dei segnali monitorati.'::text, true)
 ), default_source AS (
     SELECT us.source_id
     FROM public.user_sources us
@@ -4172,7 +4180,11 @@ LEFT JOIN default_source ds ON true
 ORDER BY CASE nt.notification_type
     WHEN 'UPCOMING_CATALYST' THEN 1
     WHEN 'BREAKING_CATALYST' THEN 2
-    ELSE 3
+    WHEN 'DAILY_MOVER' THEN 3
+    WHEN 'MARKET_SIGNAL' THEN 4
+    WHEN 'FIXED_PRICE' THEN 5
+    WHEN 'PERCENT_MOVE' THEN 6
+    ELSE 7
 END;
 $$;
 
@@ -10555,7 +10567,11 @@ BEGIN
     IF v_notification_type NOT IN (
         'UPCOMING_CATALYST',
         'BREAKING_CATALYST',
-        'DAILY_MOVER'
+        'DAILY_MOVER',
+        'MARKET_SIGNAL',
+        'FIXED_PRICE',
+        'PERCENT_MOVE',
+        'SIGNAL_CHANGE'
     ) THEN
         RAISE EXCEPTION 'Unsupported notification type: %', p_notification_type;
     END IF;
