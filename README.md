@@ -2,6 +2,17 @@
 
 Adds explicit logs immediately before and after each provider call, including call number, mode, signal count, signal IDs, output-token limit and elapsed time. Batch failures log split sizes and error details before recursive retry.
 
+## Temporary Development Utilities
+
+MIP currently has a single live development instance. Periodic database dumps
+record the current schema; migration utilities are not permanent runtime tools.
+Keep all one-off migrations, installation SQL, fixes and their preflight/audit
+files in `oneshot/`. Keep recurring operational commands in `scripts/`.
+Run Python utilities from the backend root with `python -m oneshot.<module>`
+using the backend virtual environment. Nothing in `oneshot/` runs automatically.
+The directory can be cleaned after development; also remove or update tests and
+documentation that reference the deleted migration files.
+
 ## Centralized HTTP Requests
 
 Provider HTTP calls must use `http_client.request_with_retry`; do not introduce
@@ -60,7 +71,7 @@ The required `exchange-calendars` and `tzdata` packages are declared in
 `requirements.txt`; installing them is a separate authorized step.
 
 Before changing an existing database, run the read-only audit
-`scripts/market_time_audit.sql` with PostgreSQL tooling, review types, function
+`oneshot/market_time_audit.sql` with PostgreSQL tooling, review types, function
 ownership/grants and dependencies, and take a backup. The audit does not establish
 the original timezone of historical values. Do not relabel naive historical
 timestamps as UTC without verified provenance and a separately reviewed migration.
@@ -68,14 +79,14 @@ timestamps as UTC without verified provenance and a separately reviewed migratio
 From the backend root on Windows:
 
 ```powershell
-.\.venv\Scripts\python.exe -m scripts.apply_market_time
+.\.venv\Scripts\python.exe -m oneshot.apply_market_time
 ```
 
 This prints the transaction only and does not connect to the database. Review the
 SQL, stop backend/scheduler writers, and only then explicitly apply:
 
 ```powershell
-.\.venv\Scripts\python.exe -m scripts.apply_market_time --apply
+.\.venv\Scripts\python.exe -m oneshot.apply_market_time --apply
 ```
 
 The transactional upgrade adds nullable `exchanges.calendar_name` and replaces the
@@ -111,7 +122,7 @@ holiday dates are rejected. Null closure flags remain unknown.
 ### Provider Exchange Aliases
 
 `exchanges.exchange` is the internal venue identity; provider codes are aliases
-in `exchange_source_mappings`. Apply `scripts/install_exchange_aliases.sql` to
+in `exchange_source_mappings`. Apply `oneshot/install_exchange_aliases.sql` to
 install conflict-checked alias registration and update listing normalization.
 This migration does not register aliases, rename exchanges or move instruments.
 
@@ -149,7 +160,7 @@ are idempotent; changed JSON for the same version is rejected. Migration and ini
 acquisition are explicit commands, not API side effects:
 
 ```powershell
-.\.venv\Scripts\python.exe -m scripts.apply_exchange_registry
+.\.venv\Scripts\python.exe -m oneshot.apply_exchange_registry
 .\.venv\Scripts\python.exe -m scripts.sync_exchanges
 ```
 
@@ -160,7 +171,7 @@ The schema migration requires existing `scheduler_jobs`, `exchanges`, `external_
 fails if its objects already exist. After review, explicit application is:
 
 ```powershell
-.\.venv\Scripts\python.exe -m scripts.apply_exchange_registry --apply
+.\.venv\Scripts\python.exe -m oneshot.apply_exchange_registry --apply
 .\.venv\Scripts\python.exe -m scripts.sync_exchanges --apply
 ```
 
@@ -185,7 +196,7 @@ Its daily cron is `30 6 * * *`, interpreted in `SCHEDULER_TIMEZONE` (default
 catalog functions. For an already installed registry, review this upgrade first:
 
 ```powershell
-.\.venv\Scripts\python.exe -m scripts.apply_exchange_registry --upgrade
+.\.venv\Scripts\python.exe -m oneshot.apply_exchange_registry --upgrade
 ```
 
 Only after SQL review, backup and validation on a test PostgreSQL database, repeat
@@ -208,8 +219,8 @@ For databases whose exchange registry is already up to date, review the standalo
 rename SQL, then apply it only after backup and PostgreSQL validation:
 
 ```powershell
-.\.venv\Scripts\python.exe -m scripts.apply_exchange_registry --rename-job-only
-.\.venv\Scripts\python.exe -m scripts.apply_exchange_registry --rename-job-only --apply
+.\.venv\Scripts\python.exe -m oneshot.apply_exchange_registry --rename-job-only
+.\.venv\Scripts\python.exe -m oneshot.apply_exchange_registry --rename-job-only --apply
 ```
 
 This mode is repeatable and does nothing if the legacy job is absent. After the
@@ -262,7 +273,7 @@ separate verification.
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest tests/test_market_time.py tests/test_fmp_time.py tests/test_news_ingestion.py -q -rs
-.\.venv\Scripts\python.exe -m ruff check market_time routers/market_time.py scripts/apply_market_time.py tests/test_market_time.py tests/test_fmp_time.py jobs/fmp/normalizers.py jobs/fmp/fmp_daily_sync.py services/news_ingestion.py market_data/providers/eulerpool.py db.py
+.\.venv\Scripts\python.exe -m ruff check market_time routers/market_time.py oneshot/apply_market_time.py tests/test_market_time.py tests/test_fmp_time.py jobs/fmp/normalizers.py jobs/fmp/fmp_daily_sync.py services/news_ingestion.py market_data/providers/eulerpool.py db.py
 ```
 
 Calendar/DST/API tests can be skipped when local dependencies are unavailable;
@@ -273,7 +284,7 @@ frontend integration are outside this foundation.
 
 ## Entity cleanup job
 
-Apply `scripts/install_cleanup_entities.sql` to an existing PostgreSQL database
+Apply `oneshot/install_cleanup_entities.sql` to an existing PostgreSQL database
 before running `cleanup_entities`. New databases include these functions in
 `mip_schema.sql`. Scheduler startup discovers `jobs/cleanup_entities.job.json`
 and registers the job disabled by default. Run it manually through the existing
@@ -349,8 +360,8 @@ old scheduler versions do not participate in the new advisory-lock protocol.
 Run from the backend root using the project's Python environment:
 
 ```sh
-python -m scripts.apply_intelligence_fixes
-python -m scripts.apply_intelligence_fixes --apply
+python -m oneshot.apply_intelligence_fixes
+python -m oneshot.apply_intelligence_fixes --apply
 ```
 
 The first command prints SQL without changing the database. Review that output
@@ -413,7 +424,7 @@ Application code calls stored functions through parameterized `SELECT` statement
 Business queries, joins, aggregates and writes belong in `mip_schema.sql`, not in
 Python routers or repositories. Simple standalone `SELECT` queries and test SQL
 are allowed exceptions. Migration DDL lives in SQL files; the upgrade runner reads
-`scripts/intelligence_fixes_preflight.sql` before applying the schema functions.
+`oneshot/intelligence_fixes_preflight.sql` before applying the schema functions.
 
 Portfolio pricing metadata remains batched through `sp_get_portfolio_pricing_states`.
 Historical-cost writes, user preferences, alert candidate selection, scheduler locks,

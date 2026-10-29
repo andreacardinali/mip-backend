@@ -18,8 +18,8 @@ from market_data.exchange_sync import (
 from market_data.models import ExchangeReference, InstrumentReference
 from market_data.providers.eulerpool import EulerpoolProvider
 from market_time.repository import SQLExchangeRepository
+from oneshot.apply_exchange_registry import migration_statements
 from scheduler_repository import SchedulerRepository
-from scripts.apply_exchange_registry import migration_statements
 from scripts.sync_exchanges import main as sync_exchanges_main
 
 
@@ -826,19 +826,20 @@ def test_holiday_repository_uses_stored_function_and_restores_snapshot():
 
 def test_holiday_migration_preserves_existing_exchanges_and_utc_types():
     statements = migration_statements()
-    assert len(statements) == 8
+    assert len(statements) == 10
     assert "timestamp with time zone" in statements[1]
     assert "as_of date" in statements[1]
-    assert "UNIQUE (exchange_code, source, provider_updated_at)" in statements[1]
-    assert "REFERENCES public.exchanges(exchange)" in statements[2]
-    assert "INSERT INTO public.exchanges" not in statements[3]
-    assert "exchange_source_mappings" in statements[3]
-    assert "exchange_code <> p_exchange_code" in statements[3]
-    assert "ON CONFLICT" in statements[3]
-    assert "Provider exchange identity conflicts" in statements[3]
-    assert "without changing its version" in statements[3]
-    assert "sp_upsert_exchange" in statements[4]
-    assert "sp_sync_exchange_catalog" in statements[5]
+    assert "UNIQUE (exchange_code, source, provider_updated_at)" in statements[2]
+    assert "PRIMARY KEY (snapshot_id)" in statements[3]
+    assert "REFERENCES public.exchanges(exchange)" in statements[4]
+    assert "INSERT INTO public.exchanges" not in statements[5]
+    assert "exchange_source_mappings" in statements[5]
+    assert "exchange_code <> p_exchange_code" in statements[5]
+    assert "ON CONFLICT" in statements[5]
+    assert "Provider exchange identity conflicts" in statements[5]
+    assert "without changing its version" in statements[5]
+    assert "sp_upsert_exchange" in statements[6]
+    assert "sp_sync_exchange_catalog" in statements[7]
     assert "CASCADE" not in "\n".join(statements)
 
 

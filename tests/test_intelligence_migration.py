@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from scripts.apply_intelligence_fixes import FUNCTION_NAMES, main, migration_statements
+from oneshot.apply_intelligence_fixes import FUNCTION_NAMES, main, migration_statements
 
 
 def test_migration_includes_each_reviewed_function_once():

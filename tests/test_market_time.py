@@ -16,8 +16,8 @@ from market_time.models import (
 from market_time.normalization import TemporalNormalizationError, as_utc
 from market_time.repository import SQLExchangeHoursRepository
 from market_time.service import MarketTimeService
-from scripts.apply_market_time import migration_statements
-from scripts.apply_market_time_exchange_mappings import (
+from oneshot.apply_market_time import migration_statements
+from oneshot.apply_market_time_exchange_mappings import (
     mapping_sql,
     validate_calendars,
 )
@@ -154,7 +154,7 @@ def test_exchange_mapping_calendar_validation_rejects_timezone_conflicts():
     calendars.get_calendar.return_value.tz = "UTC"
     with (
         patch.dict("sys.modules", {"exchange_calendars": calendars}),
-        patch("scripts.apply_market_time_exchange_mappings.ZoneInfo"),
+        patch("oneshot.apply_market_time_exchange_mappings.ZoneInfo"),
         pytest.raises(ValueError, match="expected Europe/Rome, got UTC"),
     ):
         validate_calendars()
@@ -173,7 +173,7 @@ def test_exchange_mapping_calendar_validation_checks_all_mapped_calendars():
     calendars.get_calendar.side_effect = lambda name: Mock(tz=approved[name])
     with (
         patch.dict("sys.modules", {"exchange_calendars": calendars}),
-        patch("scripts.apply_market_time_exchange_mappings.ZoneInfo") as timezone,
+        patch("oneshot.apply_market_time_exchange_mappings.ZoneInfo") as timezone,
     ):
         validate_calendars()
     assert [call.args[0] for call in calendars.get_calendar.call_args_list] == list(
@@ -186,12 +186,12 @@ def test_exchange_mapping_calendar_validation_checks_all_mapped_calendars():
 
 
 def test_exchange_mapping_dry_run_does_not_import_database(capsys):
-    from scripts.apply_market_time_exchange_mappings import main
+    from oneshot.apply_market_time_exchange_mappings import main
 
     with (
         patch("sys.argv", ["apply_market_time_exchange_mappings"]),
         patch(
-            "scripts.apply_market_time_exchange_mappings.validate_calendars"
+            "oneshot.apply_market_time_exchange_mappings.validate_calendars"
         ) as check,
         patch.dict("sys.modules", {"db": None}),
     ):
@@ -203,12 +203,12 @@ def test_exchange_mapping_dry_run_does_not_import_database(capsys):
 
 
 def test_exchange_mapping_apply_validates_before_database_access():
-    from scripts.apply_market_time_exchange_mappings import main
+    from oneshot.apply_market_time_exchange_mappings import main
 
     with (
         patch("sys.argv", ["apply_market_time_exchange_mappings", "--apply"]),
         patch(
-            "scripts.apply_market_time_exchange_mappings.validate_calendars",
+            "oneshot.apply_market_time_exchange_mappings.validate_calendars",
             side_effect=ValueError("Unavailable calendar"),
         ),
         patch.dict("sys.modules", {"db": None}),
@@ -218,13 +218,13 @@ def test_exchange_mapping_apply_validates_before_database_access():
 
 
 def test_exchange_mapping_apply_uses_one_transaction():
-    from scripts.apply_market_time_exchange_mappings import main
+    from oneshot.apply_market_time_exchange_mappings import main
 
     database = MagicMock()
     with (
         patch("sys.argv", ["apply_market_time_exchange_mappings", "--apply"]),
         patch(
-            "scripts.apply_market_time_exchange_mappings.validate_calendars"
+            "oneshot.apply_market_time_exchange_mappings.validate_calendars"
         ) as check,
         patch.dict("sys.modules", {"db": database}),
     ):

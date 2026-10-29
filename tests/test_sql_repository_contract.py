@@ -69,7 +69,7 @@ def test_consolidate_instrument_alias_conflicts_match_unique_index():
     conflict_clause = f"ON CONFLICT {index.group(1)} DO NOTHING"
     assert " ".join(function.split()).count(conflict_clause) == 2
     assert "ON CONFLICT (alias_symbol)" not in function
-    migration = (ROOT / "scripts/fix_consolidate_instrument_aliases.sql").read_text(
+    migration = (ROOT / "oneshot/fix_consolidate_instrument_aliases.sql").read_text(
         encoding="utf-8"
     )
     assert conflict_clause in migration
@@ -82,7 +82,7 @@ def test_consolidate_instrument_deletes_source_before_metadata_update(already_fi
     function = schema.split("CREATE FUNCTION public.sp_consolidate_instrument(", 1)[
         1
     ].split("CREATE FUNCTION ", 1)[0]
-    migration = (ROOT / "scripts/fix_consolidate_instrument_aliases.sql").read_text(
+    migration = (ROOT / "oneshot/fix_consolidate_instrument_aliases.sql").read_text(
         encoding="utf-8"
     )
     metadata_pattern = migration.split("$metadata$", 2)[1]
@@ -115,16 +115,25 @@ def test_consolidate_instrument_deletes_source_before_metadata_update(already_fi
 
 def test_cleanup_entities_installation_matches_schema():
     schema = (ROOT / "mip_schema.sql").read_text(encoding="utf-8")
-    migration = (ROOT / "scripts/install_cleanup_entities.sql").read_text(
+    migration = (ROOT / "oneshot/install_cleanup_entities.sql").read_text(
         encoding="utf-8"
     )
     functions = re.findall(r"CREATE OR REPLACE FUNCTION .*?\$\$;", migration, re.DOTALL)
     assert len(functions) == 2
     for function in functions:
-        assert (
-            function.replace("CREATE OR REPLACE FUNCTION", "CREATE FUNCTION", 1)
-            in schema
+        name = function.split("(", 1)[0].removeprefix("CREATE OR REPLACE FUNCTION ")
+        matches = re.findall(
+            rf"^CREATE FUNCTION {re.escape(name)}\(.*?^\$\$;",
+            schema,
+            re.MULTILINE | re.DOTALL,
         )
+        assert len(matches) == 1, name
+        expected_header, expected_body = function.replace(
+            "CREATE OR REPLACE FUNCTION", "CREATE FUNCTION", 1
+        ).split("$$", 1)
+        actual_header, actual_body = matches[0].split("$$", 1)
+        assert " ".join(expected_header.split()) == " ".join(actual_header.split())
+        assert expected_body == actual_body
     cleanup = functions[1]
     assert "FOR UPDATE SKIP LOCKED" in cleanup
     assert cleanup.index("FOR UPDATE SKIP LOCKED") < cleanup.index("DELETE FROM")
@@ -159,7 +168,7 @@ def test_exchange_alias_normalization_precedes_existing_exchange():
 
 def test_exchange_alias_installation_matches_schema():
     schema = (ROOT / "mip_schema.sql").read_text(encoding="utf-8")
-    migration = (ROOT / "scripts/install_exchange_aliases.sql").read_text(
+    migration = (ROOT / "oneshot/install_exchange_aliases.sql").read_text(
         encoding="utf-8"
     )
     functions = re.findall(r"CREATE OR REPLACE FUNCTION .*?\$\$;", migration, re.DOTALL)
@@ -193,7 +202,7 @@ def test_exchange_alias_installation_matches_schema():
 
 def test_migration_executes_external_sql_without_inline_ddl():
     tree = ast.parse(
-        (ROOT / "scripts/apply_intelligence_fixes.py").read_text(encoding="utf-8")
+        (ROOT / "oneshot/apply_intelligence_fixes.py").read_text(encoding="utf-8")
     )
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):

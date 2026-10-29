@@ -16,7 +16,13 @@ def migration_statements(
     statements = ["SET LOCAL TIME ZONE 'UTC';"]
     table_patterns = (
         r"^CREATE TABLE public\.exchange_holiday_snapshots \(.*?^\);",
-        r"^ALTER TABLE ONLY public\.exchange_holiday_snapshots\n.*?;",
+        r"^ALTER TABLE ONLY public\.exchange_holiday_snapshots\n"
+        r"\s+ADD CONSTRAINT "
+        r"exchange_holiday_snapshots_exchange_code_source_provider_up_key .*?;",
+        r"^ALTER TABLE ONLY public\.exchange_holiday_snapshots\n"
+        r"\s+ADD CONSTRAINT exchange_holiday_snapshots_pkey .*?;",
+        r"^ALTER TABLE ONLY public\.exchange_holiday_snapshots\n"
+        r"\s+ADD CONSTRAINT exchange_holiday_snapshots_exchange_fkey .*?;",
     )
     if upgrade:
         statements.extend(
@@ -30,20 +36,31 @@ def migration_statements(
                 "CHECK (exchange_code ~ '^[A-Z0-9]{4,20}$');",
             ]
         )
+    function_body_pattern = (
+        r".*?\bAS\s+(?P<delimiter>\$(?:[A-Za-z_][A-Za-z_0-9]*)?\$)"
+        r".*?^(?P=delimiter);"
+    )
     registry_patterns = (() if upgrade else table_patterns) + (
-        r"^CREATE FUNCTION public\.sp_store_exchange_holidays\(.*?^\$\$;",
-        r"^CREATE FUNCTION public\.sp_upsert_exchange\(.*?^\$\$;",
-        r"^CREATE FUNCTION public\.sp_sync_exchange_catalog\(.*?^\$\$;",
+        r"^CREATE FUNCTION public\.sp_store_exchange_holidays\("
+        + function_body_pattern,
+        r"^CREATE FUNCTION public\.sp_upsert_exchange\(" + function_body_pattern,
+        r"^CREATE FUNCTION public\.sp_sync_exchange_catalog\(" + function_body_pattern,
     )
     patterns = (() if rename_job_only else registry_patterns) + (
-        r"^CREATE FUNCTION public\.sp_migrate_exchange_sync_job\(.*?^\$\$;",
+        r"^CREATE FUNCTION public\.sp_migrate_exchange_sync_job\("
+        + function_body_pattern,
     )
     for pattern in patterns:
-        matches = re.findall(pattern, schema, flags=re.MULTILINE | re.DOTALL)
+        matches = list(re.finditer(pattern, schema, flags=re.MULTILINE | re.DOTALL))
         if len(matches) != 1:
-            raise ValueError("Expected exactly one exchange registry definition")
+            raise ValueError(
+                "Expected exactly one exchange registry definition "
+                f"for {pattern!r}, found {len(matches)}"
+            )
         statements.append(
-            matches[0].replace("CREATE FUNCTION", "CREATE OR REPLACE FUNCTION", 1)
+            matches[0]
+            .group()
+            .replace("CREATE FUNCTION", "CREATE OR REPLACE FUNCTION", 1)
         )
     return [*statements, "SELECT public.sp_migrate_exchange_sync_job();"]
 
