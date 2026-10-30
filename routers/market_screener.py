@@ -14,13 +14,14 @@ from market_screener.api_repository import MarketScreenerApiRepository
 
 router = APIRouter()
 
-ScreenerContextType = Literal["WATCHLIST", "PORTFOLIO", "UNIVERSE", "ENTITY", "INSTRUMENT"]
+ScreenerContextType = Literal[
+    "WATCHLIST", "PORTFOLIO", "UNIVERSE", "ENTITY", "INSTRUMENT"
+]
 
 
 class ScreenerAnalysisRequest(BaseModel):
     context_type: ScreenerContextType
     context_id: UUID
-    llm_enabled: bool = False
 
 
 @router.get("/contexts/{context_type}/{context_id}/instruments")
@@ -74,11 +75,11 @@ def analyze_screener(
             context_id=str(request.context_id),
             market_data_service=market_data,
             config=ScanConfig.from_settings(settings),
-            **(
-                {"llm_enabled": True, "llm_settings": settings}
-                if request.llm_enabled
-                else {}
-            ),
+            llm_enabled=str(settings.get("MARKET_SCREENER_PIPELINE_LLM_ENABLED", True))
+            .strip()
+            .lower()
+            in {"1", "true", "yes", "on"},
+            llm_settings=settings,
         )
         db.commit()
         return result

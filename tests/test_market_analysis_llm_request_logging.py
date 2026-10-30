@@ -37,7 +37,7 @@ def test_logs_provider_request_start_and_completion(caplog):
         logging.INFO,
         logger="services.market_analysis_llm_enrichment",
     ):
-        successful, failures = _enrich_resilient(
+        successful, failures, stopped = _enrich_resilient(
             provider=Provider(),
             signals=[{"signal_id": "signal-1"}],
             max_tokens=500,
@@ -46,6 +46,7 @@ def test_logs_provider_request_start_and_completion(caplog):
 
     assert len(successful) == 1
     assert failures == []
+    assert stopped is False
     assert "LLM request started" in caplog.text
     assert "call=1" in caplog.text
     assert "mode=single" in caplog.text

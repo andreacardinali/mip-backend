@@ -629,8 +629,9 @@ def test_manual_context_scan_records_history_in_callers_transaction(
     ],
 )
 @pytest.mark.parametrize("context_type", ["WATCHLIST", "ENTITY", "INSTRUMENT"])
+@pytest.mark.parametrize("llm_enabled", [False, True])
 def test_screener_context_http_contract(
-    monkeypatch, scenario, expected_status, context_type
+    monkeypatch, scenario, expected_status, context_type, llm_enabled
 ):
     fastapi = pytest.importorskip("fastapi")
     pytest.importorskip("httpx")
@@ -644,7 +645,7 @@ def test_screener_context_http_contract(
         "context_type": context_type,
         "context_id": context_id,
     }
-    settings = object()
+    settings = {"MARKET_SCREENER_PIPELINE_LLM_ENABLED": str(llm_enabled).lower()}
     provider = object()
     config = object()
     result = {"status": "PARTIAL" if scenario == "analyze_partial" else "SUCCESS"}
@@ -676,7 +677,13 @@ def test_screener_context_http_contract(
 
     def analyze(session, **kwargs):
         assert session is db
-        assert kwargs == {**context, "market_data_service": provider, "config": config}
+        assert kwargs == {
+            **context,
+            "market_data_service": provider,
+            "config": config,
+            "llm_enabled": llm_enabled,
+            "llm_settings": settings,
+        }
         calls.append("analyze")
         if scenario == "analyze_missing":
             raise database_error("P0002")
@@ -743,7 +750,11 @@ def test_screener_context_http_contract(
         app.include_router(router, prefix="/api/screener")
         with TestClient(app, raise_server_exceptions=False) as client:
             if scenario.startswith("analyze"):
-                body = {"context_type": context_type, "context_id": context_id}
+                body = {
+                    "context_type": context_type,
+                    "context_id": context_id,
+                    "llm_enabled": not llm_enabled,
+                }
                 if scenario == "analyze_invalid_type":
                     body["context_type"] = "ALL"
                 if scenario == "analyze_invalid_id":
@@ -817,9 +828,11 @@ def test_gui_context_analysis_and_optional_refresh_contract() -> None:
     assert 'context_type: "INSTRUMENT", context_id: row.instrument_id' in entities
     assert "if (!analysisPending) analysis.mutate" in entities
     assert "disabled={analysisPending || !instrumentRows.length}" in entities
-    assert 'label="Analisi AI"' in entities
-    assert "llm_enabled: llmEnabled" in entities
+    assert "llm_enabled" not in service
+    assert 'label="Analisi AI"' not in entities
     for view in (page, entities):
+        assert "llmEnabled" not in view
+        assert "llm_enabled" not in view
         assert "useIsMutating({ mutationKey: screenerAnalysisMutationKey }) > 0" in view
         assert "mutationKey: screenerAnalysisMutationKey," in view
         assert "mutationFn: analyzeScreenerContext" in view

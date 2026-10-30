@@ -1,5 +1,8 @@
 import json
 
+import httpx
+import pytest
+
 from llm.base import LLMResponse
 from market_analysis.enrichment_contract import enrichment_fingerprint
 from market_analysis.llm_enrichment import validate_batch_enrichment
@@ -110,3 +113,84 @@ def test_duplicate_candidates_are_not_sent_twice():
     assert result["selected"] == 2
     assert result["unique"] == 1
     assert result["failed"] == 1
+
+
+@pytest.mark.parametrize("batch_size", [1, 3])
+@pytest.mark.parametrize("successful_batches", [0, 1])
+@pytest.mark.parametrize(
+    "failure", [401, 403, 404, 429, 503, "timeout", "connect", "url", "queue_timeout"]
+)
+def test_endpoint_failure_stops_remaining_calls(
+    batch_size, successful_batches, failure
+):
+    provider = ResilientProvider()
+    original_generate = provider.generate_json
+    calls = []
+    request = httpx.Request("POST", "http://localhost/ai")
+
+    def generate(request_body):
+        calls.append(request_body)
+        if len(calls) <= successful_batches:
+            return original_generate(request_body)
+        if isinstance(failure, int):
+            response = httpx.Response(failure, request=request)
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError as error:
+                raise RuntimeError("wrapped provider failure") from error
+        if failure == "timeout":
+            raise httpx.ReadTimeout("timeout", request=request)
+        if failure == "connect":
+            raise httpx.ConnectError("unreachable", request=request)
+        if failure == "queue_timeout":
+            raise TimeoutError("Timed out waiting for LLM queue request")
+        raise httpx.InvalidURL("invalid endpoint")
+
+    provider.generate_json = generate
+    candidates = [_signal(f"signal-{index}") for index in range(9)]
+    persisted = []
+    result = run_market_analysis_llm_enrichment(
+        provider=provider,
+        candidates=candidates,
+        persist_enrichment=lambda signal, *_: persisted.append(signal["signal_id"])
+        or True,
+        enrichment_fingerprint=enrichment_fingerprint(),
+        call_batch_size=batch_size,
+    )
+    assert len(calls) == successful_batches + 1
+    assert len(persisted) == successful_batches * batch_size
+    assert result["signal_ids"] == persisted
+    assert result["failed"] == len(candidates) - len(persisted)
+    assert result["status"] == "PARTIAL"
+    assert result["reason"] == "endpoint_unavailable"
+    assert result["workload"]["split_batches"] == 0
+
+
+def test_endpoint_failure_during_split_preserves_successful_sibling():
+    provider = ResilientProvider()
+    original_generate = provider.generate_json
+    calls = []
+
+    def generate(request):
+        calls.append(request)
+        if len(calls) == 1:
+            raise ValueError("invalid batch response")
+        if len(calls) == 2:
+            return original_generate(request)
+        raise httpx.ConnectError("endpoint unavailable")
+
+    provider.generate_json = generate
+    persisted = []
+    result = run_market_analysis_llm_enrichment(
+        provider=provider,
+        candidates=[_signal(f"signal-{index}") for index in range(5)],
+        persist_enrichment=lambda signal, *_: persisted.append(signal["signal_id"])
+        or True,
+        enrichment_fingerprint=enrichment_fingerprint(),
+        call_batch_size=3,
+    )
+    assert len(calls) == 3
+    assert persisted == ["signal-0"]
+    assert result["signal_ids"] == persisted
+    assert result["failed"] == 4
+    assert result["reason"] == "endpoint_unavailable"

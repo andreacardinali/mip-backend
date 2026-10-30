@@ -1,6 +1,26 @@
 # Market Analysis LLM request logging
 
-Adds explicit logs immediately before and after each provider call, including call number, mode, signal count, signal IDs, output-token limit and elapsed time. Batch failures log split sizes and error details before recursive retry.
+Adds explicit logs immediately before and after each provider call, including call number, mode, signal count, signal IDs, output-token limit and elapsed time. Content-validation failures log split sizes and error details before recursive retry.
+
+## Automatic Screener AI
+
+Screener and entity analyses enable AI automatically on the server. Set
+`MARKET_SCREENER_PIPELINE_LLM_ENABLED=false` in `.env` to disable it for manual
+analyses and the scheduled screener pipeline (default: enabled). The analyze API
+accepts only `context_type` and `context_id`; legacy `llm_enabled` values from
+clients are ignored. There is no manual AI toggle in the frontend.
+
+The existing `MARKET_ANALYSIS_ENRICHMENT_LLM_*` settings configure the provider,
+model, endpoint, credentials, request timeout and retries. Missing or invalid
+configuration returns `llm_enrichment.reason=invalid_configuration`; manual
+analysis still computes technical signals, ranking and snapshots with `PARTIAL`
+status. Endpoint HTTP errors (including 429), network errors and invalid URLs
+stop subsequent AI calls for the current enrichment run after the configured
+provider retries, with `reason=endpoint_unavailable`. Successful enrichments
+already obtained are retained. Content-validation errors still isolate bad
+signals through batch splitting. A later analysis can try the endpoint again;
+this is not a persistent endpoint cooldown. Scheduled pipelines retain their
+explicit `MARKET_SCREENER_PIPELINE_STOP_ON_ERROR` policy (default: false).
 
 ## Temporary Development Utilities
 

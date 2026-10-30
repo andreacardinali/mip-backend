@@ -1,3 +1,5 @@
+import pytest
+
 from llm.base import LLMResponse
 from market_analysis.enrichment_contract import enrichment_fingerprint
 from services import market_analysis_llm_enrichment as service
@@ -65,6 +67,72 @@ def test_configured_enrichment_reuses_fingerprint_and_persistence(monkeypatch):
             result["enrichment_fingerprint"],
         )
     ]
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"MODEL": ""},
+        {"BASE_URL": ""},
+        {"PROVIDER": "unsupported"},
+        {"REQUEST_MAX_SIGNALS": 0},
+        {"REQUEST_MAX_OUTPUT_TOKENS": "invalid"},
+        {"JSON_CONFIG": "not-json"},
+    ],
+)
+def test_invalid_configuration_does_not_load_or_call_provider(monkeypatch, overrides):
+    settings = {
+        "MARKET_ANALYSIS_ENRICHMENT_LLM_MODEL": "test-model",
+        "MARKET_ANALYSIS_ENRICHMENT_LLM_BASE_URL": "http://localhost:11434",
+        **{
+            f"MARKET_ANALYSIS_ENRICHMENT_LLM_{key}": value
+            for key, value in overrides.items()
+        },
+    }
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError(
+            "Invalid configuration must not access candidates or provider"
+        )
+
+    monkeypatch.setattr(service, "create_provider", unexpected)
+    result = service.run_configured_market_analysis_llm_enrichment(
+        settings=settings,
+        load_candidates=unexpected,
+        persist_enrichment=unexpected,
+    )
+    assert result == {"status": "FAILED", "reason": "invalid_configuration"}
+
+
+def test_invalid_provider_configuration_returns_fallback(monkeypatch):
+    def invalid_provider(config):
+        raise ValueError("invalid provider configuration")
+
+    monkeypatch.setattr(service, "create_provider", invalid_provider)
+    result = service.run_configured_market_analysis_llm_enrichment(
+        settings={
+            "MARKET_ANALYSIS_ENRICHMENT_LLM_MODEL": "test-model",
+            "MARKET_ANALYSIS_ENRICHMENT_LLM_BASE_URL": "http://localhost:11434",
+        },
+        load_candidates=lambda **kwargs: [_signal("signal-1")],
+        persist_enrichment=lambda *args, **kwargs: False,
+    )
+    assert result == {"status": "FAILED", "reason": "invalid_configuration"}
+
+
+def test_candidate_loading_error_is_not_invalid_configuration():
+    def failed_load(**kwargs):
+        raise ValueError("candidate loading failed")
+
+    with pytest.raises(ValueError, match="candidate loading failed"):
+        service.run_configured_market_analysis_llm_enrichment(
+            settings={
+                "MARKET_ANALYSIS_ENRICHMENT_LLM_MODEL": "test-model",
+                "MARKET_ANALYSIS_ENRICHMENT_LLM_BASE_URL": "http://localhost:11434",
+            },
+            load_candidates=failed_load,
+            persist_enrichment=lambda *args, **kwargs: False,
+        )
 
 
 def _analysis(signal_id: str) -> dict:
