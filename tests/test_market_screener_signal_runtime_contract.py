@@ -592,8 +592,8 @@ def test_gui_screener_refreshes_only_selected_details() -> None:
     assert "selectedId ? [detailQuery.refetch()] : []" in refresh
     assert "selectedId && selected ? [signalEventsQuery.refetch()] : []" in refresh
     assert "selectedSnapshotId ? [snapshotItemsQuery.refetch()] : []" in refresh
-    assert "disabled={refreshing}" in page
-    assert "onClick={refreshScreener}" in page
+    assert "disabled={refreshing || analysis.isPending}" in page
+    assert "onClick={() => void refreshScreener()}" in page
 
 
 def test_gui_snapshot_history_distinguishes_failures_from_empty_results() -> None:
