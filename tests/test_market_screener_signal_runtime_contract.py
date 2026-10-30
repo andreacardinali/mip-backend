@@ -369,7 +369,7 @@ def test_incremental_analysis_installer_matches_schema() -> None:
     )
     schema_definitions = {
         (name, signature): re.sub(r"\s+", " ", returns + body).strip()
-        for name, signature, returns, delimiter, body in re.findall(
+        for name, signature, returns, _delimiter, body in re.findall(
             pattern, schema, re.DOTALL
         )
     }
@@ -377,7 +377,7 @@ def test_incremental_analysis_installer_matches_schema() -> None:
     assert len(definitions) == 6
     assert installer.startswith("BEGIN;")
     assert installer.rstrip().endswith("COMMIT;")
-    for name, signature, returns, delimiter, body in definitions:
+    for name, signature, returns, _delimiter, body in definitions:
         assert re.sub(r"\s+", " ", returns + body).strip() == schema_definitions[
             name, signature
         ]
