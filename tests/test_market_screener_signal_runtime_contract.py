@@ -9,6 +9,191 @@ from uuid import UUID
 import pytest
 
 
+@pytest.mark.parametrize(
+    "name",
+    [
+        "sp_get_user_notification_preferences",
+        "sp_upsert_user_notification_preference",
+        "sp_market_screener_summary_recipients",
+    ],
+)
+def test_screener_summary_preference_is_opt_in_and_matches_schema(name) -> None:
+    installer = Path("oneshot/install_screener_summary_notifications.sql").read_text(
+        encoding="utf-8"
+    )
+    schema = Path("mip_schema.sql").read_text(encoding="utf-8")
+    pattern = rf"FUNCTION public\.{name}\(.*?\$\$;"
+    installed = re.search(pattern, installer, re.DOTALL)
+    snapshot = re.search(pattern, schema, re.DOTALL)
+    assert installed is not None and snapshot is not None
+    installed_body = installed.group().split("$$", 1)[1]
+    snapshot_body = snapshot.group().split("$$", 1)[1]
+    assert " ".join(installed_body.split()) == " ".join(snapshot_body.split())
+    assert "'SCREENER_SUMMARY'" in installed_body
+    if name == "sp_get_user_notification_preferences":
+        assert re.search(r"'SCREENER_SUMMARY'.*?::text, false\)", installed_body, re.DOTALL)
+    elif name == "sp_market_screener_summary_recipients":
+        assert "ns.portfolio_id IS NULL" in installed_body
+        assert "ns.enabled = true" in installed_body
+
+
+@pytest.mark.parametrize(
+    ("scenario", "expected_status", "expected_reason"),
+    [
+        ("disabled", "DISABLED", None),
+        ("incomplete", "SKIPPED", "incomplete_snapshot"),
+        ("initial", "SKIPPED", "initial_snapshot"),
+        ("unchanged", "SKIPPED", "no_changes"),
+        ("changed", "SUCCESS", None),
+    ],
+)
+def test_snapshot_summary_reuses_comparison_and_queue(
+    monkeypatch, scenario, expected_status, expected_reason
+) -> None:
+    namespace = runpy.run_path("market_screener/service.py")
+    enqueue = namespace["enqueue_snapshot_summary"]
+    calls = []
+    comparison = {
+        "ranking_snapshot_id": "snapshot",
+        "previous_snapshot_id": None if scenario == "initial" else "previous",
+        "new_count": 0 if scenario == "unchanged" else 2,
+        "changed_count": 0 if scenario == "unchanged" else 1,
+        "removed_count": 0 if scenario == "unchanged" else 3,
+        "changes": [{"private_detail": "not exported"}],
+    }
+
+    def get_changes(snapshot_id):
+        calls.append(("comparison", snapshot_id))
+        return None if scenario == "incomplete" else comparison
+
+    def recipients():
+        calls.append("recipients")
+        return ["owner", "other"]
+
+    def queue(**payload):
+        calls.append(payload)
+        return SimpleNamespace(
+            status="CREATED" if payload["user_id"] == "owner" else "DUPLICATE"
+        )
+
+    monkeypatch.setitem(
+        enqueue.__globals__,
+        "MarketScreenerApiRepository",
+        lambda db: SimpleNamespace(
+            get_snapshot_changes=get_changes, list_summary_recipients=recipients
+        ),
+    )
+    monkeypatch.setitem(
+        enqueue.__globals__,
+        "NotificationQueue",
+        lambda db, **kwargs: SimpleNamespace(enqueue=queue),
+    )
+    result = enqueue(None, snapshot_id="snapshot", enabled=scenario != "disabled")
+    assert result["status"] == expected_status
+    if expected_reason:
+        assert result["reason"] == expected_reason
+    if scenario == "disabled":
+        assert calls == []
+    elif scenario != "changed":
+        assert calls == [("comparison", "snapshot")]
+    else:
+        assert result["outcomes"] == {"CREATED": 1, "DUPLICATE": 1}
+        assert calls[:2] == [("comparison", "snapshot"), "recipients"]
+        for payload, user_id in zip(calls[2:], ["owner", "other"], strict=True):
+            assert payload["notification_key"] == f"SCREENER_SUMMARY:{user_id}:snapshot"
+            assert payload["notification_type"] == "SCREENER_SUMMARY"
+            assert payload["severity"] == "LOW"
+            assert payload["entity_id"] is None and payload["symbol"] is None
+            assert payload["context"] == {
+                "ranking_snapshot_id": "snapshot",
+                "previous_snapshot_id": "previous",
+                "new_count": 2,
+                "changed_count": 1,
+                "removed_count": 3,
+            }
+            assert payload["message"] == (
+                "Nuove entrate: 2\nCambi del segnale: 1\nUscite: 3"
+            )
+
+
+def test_summary_recipient_repository_calls_only_stored_routine() -> None:
+    repository = runpy.run_path("market_screener/api_repository.py")[
+        "MarketScreenerApiRepository"
+    ]
+    calls = []
+
+    def execute(statement):
+        calls.append(str(statement))
+        return SimpleNamespace(scalars=lambda: iter([UUID(int=1), UUID(int=2)]))
+
+    assert repository(SimpleNamespace(execute=execute)).list_summary_recipients() == [
+        str(UUID(int=1)), str(UUID(int=2))
+    ]
+    assert calls == ["SELECT user_id FROM public.sp_market_screener_summary_recipients()"]
+
+
+@pytest.mark.parametrize("scenario", ["success", "partial", "scan_disabled", "ranking_disabled", "queue_failure"])
+def test_pipeline_summary_is_post_commit_and_cannot_fail_snapshot(scenario) -> None:
+    tree = ast.parse(Path("jobs/market_screener_pipeline/worker.py").read_text())
+    functions = [
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name in ("run", "_queue_snapshot_summary")
+    ]
+    calls = []
+    session = SimpleNamespace(
+        commit=lambda: calls.append("commit"), close=lambda: calls.append("close")
+    )
+    repository = SimpleNamespace(
+        start=lambda: "run",
+        create_snapshot=lambda **kwargs: "snapshot",
+        complete=lambda **kwargs: calls.append(("complete", kwargs["status"])),
+    )
+
+    def transaction(operation):
+        calls.append("summary_transaction")
+        if scenario == "queue_failure":
+            raise RuntimeError("queue unavailable")
+        return operation(session)
+
+    def enqueue(db, **kwargs):
+        calls.append(("enqueue", kwargs))
+        return {"status": "SUCCESS"}
+
+    namespace = {
+        "Any": object,
+        "SessionLocal": lambda: session,
+        "MarketScreenerRunRepository": lambda db: repository,
+        "logger": SimpleNamespace(info=lambda *args, **kwargs: None, exception=lambda *args: None),
+        "_enabled": lambda name, default=True: name not in {
+            "MARKET_SCREENER_PIPELINE_SCAN_ENABLED" if scenario == "scan_disabled" else "",
+            "MARKET_SCREENER_PIPELINE_RANKING_ENABLED" if scenario == "ranking_disabled" else "",
+        },
+        "_run_phase": lambda name, operation: operation(),
+        "run_discovery_refresh": lambda: {"status": "SUCCESS"},
+        "run_candidate_resolver": lambda: {"status": "SUCCESS"},
+        "run_analysis_scan": lambda: {"status": "PARTIAL" if scenario == "partial" else "SUCCESS"},
+        "run_llm_enrichment": lambda: {"status": "SUCCESS"},
+        "run_ranking": lambda: {"status": "SUCCESS"},
+        "NotificationConfig": SimpleNamespace(load=lambda: SimpleNamespace(enabled=True)),
+        "run_transactional": transaction,
+        "enqueue_snapshot_summary": enqueue,
+    }
+    exec(compile(ast.Module(body=functions, type_ignores=[]), "worker", "exec"), namespace)
+    result = namespace["run"]()
+    assert result["status"] == ("PARTIAL" if scenario == "partial" else "SUCCESS")
+    assert result["ranking_snapshot_id"] == "snapshot"
+    assert ("complete", "FAILED") not in calls
+    if scenario in ("partial", "scan_disabled", "ranking_disabled"):
+        assert result["notification_summary"]["status"] == "SKIPPED"
+        assert "summary_transaction" not in calls
+    else:
+        assert calls[:5] == ["commit", "close", ("complete", "SUCCESS"), "commit", "close"]
+        assert calls[5] == "summary_transaction"
+        assert result["notification_summary"]["status"] == (
+            "FAILED" if scenario == "queue_failure" else "SUCCESS"
+        )
+
+
 def test_snapshot_changes_installer_compares_successful_unfiltered_snapshots() -> None:
     sql = Path("oneshot/install_screener_snapshot_changes.sql").read_text(
         encoding="utf-8"

@@ -92,6 +92,14 @@ class MarketScreenerApiRepository:
         ).scalar_one_or_none()
         return dict(payload) if payload is not None else None
 
+    def list_summary_recipients(self) -> list[str]:
+        return [
+            str(user_id)
+            for user_id in self.db.execute(
+                text("SELECT user_id FROM public.sp_market_screener_summary_recipients()")
+            ).scalars()
+        ]
+
     def list_snapshot_items(self, snapshot_id):
         return [
             dict(x)

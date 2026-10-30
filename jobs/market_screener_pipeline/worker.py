@@ -13,7 +13,10 @@ from jobs.market_discovery_candidate_resolver.worker import (
 )
 from jobs.market_discovery_refresh.worker import run as run_discovery_refresh
 from jobs.market_screener_ranking.worker import run as run_ranking
+from job_runtime.database import run_transactional
 from market_screener.run_repository import MarketScreenerRunRepository
+from market_screener.service import enqueue_snapshot_summary
+from notifications.config import NotificationConfig
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +34,19 @@ def _run_phase(name: str, operation: Callable[[], dict[str, Any]]) -> dict[str, 
         result.get("status"),
     )
     return result
+
+
+def _queue_snapshot_summary(snapshot_id: str) -> dict[str, Any]:
+    try:
+        enabled = NotificationConfig.load().enabled
+        return run_transactional(
+            lambda db: enqueue_snapshot_summary(
+                db, snapshot_id=snapshot_id, enabled=enabled
+            )
+        )
+    except Exception:
+        logger.exception("Screener summary enqueue failed snapshot_id=%s", snapshot_id)
+        return {"status": "FAILED"}
 
 
 def run() -> dict[str, Any]:
@@ -100,6 +116,13 @@ def run() -> dict[str, Any]:
             db.commit()
         finally:
             db.close()
+        notification_summary = {"status": "SKIPPED", "reason": "incomplete_run"}
+        if (
+            terminal_status == "SUCCESS"
+            and phases.get("analysis_scan", {}).get("status") == "SUCCESS"
+            and phases.get("ranking", {}).get("status") == "SUCCESS"
+        ):
+            notification_summary = _queue_snapshot_summary(str(snapshot_id))
         result = {
             "status": terminal_status,
             "screener_run_id": str(run_id),
@@ -107,6 +130,7 @@ def run() -> dict[str, Any]:
             "discovery_snapshot_id": discovery_snapshot_id,
             "scan_run_id": scan_run_id,
             "phases": phases,
+            "notification_summary": notification_summary,
         }
         logger.info(
             "Market screener pipeline completed summary=%s",

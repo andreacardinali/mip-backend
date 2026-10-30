@@ -4322,7 +4322,9 @@ WITH notification_types(notification_type, label, description, default_enabled) 
         ('PERCENT_MOVE'::varchar, 'Variazioni percentuali'::varchar,
          'Variazioni rispetto alla chiusura storica di riferimento.'::text, true),
         ('SIGNAL_CHANGE'::varchar, 'Cambi del segnale'::varchar,
-         'Eventi del ciclo di vita dei segnali monitorati.'::text, true)
+         'Eventi del ciclo di vita dei segnali monitorati.'::text, true),
+        ('SCREENER_SUMMARY'::varchar, 'Riepilogo screener'::varchar,
+         'Nuove opportunita, cambi del segnale e uscite dopo una scansione completa.'::text, false)
 ), default_source AS (
     SELECT us.source_id
     FROM public.user_sources us
@@ -4351,7 +4353,8 @@ ORDER BY CASE nt.notification_type
     WHEN 'MARKET_SIGNAL' THEN 4
     WHEN 'FIXED_PRICE' THEN 5
     WHEN 'PERCENT_MOVE' THEN 6
-    ELSE 7
+    WHEN 'SIGNAL_CHANGE' THEN 7
+    ELSE 8
 END;
 $$;
 
@@ -10816,6 +10819,15 @@ $$;
 -- Name: sp_upsert_user_notification_preference(uuid, character varying, boolean, uuid, character varying); Type: FUNCTION; Schema: public; Owner: -
 --
 
+CREATE FUNCTION public.sp_market_screener_summary_recipients()
+RETURNS TABLE(user_id uuid) LANGUAGE sql STABLE AS $$
+SELECT DISTINCT ns.user_id
+FROM public.notification_subscriptions ns
+WHERE ns.portfolio_id IS NULL
+    AND UPPER(ns.event_type) = 'SCREENER_SUMMARY'
+    AND ns.enabled = true;
+$$;
+
 CREATE FUNCTION public.sp_upsert_user_notification_preference(p_user_id uuid, p_notification_type character varying, p_enabled boolean, p_source_id uuid, p_severity_min character varying DEFAULT NULL::character varying) RETURNS uuid
     LANGUAGE plpgsql
     AS $$
@@ -10834,7 +10846,8 @@ BEGIN
         'MARKET_SIGNAL',
         'FIXED_PRICE',
         'PERCENT_MOVE',
-        'SIGNAL_CHANGE'
+        'SIGNAL_CHANGE',
+        'SCREENER_SUMMARY'
     ) THEN
         RAISE EXCEPTION 'Unsupported notification type: %', p_notification_type;
     END IF;
