@@ -6,7 +6,8 @@ from collections.abc import Callable, Sequence
 from typing import Any
 
 from job_runtime.progress import BatchProgress
-from llm import LLMProvider
+from llm import LLMConfig, LLMProvider, create_provider
+from market_analysis.enrichment_contract import enrichment_fingerprint as fingerprint
 from market_analysis.llm_enrichment import (
     SignalEnrichment,
     calculate_composite_score,
@@ -18,6 +19,34 @@ logger = logging.getLogger(__name__)
 PersistEnrichment = Callable[
     [dict[str, Any], SignalEnrichment, dict[str, Any], float], bool
 ]
+
+
+def run_configured_market_analysis_llm_enrichment(
+    *, settings, load_candidates, persist_enrichment
+) -> dict[str, Any]:
+    prefix = "MARKET_ANALYSIS_ENRICHMENT"
+    config = LLMConfig.from_settings(
+        settings, prefix=f"{prefix}_LLM", default_provider="ollama",
+        default_timeout_seconds=120.0,
+    )
+    max_tokens = int(settings.get(f"{prefix}_LLM_REQUEST_MAX_OUTPUT_TOKENS", 1200))
+    contract_fingerprint = fingerprint(config=config, max_tokens=max_tokens)
+    candidates = load_candidates(
+        contract_fingerprint=contract_fingerprint,
+        limit=int(settings.get(f"{prefix}_RUN_MAX_SIGNALS", 25)),
+    )
+    if not candidates:
+        return {"status": "SUCCESS", "selected": 0, "enriched": 0, "failed": 0,
+                "signal_ids": [], "enrichment_fingerprint": contract_fingerprint}
+    return run_market_analysis_llm_enrichment(
+        provider=create_provider(config), candidates=candidates,
+        persist_enrichment=lambda signal, enrichment, analysis, composite: persist_enrichment(
+            signal, enrichment, analysis, composite,
+            contract_fingerprint=contract_fingerprint,
+        ),
+        enrichment_fingerprint=contract_fingerprint, max_tokens=max_tokens,
+        call_batch_size=int(settings.get(f"{prefix}_LLM_REQUEST_MAX_SIGNALS", 1)),
+    )
 
 
 def _deduplicate_candidates(candidates):

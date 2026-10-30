@@ -25,6 +25,22 @@ class MarketAnalysisLLMEnrichmentRepository:
         ).mappings()
         return [dict(row) for row in rows]
 
+    def list_pending_context(
+        self, *, user_id: str, context_type: str, context_id: str,
+        enrichment_fingerprint: str, limit: int,
+    ) -> list[dict[str, Any]]:
+        return list(self.db.execute(
+            text("""
+                SELECT * FROM public.sp_market_analysis_list_pending_context_llm_enrichment(
+                    CAST(:enrichment_fingerprint AS varchar), CAST(:user_id AS uuid),
+                    CAST(:context_type AS varchar), CAST(:context_id AS uuid),
+                    CAST(:limit AS integer)
+                )
+            """),
+            dict(user_id=user_id, context_type=context_type, context_id=context_id,
+                 enrichment_fingerprint=enrichment_fingerprint, limit=limit),
+        ).scalars())
+
     def apply(
         self,
         *,

@@ -1,6 +1,52 @@
 from llm.base import LLMResponse
 from market_analysis.enrichment_contract import enrichment_fingerprint
 from services.market_analysis_llm_enrichment import run_market_analysis_llm_enrichment
+from services import market_analysis_llm_enrichment as service
+
+
+def test_configured_enrichment_skips_provider_when_context_has_no_candidates(monkeypatch):
+    def unexpected_provider(config):
+        raise AssertionError("No provider should be created for an empty context")
+
+    monkeypatch.setattr(service, "create_provider", unexpected_provider)
+    calls = []
+    result = service.run_configured_market_analysis_llm_enrichment(
+        settings={
+            "MARKET_ANALYSIS_ENRICHMENT_RUN_MAX_SIGNALS": 7,
+            "MARKET_ANALYSIS_ENRICHMENT_LLM_MODEL": "test-model",
+            "MARKET_ANALYSIS_ENRICHMENT_LLM_BASE_URL": "http://localhost:11434",
+        },
+        load_candidates=lambda **kwargs: calls.append(kwargs) or [],
+        persist_enrichment=lambda *args, **kwargs: False,
+    )
+    assert result["status"] == "SUCCESS"
+    assert result["selected"] == result["enriched"] == result["failed"] == 0
+    assert calls == [{"contract_fingerprint": result["enrichment_fingerprint"], "limit": 7}]
+
+
+def test_configured_enrichment_reuses_fingerprint_and_persistence(monkeypatch):
+    monkeypatch.setattr(service, "create_provider", lambda config: FakeProvider())
+    selected = []
+    persisted = []
+
+    def load(**kwargs):
+        selected.append(kwargs)
+        return [_signal("signal-1")]
+
+    def persist(signal, enrichment, analysis, composite, *, contract_fingerprint):
+        persisted.append((signal["signal_id"], analysis["enrichment_fingerprint"], contract_fingerprint))
+        return True
+
+    result = service.run_configured_market_analysis_llm_enrichment(
+        settings={
+            "MARKET_ANALYSIS_ENRICHMENT_LLM_MODEL": "test-model",
+            "MARKET_ANALYSIS_ENRICHMENT_LLM_BASE_URL": "http://localhost:11434",
+        }, load_candidates=load, persist_enrichment=persist,
+    )
+    assert result["status"] == "SUCCESS"
+    assert result["signal_ids"] == ["signal-1"]
+    assert selected[0]["limit"] == 25
+    assert persisted == [("signal-1", selected[0]["contract_fingerprint"], result["enrichment_fingerprint"])]
 
 
 def _analysis(signal_id: str) -> dict:

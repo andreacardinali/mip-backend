@@ -22,6 +22,8 @@ def analyze_screener_context(
     context_id: str,
     market_data_service,
     config: ScanConfig,
+    llm_enabled: bool = False,
+    llm_settings=None,
 ) -> dict[str, Any]:
     repository = MarketScreenerApiRepository(db)
     context = dict(user_id=user_id, context_type=context_type, context_id=context_id)
@@ -41,23 +43,57 @@ def analyze_screener_context(
         members=[ScanMember(universe_id=universe_id, **item) for item in instruments],
         config=config,
     )
+    phases = {"context": context, "analysis_scan": scan}
+    status = scan["status"]
+    if llm_enabled:
+        from market_analysis.llm_enrichment_repository import MarketAnalysisLLMEnrichmentRepository
+        from services.market_analysis_llm_enrichment import run_configured_market_analysis_llm_enrichment
+
+        enrichment_repository = MarketAnalysisLLMEnrichmentRepository(db)
+
+        def load_candidates(*, contract_fingerprint, limit):
+            with db.begin_nested():
+                return enrichment_repository.list_pending_context(
+                    **context, enrichment_fingerprint=contract_fingerprint, limit=limit,
+                )
+
+        def persist(signal, enrichment, analysis, composite, *, contract_fingerprint):
+            with db.begin_nested():
+                return enrichment_repository.apply(
+                    signal_id=str(signal["signal_id"]),
+                    enrichment_fingerprint=contract_fingerprint,
+                    llm_score=enrichment.llm_score, llm_analysis=analysis,
+                    composite_score=composite,
+                )
+
+        try:
+            phases["llm_enrichment"] = run_configured_market_analysis_llm_enrichment(
+                settings=llm_settings, load_candidates=load_candidates,
+                persist_enrichment=persist,
+            )
+        except Exception:
+            phases["llm_enrichment"] = {"status": "FAILED", "reason": "enrichment_unavailable"}
+        if phases["llm_enrichment"]["status"] != "SUCCESS" and status == "SUCCESS":
+            status = "PARTIAL"
     ranking = build_market_screener_ranking(
         MarketScreenerRepository(db), config=ScreenerRankingConfig()
     )
+    phases["ranking"] = ranking
     snapshot_id = runs.create_snapshot(run_id=run_id)
     runs.complete(
         run_id=run_id,
-        status=scan["status"],
+        status=status,
         discovery_snapshot_id=None,
         scan_run_id=scan["run_id"],
-        phase_results={"context": context, "analysis_scan": scan, "ranking": ranking},
+        phase_results=phases,
     )
     return {
-        "status": scan["status"],
+        "status": status,
         "run_id": str(run_id),
         "ranking_snapshot_id": str(snapshot_id),
         "scan": scan,
         "ranking": ranking,
+        **({"llm_enrichment": phases["llm_enrichment"]} if llm_enabled else {}),
     }
 
 

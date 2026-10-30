@@ -18,6 +18,7 @@ router = APIRouter()
 class ScreenerAnalysisRequest(BaseModel):
     context_type: Literal["WATCHLIST", "PORTFOLIO", "UNIVERSE"]
     context_id: UUID
+    llm_enabled: bool = False
 
 
 @router.get("/contexts")
@@ -50,6 +51,7 @@ def analyze_screener(
             context_id=str(request.context_id),
             market_data_service=market_data,
             config=ScanConfig.from_settings(settings),
+            **({"llm_enabled": True, "llm_settings": settings} if request.llm_enabled else {}),
         )
         db.commit()
         return result

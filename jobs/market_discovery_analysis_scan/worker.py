@@ -15,6 +15,7 @@ from market_screener.constants import (
     MARKET_ANALYSIS_QUANT_MIN_SCORE,
 )
 from services.market_discovery_analysis_scan import run_market_discovery_analysis_scan
+from market_screener.coordination import run_coordinated_analysis
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,10 @@ def _compact_result(result: dict[str, Any]) -> dict[str, Any]:
 
 
 def run() -> dict[str, Any]:
+    return run_coordinated_analysis(_run_scan)
+
+
+def _run_scan() -> dict[str, Any]:
     scan_config = ScanConfig.from_settings(settings)
     quant_config = QuantPrefilterConfig(
         minimum_score=MARKET_ANALYSIS_QUANT_MIN_SCORE,

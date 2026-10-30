@@ -99,6 +99,12 @@ AS $$
     ) FROM contexts c ORDER BY c.context_type, c.name, c.context_id;
 $$;
 
+CREATE OR REPLACE FUNCTION public.sp_market_screener_try_analysis_lock()
+RETURNS boolean LANGUAGE sql VOLATILE
+AS $$
+    SELECT pg_try_advisory_xact_lock(hashtext('market_screener_analysis'));
+$$;
+
 CREATE OR REPLACE FUNCTION public.sp_market_screener_prepare_context_scan(
     p_user_id uuid, p_context_type varchar, p_context_id uuid
 ) RETURNS uuid
@@ -110,7 +116,7 @@ BEGIN
     PERFORM * FROM public.sp_market_screener_context_instruments(
         p_user_id, p_context_type, p_context_id
     );
-    IF NOT pg_try_advisory_xact_lock(hashtext('market_screener_manual_scan')) THEN
+    IF NOT public.sp_market_screener_try_analysis_lock() THEN
         RAISE EXCEPTION 'Analysis already running' USING ERRCODE = '55P03';
     END IF;
     IF p_context_type = 'UNIVERSE' THEN

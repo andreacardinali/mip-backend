@@ -5116,6 +5116,14 @@ $$;
 --
 
 CREATE FUNCTION public.sp_market_analysis_list_pending_llm_enrichment(p_enrichment_fingerprint character varying, p_limit integer DEFAULT 25) RETURNS TABLE(signal_id uuid, instrument_id uuid, entity_id uuid, symbol character varying, exchange character varying, entity_name character varying, strategy_code character varying, timeframe character varying, direction character varying, signal_type character varying, trend character varying, status character varying, confidence numeric, technical_score numeric, financial_score numeric, catalyst_score numeric, reference_price numeric, invalidation_price numeric, target_price numeric, observed_at timestamp with time zone, evidence jsonb)
+    LANGUAGE sql STABLE
+    AS $$
+    SELECT * FROM public.sp_market_analysis_list_pending_llm_enrichment(
+        p_enrichment_fingerprint, p_limit, NULL::uuid[]
+    );
+$$;
+
+CREATE FUNCTION public.sp_market_analysis_list_pending_llm_enrichment(p_enrichment_fingerprint character varying, p_limit integer, p_instrument_ids uuid[]) RETURNS TABLE(signal_id uuid, instrument_id uuid, entity_id uuid, symbol character varying, exchange character varying, entity_name character varying, strategy_code character varying, timeframe character varying, direction character varying, signal_type character varying, trend character varying, status character varying, confidence numeric, technical_score numeric, financial_score numeric, catalyst_score numeric, reference_price numeric, invalidation_price numeric, target_price numeric, observed_at timestamp with time zone, evidence jsonb)
     LANGUAGE plpgsql STABLE
     AS $_$
 BEGIN
@@ -5161,6 +5169,7 @@ BEGIN
     JOIN public.entities AS e
       ON e.entity_id = i.entity_id
     WHERE s.status IN ('CANDIDATE', 'CONFIRMED')
+            AND (p_instrument_ids IS NULL OR s.instrument_id = ANY(p_instrument_ids))
             AND s.strategy_code <> 'SWING_EXIT'
             AND COALESCE(s.evidence #> '{quant,llm_eligible}', 'true'::jsonb) = 'true'::jsonb
       AND (
@@ -5180,6 +5189,26 @@ $_$;
 --
 -- Name: sp_market_analysis_list_signal_events(uuid, character varying, integer); Type: FUNCTION; Schema: public; Owner: -
 --
+
+CREATE FUNCTION public.sp_market_analysis_list_pending_context_llm_enrichment(
+    p_enrichment_fingerprint varchar, p_user_id uuid,
+    p_context_type varchar, p_context_id uuid, p_limit integer DEFAULT 25
+) RETURNS SETOF jsonb
+LANGUAGE plpgsql STABLE AS $$
+DECLARE
+    v_instrument_ids uuid[];
+BEGIN
+    SELECT array_agg(instrument_id) INTO v_instrument_ids
+    FROM public.sp_market_screener_context_instruments(
+        p_user_id, p_context_type, p_context_id
+    );
+    RETURN QUERY
+    SELECT to_jsonb(pending)
+    FROM public.sp_market_analysis_list_pending_llm_enrichment(
+        p_enrichment_fingerprint, p_limit, COALESCE(v_instrument_ids, '{}'::uuid[])
+    ) pending;
+END;
+$$;
 
 CREATE FUNCTION public.sp_market_analysis_list_signal_events(p_instrument_id uuid, p_strategy_code character varying DEFAULT NULL::character varying, p_limit integer DEFAULT 100) RETURNS SETOF jsonb
     LANGUAGE sql STABLE
@@ -7493,6 +7522,12 @@ $$;
 -- Name: sp_market_screener_prepare_context_scan(uuid, character varying, uuid); Type: FUNCTION; Schema: public; Owner: -
 --
 
+CREATE FUNCTION public.sp_market_screener_try_analysis_lock()
+RETURNS boolean LANGUAGE sql VOLATILE
+AS $$
+    SELECT pg_try_advisory_xact_lock(hashtext('market_screener_analysis'));
+$$;
+
 CREATE FUNCTION public.sp_market_screener_prepare_context_scan(p_user_id uuid, p_context_type character varying, p_context_id uuid) RETURNS uuid
     LANGUAGE plpgsql
     AS $$
@@ -7502,7 +7537,7 @@ BEGIN
     PERFORM * FROM public.sp_market_screener_context_instruments(
         p_user_id, p_context_type, p_context_id
     );
-    IF NOT pg_try_advisory_xact_lock(hashtext('market_screener_manual_scan')) THEN
+    IF NOT public.sp_market_screener_try_analysis_lock() THEN
         RAISE EXCEPTION 'Analysis already running' USING ERRCODE = '55P03';
     END IF;
     IF p_context_type = 'UNIVERSE' THEN

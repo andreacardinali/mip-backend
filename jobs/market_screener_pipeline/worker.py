@@ -14,6 +14,7 @@ from jobs.market_discovery_candidate_resolver.worker import (
 )
 from jobs.market_discovery_refresh.worker import run as run_discovery_refresh
 from jobs.market_screener_ranking.worker import run as run_ranking
+from market_screener.coordination import run_coordinated_analysis
 from market_screener.run_repository import MarketScreenerRunRepository
 from market_screener.service import enqueue_snapshot_summary
 from notifications.config import NotificationConfig
@@ -50,6 +51,10 @@ def _queue_snapshot_summary(snapshot_id: str) -> dict[str, Any]:
 
 
 def run() -> dict[str, Any]:
+    return run_coordinated_analysis(_run_pipeline)
+
+
+def _run_pipeline() -> dict[str, Any]:
     db = SessionLocal()
     try:
         run_id = MarketScreenerRunRepository(db).start()

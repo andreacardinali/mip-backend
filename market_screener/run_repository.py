@@ -12,6 +12,11 @@ class MarketScreenerRunRepository:
     def __init__(self, db: Session) -> None:
         self.db = db
 
+    def try_analysis_lock(self) -> bool:
+        return bool(self.db.execute(
+            text("SELECT public.sp_market_screener_try_analysis_lock()")
+        ).scalar_one())
+
     def start(self) -> UUID:
         return self.db.execute(
             text("SELECT public.sp_market_screener_start_run()")

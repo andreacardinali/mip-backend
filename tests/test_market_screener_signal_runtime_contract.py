@@ -2,6 +2,7 @@ import ast
 import re
 import runpy
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from uuid import UUID
@@ -179,13 +180,15 @@ def test_pipeline_summary_is_post_commit_and_cannot_fail_snapshot(scenario) -> N
         node
         for node in tree.body
         if isinstance(node, ast.FunctionDef)
-        and node.name in ("run", "_queue_snapshot_summary")
+        and node.name in ("run", "_run_pipeline", "_queue_snapshot_summary")
     ]
     calls = []
     session = SimpleNamespace(
-        commit=lambda: calls.append("commit"), close=lambda: calls.append("close")
+        commit=lambda: calls.append("commit"), close=lambda: calls.append("close"),
+        rollback=lambda: calls.append("unlock"),
     )
     repository = SimpleNamespace(
+        try_analysis_lock=lambda: True,
         start=lambda: "run",
         create_snapshot=lambda **kwargs: "snapshot",
         complete=lambda **kwargs: calls.append(("complete", kwargs["status"])),
@@ -233,6 +236,7 @@ def test_pipeline_summary_is_post_commit_and_cannot_fail_snapshot(scenario) -> N
             load=lambda: SimpleNamespace(enabled=True)
         ),
         "run_transactional": transaction,
+        "run_coordinated_analysis": lambda operation: operation(),
         "enqueue_snapshot_summary": enqueue,
     }
     exec(
@@ -321,12 +325,15 @@ def test_context_installer_matches_schema_and_filters_before_limit() -> None:
         "sp_market_screener_list_filtered_opportunities",
         "sp_market_screener_list_contexts",
         "sp_market_screener_prepare_context_scan",
+        "sp_market_screener_try_analysis_lock",
     ):
-        pattern = rf"FUNCTION public\.{name}\(.*?\$\$;"
-        assert (
-            re.search(pattern, schema, re.DOTALL).group()
-            == re.search(pattern, installer, re.DOTALL).group()
-        )
+        pattern = rf"FUNCTION public\.{name}\(.*?AS\s+\$\$(.*?)\$\$;"
+        bodies = [re.search(pattern, sql, re.DOTALL).group(1)
+                  for sql in (schema, installer)]
+        assert [re.sub(r"\s+", " ", body.replace("character varying", "varchar")).strip()
+                for body in bodies][0] == [
+                    re.sub(r"\s+", " ", body.replace("character varying", "varchar")).strip()
+                    for body in bodies][1]
     assert "w.user_id = p_user_id" in installer
     assert "p.user_id = p_user_id" in installer
     assert "pos.quantity <> 0" in installer
@@ -337,7 +344,8 @@ def test_context_installer_matches_schema_and_filters_before_limit() -> None:
 
 
 @pytest.mark.parametrize(
-    "outcome", ["success", "partial", "empty", "too_many", "failure"]
+    "outcome", ["success", "partial", "empty", "too_many", "failure",
+                "ai_success", "ai_partial", "ai_failure"]
 )
 def test_manual_context_scan_records_history_in_callers_transaction(
     monkeypatch, outcome
@@ -352,13 +360,57 @@ def test_manual_context_scan_records_history_in_callers_transaction(
         "currency_code": "USD",
     }
     count = 0 if outcome == "empty" else 1001 if outcome == "too_many" else 1
-    db = object()
+    savepoints = []
+    db = SimpleNamespace(begin_nested=lambda: savepoints.append(True) or nullcontext())
     run_id = UUID("00000000-0000-0000-0000-000000000001")
     snapshot_id = UUID("00000000-0000-0000-0000-000000000002")
     scan = {
         "status": "PARTIAL" if outcome == "partial" else "SUCCESS",
         "run_id": "scan",
     }
+    ai_enabled = outcome.startswith("ai_")
+    ai_result = (
+        {"status": "FAILED", "reason": "enrichment_unavailable"}
+        if outcome == "ai_failure"
+        else {"status": "PARTIAL" if outcome == "ai_partial" else "SUCCESS"}
+    )
+    expected_status = "PARTIAL" if outcome in ("ai_partial", "ai_failure") else scan["status"]
+    ai_phase = {"llm_enrichment": ai_result} if ai_enabled else {}
+
+    def pending(**kwargs):
+        assert kwargs == {**context, "enrichment_fingerprint": "fingerprint", "limit": 7}
+        return [{"signal_id": "signal"}]
+
+    def persist(**kwargs):
+        assert kwargs["signal_id"] == "signal"
+        assert kwargs["enrichment_fingerprint"] == "fingerprint"
+        return True
+
+    def enrichment(*, settings, load_candidates, persist_enrichment):
+        assert settings == {"configured": True}
+        calls.append("ai")
+        if outcome == "ai_failure":
+            raise RuntimeError("private provider details")
+        signal = load_candidates(contract_fingerprint="fingerprint", limit=7)[0]
+        assert persist_enrichment(
+            signal, SimpleNamespace(llm_score=75), {"summary": "analysis"}, 80,
+            contract_fingerprint="fingerprint",
+        )
+        return ai_result
+
+    for name, attributes in {
+        "market_analysis.llm_enrichment_repository": {
+            "MarketAnalysisLLMEnrichmentRepository": lambda session: SimpleNamespace(
+                list_pending_context=pending, apply=persist,
+            ),
+        },
+        "services.market_analysis_llm_enrichment": {
+            "run_configured_market_analysis_llm_enrichment": enrichment,
+        },
+    }.items():
+        module = ModuleType(name)
+        module.__dict__.update(attributes)
+        monkeypatch.setitem(sys.modules, name, module)
 
     def context_instruments(**kwargs):
         assert kwargs == context
@@ -390,13 +442,14 @@ def test_manual_context_scan_records_history_in_callers_transaction(
     def complete(**kwargs):
         assert kwargs == {
             "run_id": run_id,
-            "status": scan["status"],
+            "status": expected_status,
             "discovery_snapshot_id": None,
             "scan_run_id": "scan",
             "phase_results": {
                 "context": context,
                 "analysis_scan": scan,
                 "ranking": {"status": "SUCCESS"},
+                **ai_phase,
             },
         }
         calls.append("complete")
@@ -438,6 +491,8 @@ def test_manual_context_scan_records_history_in_callers_transaction(
     ] = ranking
     analyze = namespace["analyze_screener_context"]
     kwargs = {**context, "market_data_service": object(), "config": object()}
+    if ai_enabled:
+        kwargs.update(llm_enabled=True, llm_settings={"configured": True})
     if outcome in ("empty", "too_many"):
         with pytest.raises(ValueError):
             analyze(db, **kwargs)
@@ -449,17 +504,19 @@ def test_manual_context_scan_records_history_in_callers_transaction(
     else:
         result = analyze(db, **kwargs)
         assert result == {
-            "status": scan["status"],
+            "status": expected_status,
             "run_id": str(run_id),
             "ranking_snapshot_id": str(snapshot_id),
             "scan": scan,
             "ranking": {"status": "SUCCESS"},
+            **ai_phase,
         }
         assert calls == [
             "members",
             "lock",
             "start",
             "scan",
+            *(["ai"] if ai_enabled else []),
             "ranking",
             "snapshot",
             "complete",
