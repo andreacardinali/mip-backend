@@ -31,7 +31,9 @@ def test_screener_summary_preference_is_opt_in_and_matches_schema(name) -> None:
     assert " ".join(installed_body.split()) == " ".join(snapshot_body.split())
     assert "'SCREENER_SUMMARY'" in installed_body
     if name == "sp_get_user_notification_preferences":
-        assert re.search(r"'SCREENER_SUMMARY'.*?::text, false\)", installed_body, re.DOTALL)
+        assert re.search(
+            r"'SCREENER_SUMMARY'.*?::text, false\)", installed_body, re.DOTALL
+        )
     elif name == "sp_market_screener_summary_recipients":
         assert "ns.portfolio_id IS NULL" in installed_body
         assert "ns.enabled = true" in installed_body
@@ -127,17 +129,25 @@ def test_summary_recipient_repository_calls_only_stored_routine() -> None:
         return SimpleNamespace(scalars=lambda: iter([UUID(int=1), UUID(int=2)]))
 
     assert repository(SimpleNamespace(execute=execute)).list_summary_recipients() == [
-        str(UUID(int=1)), str(UUID(int=2))
+        str(UUID(int=1)),
+        str(UUID(int=2)),
     ]
-    assert calls == ["SELECT user_id FROM public.sp_market_screener_summary_recipients()"]
+    assert calls == [
+        "SELECT user_id FROM public.sp_market_screener_summary_recipients()"
+    ]
 
 
-@pytest.mark.parametrize("scenario", ["success", "partial", "scan_disabled", "ranking_disabled", "queue_failure"])
+@pytest.mark.parametrize(
+    "scenario",
+    ["success", "partial", "scan_disabled", "ranking_disabled", "queue_failure"],
+)
 def test_pipeline_summary_is_post_commit_and_cannot_fail_snapshot(scenario) -> None:
     tree = ast.parse(Path("jobs/market_screener_pipeline/worker.py").read_text())
     functions = [
-        node for node in tree.body
-        if isinstance(node, ast.FunctionDef) and node.name in ("run", "_queue_snapshot_summary")
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name in ("run", "_queue_snapshot_summary")
     ]
     calls = []
     session = SimpleNamespace(
@@ -163,22 +173,40 @@ def test_pipeline_summary_is_post_commit_and_cannot_fail_snapshot(scenario) -> N
         "Any": object,
         "SessionLocal": lambda: session,
         "MarketScreenerRunRepository": lambda db: repository,
-        "logger": SimpleNamespace(info=lambda *args, **kwargs: None, exception=lambda *args: None),
-        "_enabled": lambda name, default=True: name not in {
-            "MARKET_SCREENER_PIPELINE_SCAN_ENABLED" if scenario == "scan_disabled" else "",
-            "MARKET_SCREENER_PIPELINE_RANKING_ENABLED" if scenario == "ranking_disabled" else "",
+        "logger": SimpleNamespace(
+            info=lambda *args, **kwargs: None, exception=lambda *args: None
+        ),
+        "_enabled": lambda name, default=True: name
+        not in {
+            (
+                "MARKET_SCREENER_PIPELINE_SCAN_ENABLED"
+                if scenario == "scan_disabled"
+                else ""
+            ),
+            (
+                "MARKET_SCREENER_PIPELINE_RANKING_ENABLED"
+                if scenario == "ranking_disabled"
+                else ""
+            ),
         },
         "_run_phase": lambda name, operation: operation(),
         "run_discovery_refresh": lambda: {"status": "SUCCESS"},
         "run_candidate_resolver": lambda: {"status": "SUCCESS"},
-        "run_analysis_scan": lambda: {"status": "PARTIAL" if scenario == "partial" else "SUCCESS"},
+        "run_analysis_scan": lambda: {
+            "status": "PARTIAL" if scenario == "partial" else "SUCCESS"
+        },
         "run_llm_enrichment": lambda: {"status": "SUCCESS"},
         "run_ranking": lambda: {"status": "SUCCESS"},
-        "NotificationConfig": SimpleNamespace(load=lambda: SimpleNamespace(enabled=True)),
+        "NotificationConfig": SimpleNamespace(
+            load=lambda: SimpleNamespace(enabled=True)
+        ),
         "run_transactional": transaction,
         "enqueue_snapshot_summary": enqueue,
     }
-    exec(compile(ast.Module(body=functions, type_ignores=[]), "worker", "exec"), namespace)
+    exec(
+        compile(ast.Module(body=functions, type_ignores=[]), "worker", "exec"),
+        namespace,
+    )
     result = namespace["run"]()
     assert result["status"] == ("PARTIAL" if scenario == "partial" else "SUCCESS")
     assert result["ranking_snapshot_id"] == "snapshot"
@@ -187,7 +215,13 @@ def test_pipeline_summary_is_post_commit_and_cannot_fail_snapshot(scenario) -> N
         assert result["notification_summary"]["status"] == "SKIPPED"
         assert "summary_transaction" not in calls
     else:
-        assert calls[:5] == ["commit", "close", ("complete", "SUCCESS"), "commit", "close"]
+        assert calls[:5] == [
+            "commit",
+            "close",
+            ("complete", "SUCCESS"),
+            "commit",
+            "close",
+        ]
         assert calls[5] == "summary_transaction"
         assert result["notification_summary"]["status"] == (
             "FAILED" if scenario == "queue_failure" else "SUCCESS"

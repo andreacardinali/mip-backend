@@ -96,7 +96,9 @@ class MarketScreenerApiRepository:
         return [
             str(user_id)
             for user_id in self.db.execute(
-                text("SELECT user_id FROM public.sp_market_screener_summary_recipients()")
+                text(
+                    "SELECT user_id FROM public.sp_market_screener_summary_recipients()"
+                )
             ).scalars()
         ]
 

@@ -6,6 +6,7 @@ from collections.abc import Callable
 from typing import Any
 
 from db import SessionLocal
+from job_runtime.database import run_transactional
 from jobs.market_analysis_llm_enrichment.worker import run as run_llm_enrichment
 from jobs.market_discovery_analysis_scan.worker import run as run_analysis_scan
 from jobs.market_discovery_candidate_resolver.worker import (
@@ -13,7 +14,6 @@ from jobs.market_discovery_candidate_resolver.worker import (
 )
 from jobs.market_discovery_refresh.worker import run as run_discovery_refresh
 from jobs.market_screener_ranking.worker import run as run_ranking
-from job_runtime.database import run_transactional
 from market_screener.run_repository import MarketScreenerRunRepository
 from market_screener.service import enqueue_snapshot_summary
 from notifications.config import NotificationConfig
