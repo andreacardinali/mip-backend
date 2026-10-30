@@ -1,7 +1,8 @@
 from datetime import datetime
+from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel
+from fastapi import APIRouter, Body, Depends, HTTPException, status
+from pydantic import BaseModel, ValidationError
 from sqlalchemy import text
 
 from auth.security import CurrentUser, require_admin
@@ -9,6 +10,8 @@ from db import SessionLocal
 from job_runtime.requests import REQUEST_ONLY_JOBS
 from scheduler_repository import SchedulerRepository
 from scheduler_triggers import SCHEDULER_TIMEZONE, build_trigger
+from services.entity_refresh_request import RefreshEntitiesRequest
+from services.market_screener_pipeline_request import MarketScreenerPipelineRequest
 
 router = APIRouter()
 
@@ -139,17 +142,32 @@ def update_job(
 def run_job_now(
     job_key: str,
     current_user: CurrentUser = Depends(require_admin),
+    payload: Annotated[dict[str, Any] | None, Body()] = None,
 ):
     if job_key in REQUEST_ONLY_JOBS:
         raise HTTPException(
             status_code=422, detail="Start this job from its contextual API"
         )
+    parameters = payload or {}
+    model = {
+        "market_screener_pipeline": MarketScreenerPipelineRequest,
+        "refresh_entities_missing": RefreshEntitiesRequest,
+    }.get(job_key)
+    try:
+        if model is not None:
+            parameters = model.model_validate(parameters).model_dump(
+                mode="json", exclude_unset=True
+            )
+        elif parameters:
+            raise ValueError("This job does not accept execution parameters")
+    except (ValidationError, ValueError) as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
     db = SessionLocal()
     try:
         request = SchedulerRepository(db).request_run(
             job_key=job_key,
             requested_by=current_user["user_id"],
-            payload={},
+            payload=parameters,
             source="ADMIN_UI",
         )
         db.commit()

@@ -279,6 +279,66 @@ def test_entity_refresh_worker_uses_request_options(monkeypatch):
 
 
 @pytest.mark.parametrize(
+    "job_key, payload, expected",
+    [
+        ("market_screener_pipeline", None, {}),
+        ("market_screener_pipeline", {"phases": ["ranking"], "stop_on_error": True},
+         {"phases": ["ranking"], "stop_on_error": True}),
+        ("refresh_entities_missing", {"mode": "ALL", "full_refresh": True},
+         {"mode": "ALL", "full_refresh": True}),
+        ("refresh_entities_missing", {"mode": "SYMBOL", "symbol": "msft"},
+         {"mode": "SYMBOL", "symbol": "MSFT"}),
+        ("market_cache_cleanup", None, {}),
+    ],
+)
+def test_scheduler_admin_run_enqueues_validated_parameters(
+    monkeypatch, job_key, payload, expected
+):
+    from routers import system_admin
+
+    db = MagicMock()
+    repository = MagicMock()
+    ticket = {"job_run_id": RUN_ID, "status": "QUEUED"}
+    repository.request_run.return_value = ticket
+    monkeypatch.setattr(system_admin, "SessionLocal", lambda: db)
+    monkeypatch.setattr(system_admin, "SchedulerRepository", lambda session: repository)
+    assert system_admin.run_job_now(
+        job_key, current_user={"user_id": USER_ID}, payload=payload
+    ) == ticket
+    repository.request_run.assert_called_once_with(
+        job_key=job_key, requested_by=USER_ID, payload=expected, source="ADMIN_UI"
+    )
+    db.commit.assert_called_once()
+    db.close.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "job_key, payload",
+    [
+        ("market_screener_pipeline", {"phases": []}),
+        ("market_screener_pipeline", {"phases": ["unknown"]}),
+        ("market_screener_pipeline", {"llm_enabled": True}),
+        ("refresh_entities_missing", {"mode": "SYMBOL"}),
+        ("refresh_entities_missing", {"mode": "UNKNOWN"}),
+        ("market_cache_cleanup", {"phases": ["ranking"]}),
+    ],
+)
+def test_scheduler_admin_run_rejects_invalid_parameters_before_database(
+    monkeypatch, job_key, payload
+):
+    from routers import system_admin
+
+    session_factory = MagicMock()
+    monkeypatch.setattr(system_admin, "SessionLocal", session_factory)
+    with pytest.raises(HTTPException) as raised:
+        system_admin.run_job_now(
+            job_key, current_user={"user_id": USER_ID}, payload=payload
+        )
+    assert raised.value.status_code == 422
+    session_factory.assert_not_called()
+
+
+@pytest.mark.parametrize(
     "job_key, request_only",
     [
         ("market_screener_context_analysis", True),

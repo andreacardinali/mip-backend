@@ -7,6 +7,7 @@ from typing import Any
 
 from db import SessionLocal
 from job_runtime.database import run_transactional
+from job_runtime.requests import current_job_request
 from jobs.market_analysis_llm_enrichment.worker import run as run_llm_enrichment
 from jobs.market_discovery_analysis_scan.worker import run as run_analysis_scan
 from jobs.market_discovery_candidate_resolver.worker import (
@@ -18,6 +19,7 @@ from market_screener.coordination import run_coordinated_analysis
 from market_screener.run_repository import MarketScreenerRunRepository
 from market_screener.service import enqueue_snapshot_summary
 from notifications.config import NotificationConfig
+from services.market_screener_pipeline_request import MarketScreenerPipelineRequest
 
 logger = logging.getLogger(__name__)
 
@@ -51,10 +53,14 @@ def _queue_snapshot_summary(snapshot_id: str) -> dict[str, Any]:
 
 
 def run() -> dict[str, Any]:
-    return run_coordinated_analysis(_run_pipeline)
+    execution = current_job_request.get()
+    request = MarketScreenerPipelineRequest.model_validate(
+        (execution.get("payload") or {}) if execution else {}
+    )
+    return run_coordinated_analysis(lambda: _run_pipeline(request))
 
 
-def _run_pipeline() -> dict[str, Any]:
+def _run_pipeline(request: MarketScreenerPipelineRequest) -> dict[str, Any]:
     db = SessionLocal()
     try:
         run_id = MarketScreenerRunRepository(db).start()
@@ -66,6 +72,11 @@ def _run_pipeline() -> dict[str, Any]:
     scan_run_id = None
     terminal_status = "SUCCESS"
     error_message = None
+    stop_on_error = (
+        request.stop_on_error
+        if request.stop_on_error is not None
+        else _enabled("MARKET_SCREENER_PIPELINE_STOP_ON_ERROR", False)
+    )
     phase_specs = [
         (
             "discovery_refresh",
@@ -83,6 +94,9 @@ def _run_pipeline() -> dict[str, Any]:
     ]
     try:
         for phase_name, setting_name, operation in phase_specs:
+            if request.phases is not None and phase_name not in request.phases:
+                phases[phase_name] = {"status": "SKIPPED", "reason": "not_selected"}
+                continue
             if not _enabled(setting_name):
                 phases[phase_name] = {"status": "SKIPPED", "reason": "disabled"}
                 continue
@@ -95,7 +109,7 @@ def _run_pipeline() -> dict[str, Any]:
                     scan_run_id = result.get("run_id")
                 if result.get("status") in {"FAILED", "PARTIAL"}:
                     terminal_status = "PARTIAL"
-                    if _enabled("MARKET_SCREENER_PIPELINE_STOP_ON_ERROR", False):
+                    if stop_on_error:
                         break
             except Exception as exc:
                 logger.exception(
@@ -104,7 +118,7 @@ def _run_pipeline() -> dict[str, Any]:
                 phases[phase_name] = {"status": "FAILED", "error": str(exc)}
                 terminal_status = "PARTIAL"
                 error_message = str(exc)
-                if _enabled("MARKET_SCREENER_PIPELINE_STOP_ON_ERROR", False):
+                if stop_on_error:
                     break
         db = SessionLocal()
         try:

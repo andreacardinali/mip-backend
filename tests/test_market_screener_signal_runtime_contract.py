@@ -227,9 +227,14 @@ def test_watchlist_filter_installer_matches_schema_and_filters_before_limit() ->
 
 @pytest.mark.parametrize(
     "scenario",
-    ["success", "partial", "scan_disabled", "ranking_disabled", "queue_failure"],
+    [
+        "success", "partial", "scan_disabled", "ranking_disabled", "queue_failure",
+        "ranking_only", "llm_disabled", "stop_on_error",
+    ],
 )
 def test_pipeline_summary_is_post_commit_and_cannot_fail_snapshot(scenario) -> None:
+    from services.market_screener_pipeline_request import MarketScreenerPipelineRequest
+
     tree = ast.parse(Path("jobs/market_screener_pipeline/worker.py").read_text())
     functions = [
         node
@@ -260,8 +265,23 @@ def test_pipeline_summary_is_post_commit_and_cannot_fail_snapshot(scenario) -> N
         calls.append(("enqueue", kwargs))
         return {"status": "SUCCESS"}
 
+    payload = {}
+    if scenario == "ranking_only":
+        payload = {"phases": ["ranking"]}
+    elif scenario == "llm_disabled":
+        payload = {"phases": ["llm_enrichment", "ranking"]}
+    elif scenario == "stop_on_error":
+        payload = {"stop_on_error": True}
+    executed = []
+
+    def run_phase(name, operation):
+        executed.append(name)
+        return operation()
+
     namespace = {
         "Any": object,
+        "MarketScreenerPipelineRequest": MarketScreenerPipelineRequest,
+        "current_job_request": SimpleNamespace(get=lambda: {"payload": payload}),
         "SessionLocal": lambda: session,
         "MarketScreenerRunRepository": lambda db: repository,
         "logger": SimpleNamespace(
@@ -279,12 +299,18 @@ def test_pipeline_summary_is_post_commit_and_cannot_fail_snapshot(scenario) -> N
                 if scenario == "ranking_disabled"
                 else ""
             ),
+            (
+                "MARKET_SCREENER_PIPELINE_LLM_ENABLED"
+                if scenario == "llm_disabled"
+                else ""
+            ),
+            "MARKET_SCREENER_PIPELINE_STOP_ON_ERROR",
         },
-        "_run_phase": lambda name, operation: operation(),
+        "_run_phase": run_phase,
         "run_discovery_refresh": lambda: {"status": "SUCCESS"},
         "run_candidate_resolver": lambda: {"status": "SUCCESS"},
         "run_analysis_scan": lambda: {
-            "status": "PARTIAL" if scenario == "partial" else "SUCCESS"
+            "status": "PARTIAL" if scenario in ("partial", "stop_on_error") else "SUCCESS"
         },
         "run_llm_enrichment": lambda: {"status": "SUCCESS"},
         "run_ranking": lambda: {"status": "SUCCESS"},
@@ -300,10 +326,23 @@ def test_pipeline_summary_is_post_commit_and_cannot_fail_snapshot(scenario) -> N
         namespace,
     )
     result = namespace["run"]()
-    assert result["status"] == ("PARTIAL" if scenario == "partial" else "SUCCESS")
+    assert result["status"] == (
+        "PARTIAL" if scenario in ("partial", "stop_on_error") else "SUCCESS"
+    )
     assert result["ranking_snapshot_id"] == "snapshot"
     assert ("complete", "FAILED") not in calls
-    if scenario in ("partial", "scan_disabled", "ranking_disabled"):
+    if scenario == "ranking_only":
+        assert executed == ["ranking"]
+        assert result["phases"]["analysis_scan"]["reason"] == "not_selected"
+    elif scenario == "llm_disabled":
+        assert executed == ["ranking"]
+        assert result["phases"]["llm_enrichment"]["reason"] == "disabled"
+    elif scenario == "stop_on_error":
+        assert executed == ["discovery_refresh", "candidate_resolver", "analysis_scan"]
+    if scenario in (
+        "partial", "scan_disabled", "ranking_disabled", "ranking_only",
+        "llm_disabled", "stop_on_error",
+    ):
         assert result["notification_summary"]["status"] == "SKIPPED"
         assert "summary_transaction" not in calls
     else:
@@ -318,6 +357,16 @@ def test_pipeline_summary_is_post_commit_and_cannot_fail_snapshot(scenario) -> N
         assert result["notification_summary"]["status"] == (
             "FAILED" if scenario == "queue_failure" else "SUCCESS"
         )
+
+
+@pytest.mark.parametrize("payload", [{"phases": []}, {"phases": ["unknown"]}, {"typo": True}])
+def test_pipeline_request_rejects_invalid_parameters(payload) -> None:
+    from pydantic import ValidationError
+
+    from services.market_screener_pipeline_request import MarketScreenerPipelineRequest
+
+    with pytest.raises(ValidationError):
+        MarketScreenerPipelineRequest.model_validate(payload)
 
 
 def test_snapshot_changes_installer_compares_successful_unfiltered_snapshots() -> None:
