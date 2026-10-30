@@ -137,6 +137,31 @@ def test_summary_recipient_repository_calls_only_stored_routine() -> None:
     ]
 
 
+def test_opportunity_filters_and_limit_are_applied_by_sql() -> None:
+    repository = runpy.run_path("market_screener/api_repository.py")[
+        "MarketScreenerApiRepository"
+    ]
+    calls = []
+    results = [{"opportunity_id": "late-match", "consensus_direction": "BULLISH"}]
+
+    def execute(statement, params):
+        calls.append((str(statement), params))
+        return SimpleNamespace(scalars=lambda: iter(results))
+
+    assert repository(SimpleNamespace(execute=execute)).list_opportunities(
+        user_id="owner", consensus_direction="BULLISH", strategy_code="SUPERTREND",
+        context_type="WATCHLIST", context_id="watchlist", limit=1,
+    ) == results
+    statement, params = calls[0]
+    assert "sp_market_screener_list_filtered_opportunities" in statement
+    assert params["limit"] == 1
+    assert "fetch_limit" not in params
+    assert params["consensus_direction"] == "BULLISH"
+    assert params["strategy_code"] == "SUPERTREND"
+    assert params["context_type"] == "WATCHLIST"
+    assert params["context_id"] == "watchlist"
+
+
 @pytest.mark.parametrize(
     "scenario",
     ["success", "partial", "scan_disabled", "ranking_disabled", "queue_failure"],
@@ -272,9 +297,24 @@ def test_performance_installer_preserves_asof_prices_and_direction_cycles() -> N
 
 def test_api_enriches_existing_opportunity_payloads() -> None:
     repository = Path("market_screener/api_repository.py").read_text(encoding="utf-8")
-    assert repository.count("sp_market_screener_enrich_opportunity_payload") == 2
-    assert "sp_market_screener_list_user_opportunities" in repository
+    assert repository.count("sp_market_screener_enrich_opportunity_payload") == 1
+    assert "sp_market_screener_list_filtered_opportunities" in repository
     assert "sp_market_screener_get_user_opportunity" in repository
+
+
+def test_context_installer_matches_schema_and_filters_before_limit() -> None:
+    import re
+
+    schema = Path("mip_schema.sql").read_text(encoding="utf-8")
+    installer = Path("oneshot/install_screener_contexts.sql").read_text(encoding="utf-8")
+    for name in ("sp_market_screener_context_instruments", "sp_market_screener_list_filtered_opportunities"):
+        pattern = rf"FUNCTION public\.{name}\(.*?\$\$;"
+        assert re.search(pattern, schema, re.DOTALL).group() == re.search(pattern, installer, re.DOTALL).group()
+    assert "w.user_id = p_user_id" in installer
+    assert "p.user_id = p_user_id" in installer
+    assert "pos.quantity <> 0" in installer
+    assert "mum.valid_to IS NULL" in installer
+    assert installer.index("o.consensus_direction = p_consensus_direction") < installer.index("LIMIT least")
 
 
 def test_gui_handles_missing_signal_arrays() -> None:

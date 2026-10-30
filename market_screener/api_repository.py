@@ -19,19 +19,22 @@ class MarketScreenerApiRepository:
         verdict: str | None = None,
         portfolio_match: bool | None = None,
         consensus_direction: str | None = None,
+        strategy_code: str | None = None,
+        context_type: str | None = None,
+        context_id: str | None = None,
         minimum_score: float = 0.0,
         query: str | None = None,
         limit: int = 100,
     ) -> list[dict[str, Any]]:
         rows = self.db.execute(
             text(
-                """SELECT public.sp_market_screener_enrich_consensus_payload(
-            public.sp_market_screener_enrich_opportunity_payload(payload,(payload->>'opportunity_id')::uuid),
-            (payload->>'opportunity_id')::uuid) payload
-            FROM public.sp_market_screener_list_user_opportunities(
+                """SELECT payload
+            FROM public.sp_market_screener_list_filtered_opportunities(
             CAST(:user_id AS uuid),CAST(:origin AS varchar),CAST(:direction AS varchar),
             CAST(:verdict AS varchar),CAST(:portfolio_match AS boolean),CAST(:minimum_score AS numeric),
-            CAST(:query AS text),CAST(:fetch_limit AS integer)) payload"""
+            CAST(:query AS text),CAST(:consensus_direction AS varchar),
+            CAST(:strategy_code AS varchar),CAST(:context_type AS varchar),
+            CAST(:context_id AS uuid),CAST(:limit AS integer)) payload"""
             ),
             {
                 "user_id": user_id,
@@ -39,17 +42,16 @@ class MarketScreenerApiRepository:
                 "direction": direction,
                 "verdict": verdict,
                 "portfolio_match": portfolio_match,
+                "consensus_direction": consensus_direction,
+                "strategy_code": strategy_code,
+                "context_type": context_type,
+                "context_id": context_id,
                 "minimum_score": minimum_score,
                 "query": query,
-                "fetch_limit": min(1000, max(limit * 4, limit)),
+                "limit": limit,
             },
         ).scalars()
-        values = [dict(x) for x in rows]
-        if consensus_direction:
-            values = [
-                x for x in values if x.get("consensus_direction") == consensus_direction
-            ]
-        return values[:limit]
+        return [dict(row) for row in rows]
 
     def get_opportunity(self, *, user_id: str, opportunity_id: str):
         p = self.db.execute(
