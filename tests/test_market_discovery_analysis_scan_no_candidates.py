@@ -129,7 +129,7 @@ def test_quant_exclusion_does_not_prevent_signal_persistence(monkeypatch):
     )
 
     result = run_market_discovery_analysis_scan(
-        object(),
+        SimpleNamespace(commit=lambda: None, rollback=lambda: None),
         market_data_service=object(),
         scan_config=ScanConfig(),
         quant_config=QuantPrefilterConfig(minimum_score=100),
@@ -139,3 +139,57 @@ def test_quant_exclusion_does_not_prevent_signal_persistence(monkeypatch):
     assert result["persisted_signals"] == 1
     assert result["lifecycle_events"] == 1
     assert persisted[0]["candidate"].strategy_code == "TREND_PULLBACK"
+
+
+def test_discovery_commits_before_next_provider_call_and_preserves_failed_run(monkeypatch):
+    import pytest
+
+    events = []
+
+    class DiscoveryRepository:
+        def __init__(self, db):
+            pass
+
+        def list_scan_candidates(self, **kwargs):
+            return [
+                {"instrument_id": symbol, "entity_id": symbol, "symbol": symbol,
+                 "universe_id": None}
+                for symbol in ("FIRST", "SECOND")
+            ]
+
+    class Repository:
+        def __init__(self, db):
+            pass
+
+        def upsert_universe(self, **kwargs):
+            return "universe"
+
+        def start_scan_run(self, **kwargs):
+            return "run"
+
+        def finish_scan_run(self, **kwargs):
+            events.append(kwargs["status"])
+
+    def scan(members, **kwargs):
+        assert events[-1] == "commit"
+        events.append(members[0].symbol)
+        if members[0].symbol == "SECOND":
+            raise RuntimeError("interrupted")
+        return ScanResult(1, (), ())
+
+    monkeypatch.setattr("services.market_discovery_analysis_scan.DiscoveryScanRepository", DiscoveryRepository)
+    monkeypatch.setattr("services.market_discovery_analysis_scan.MarketAnalysisRepository", Repository)
+    monkeypatch.setattr("services.market_discovery_analysis_scan.scan_members", scan)
+    monkeypatch.setattr("services.market_discovery_analysis_scan.expire_evaluated_signals", lambda *args: 0)
+    db = SimpleNamespace(
+        commit=lambda: events.append("commit"),
+        rollback=lambda: events.append("rollback"),
+    )
+
+    with pytest.raises(RuntimeError, match="interrupted"):
+        run_market_discovery_analysis_scan(
+            db, market_data_service=object(), scan_config=ScanConfig(),
+            quant_config=QuantPrefilterConfig(),
+        )
+
+    assert events == ["commit", "FIRST", "commit", "SECOND", "rollback", "FAILED", "commit"]

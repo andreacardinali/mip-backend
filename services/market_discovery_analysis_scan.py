@@ -12,7 +12,7 @@ from market_analysis.quant_prefilter import (
     score_evaluated_signal,
 )
 from market_analysis.repository import MarketAnalysisRepository
-from market_analysis.scan import ScanConfig, ScanMember, scan_members
+from market_analysis.scan import ScanConfig, ScanMember, ScanResult, scan_members
 from market_sources.discovery.scan_repository import DiscoveryScanRepository
 
 DISCOVERY_SCAN_UNIVERSE_CODE = "DISCOVERY_SCAN"
@@ -101,20 +101,9 @@ def run_market_discovery_analysis_scan(
         for row in rows
     ]
 
-    try:
-        scan_result = scan_members(
-            members,
-            market_data_service=market_data_service,
-            config=scan_config,
-        )
-        quant_results = prefilter_evaluated_signals(
-            scan_result.candidates,
-            config=quant_config,
-        )
-
-        selected_candidates = {id(item.evaluated) for item in quant_results}
-        signal_ids: list[str] = []
-        for evaluated in scan_result.candidates:
+    def persist_candidates(candidates, selected_candidates):
+        signal_ids = []
+        for evaluated in candidates:
             quant_score, quant_breakdown = score_evaluated_signal(
                 evaluated, config=quant_config
             )
@@ -160,21 +149,49 @@ def run_market_discovery_analysis_scan(
                     scores=scores,
                 )
             )
+        return signal_ids
 
-        lifecycle_events = reconcile_persisted_signals(
-            db,
-            signal_ids,
-            stability_minutes=30,
-        )
-        expired_signals = expire_evaluated_signals(db, scan_result, signal_ids)
-
-        for failure in scan_result.failures:
-            repository.record_scan_failure(
-                run_id=run_id,
-                instrument_id=failure.instrument_id,
-                symbol=failure.symbol,
-                reason=failure.reason,
+    try:
+        db.commit()
+        parts = []
+        lifecycle_events = []
+        expired_signals = 0
+        for member in members:
+            part = scan_members(
+                [member],
+                market_data_service=market_data_service,
+                config=scan_config,
             )
+            member_signal_ids = persist_candidates(part.candidates, set())
+            if member_signal_ids:
+                lifecycle_events.extend(
+                    reconcile_persisted_signals(
+                        db, member_signal_ids, stability_minutes=30
+                    )
+                )
+            expired_signals += expire_evaluated_signals(db, part, member_signal_ids)
+            for failure in part.failures:
+                repository.record_scan_failure(
+                    run_id=run_id,
+                    instrument_id=failure.instrument_id,
+                    symbol=failure.symbol,
+                    reason=failure.reason,
+                )
+            db.commit()
+            parts.append(part)
+
+        scan_result = ScanResult(
+            processed=len(members),
+            candidates=tuple(item for part in parts for item in part.candidates),
+            failures=tuple(item for part in parts for item in part.failures),
+            skipped=tuple(item for part in parts for item in part.skipped),
+            evaluations=tuple(item for part in parts for item in part.evaluations),
+        )
+        quant_results = prefilter_evaluated_signals(
+            scan_result.candidates, config=quant_config
+        )
+        selected_candidates = {id(item.evaluated) for item in quant_results}
+        signal_ids = persist_candidates(scan_result.candidates, selected_candidates)
 
         skipped_details = [item.to_dict() for item in scan_result.skipped]
         insufficient_history = [
@@ -215,11 +232,14 @@ def run_market_discovery_analysis_scan(
             status="COMPLETED",
             summary=summary,
         )
+        db.commit()
         return summary
     except Exception as error:
+        db.rollback()
         repository.finish_scan_run(
             run_id=run_id,
             status="FAILED",
             summary={"error": str(error)[:1000]},
         )
+        db.commit()
         raise

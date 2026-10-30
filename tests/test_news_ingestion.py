@@ -74,6 +74,40 @@ class Tests(unittest.TestCase):
         self.assertEqual(result["associations_inserted"], 1)
         self.assertEqual(result["persistence_failed"], 0)
         db.begin_nested.assert_called_once_with()
+        self.assertEqual(db.commit.call_count, 2)
+
+    @patch("services.news_ingestion._persist_article")
+    @patch("services.news_ingestion._load_targets")
+    def test_commits_articles_before_next_provider_and_continues_after_write_failure(
+        self, load_targets, persist_article
+    ):
+        load_targets.return_value = [
+            {"entity_id": symbol, "symbol": symbol}
+            for symbol in ("FIRST", "SECOND", "THIRD")
+        ]
+        events = []
+        db = Mock()
+        db.begin_nested.return_value = nullcontext()
+        db.commit.side_effect = lambda: events.append("commit")
+        db.rollback.side_effect = lambda: events.append("rollback")
+        persist_article.side_effect = [
+            {"inserted": True}, RuntimeError("write failed"), {"inserted": True}
+        ]
+
+        def fetch(reference, **kwargs):
+            self.assertIn(events[-1], {"commit", "rollback"})
+            events.append(reference.symbol)
+            return [NewsArticle(
+                headline="news", published_at=datetime.now(UTC), external_id=reference.symbol
+            )]
+
+        md = Mock()
+        md.get_news.side_effect = fetch
+        result = ingest_news(db, market_data_service=md)
+
+        self.assertEqual(result["inserted"], 2)
+        self.assertEqual(result["persistence_failed"], 1)
+        self.assertEqual(events, ["commit", "FIRST", "commit", "SECOND", "rollback", "THIRD", "commit"])
 
 
 if __name__ == "__main__":

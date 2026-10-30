@@ -179,6 +179,7 @@ def ingest_news(
         include_all=include_all,
         limit=target_limit,
     )
+    db.commit()
 
     stats = {
         "targets": len(targets),
@@ -273,7 +274,9 @@ def ingest_news(
                         entity_id=entity_id,
                         article=article,
                     )
+                db.commit()
             except Exception:
+                db.rollback()
                 stats["persistence_failed"] += 1
                 stats["failed"] += 1
                 logger.exception(
