@@ -1,8 +1,8 @@
 import json
 
-import httpx
 import pytest
 
+from http_client import testing as http
 from llm.base import LLMResponse
 from market_analysis.enrichment_contract import enrichment_fingerprint
 from market_analysis.llm_enrichment import validate_batch_enrichment
@@ -126,25 +126,25 @@ def test_endpoint_failure_stops_remaining_calls(
     provider = ResilientProvider()
     original_generate = provider.generate_json
     calls = []
-    request = httpx.Request("POST", "http://localhost/ai")
+    request = http.Request("POST", "http://localhost/ai")
 
     def generate(request_body):
         calls.append(request_body)
         if len(calls) <= successful_batches:
             return original_generate(request_body)
         if isinstance(failure, int):
-            response = httpx.Response(failure, request=request)
+            response = http.Response(failure, request=request)
             try:
                 response.raise_for_status()
-            except httpx.HTTPStatusError as error:
+            except http.HTTPStatusError as error:
                 raise RuntimeError("wrapped provider failure") from error
         if failure == "timeout":
-            raise httpx.ReadTimeout("timeout", request=request)
+            raise http.ReadTimeout("timeout", request=request)
         if failure == "connect":
-            raise httpx.ConnectError("unreachable", request=request)
+            raise http.ConnectError("unreachable", request=request)
         if failure == "queue_timeout":
             raise TimeoutError("Timed out waiting for LLM queue request")
-        raise httpx.InvalidURL("invalid endpoint")
+        raise http.InvalidURL("invalid endpoint")
 
     provider.generate_json = generate
     candidates = [_signal(f"signal-{index}") for index in range(9)]
@@ -177,7 +177,7 @@ def test_endpoint_failure_during_split_preserves_successful_sibling():
             raise ValueError("invalid batch response")
         if len(calls) == 2:
             return original_generate(request)
-        raise httpx.ConnectError("endpoint unavailable")
+        raise http.ConnectError("endpoint unavailable")
 
     provider.generate_json = generate
     persisted = []
