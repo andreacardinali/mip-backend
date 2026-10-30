@@ -527,6 +527,29 @@ do not replace a TypeScript build or interactive UI validation.
 
 ### Contextual screener analysis
 
+### Unified entity and universe views
+
+The GUI exposes `/entities`, `/entities/:id`, `/universes` and `/universes/:id`.
+The entity overview combines instruments and price timestamps, user portfolio
+and watchlist matches, current universe memberships, news, catalysts and active
+screener opportunities. Counts include all linked news and catalysts; detail
+lists contain the latest 50 of each. The entity list retains its API limit of
+500 rows. Raw overview data is available in the diagnostic panel.
+
+Authenticated `GET /api/entities/{entity_id}/overview` delegates to
+`sp_get_user_entity_overview` with the authenticated user ID. Review and manually
+apply `oneshot/install_entity_overview.sql` after the existing entity asset-match
+and screener routines. The same definition is in `mip_schema.sql`. No live
+installation or startup migration is performed.
+
+`GET /api/screener/contexts/{context_type}/{context_id}/instruments` reuses the
+authorized context-membership routine; missing or foreign collections return
+404. Universe instruments link directly to the unified entity overview.
+Offline endpoint and installer parity checks are in
+`tests/test_entity_overview.py`; these do not validate SQL execution on PostgreSQL.
+
+### Contextual screener installation
+
 Review and manually apply `oneshot/install_screener_contexts.sql` after the
 existing screener, ranking, consensus and snapshot installers. Its routines
 are also present in the authoritative `mip_schema.sql`; no startup migration is

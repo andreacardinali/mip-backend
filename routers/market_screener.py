@@ -21,6 +21,27 @@ class ScreenerAnalysisRequest(BaseModel):
     llm_enabled: bool = False
 
 
+@router.get("/contexts/{context_type}/{context_id}/instruments")
+def list_context_instruments(
+    context_type: Literal["WATCHLIST", "PORTFOLIO", "UNIVERSE"],
+    context_id: UUID,
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    db = SessionLocal()
+    try:
+        return MarketScreenerApiRepository(db).context_instruments(
+            user_id=current_user["user_id"],
+            context_type=context_type,
+            context_id=str(context_id),
+        )
+    except DBAPIError as error:
+        if getattr(error.orig, "pgcode", None) == "P0002":
+            raise HTTPException(404, "Context not found") from error
+        raise
+    finally:
+        db.close()
+
+
 @router.get("/contexts")
 def list_screener_contexts(current_user: CurrentUser = Depends(get_current_user)):
     db = SessionLocal()
