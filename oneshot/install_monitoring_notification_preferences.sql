@@ -18,7 +18,9 @@ WITH notification_types(notification_type, label, description, default_enabled) 
         ('PERCENT_MOVE'::varchar, 'Variazioni percentuali'::varchar,
          'Variazioni rispetto alla chiusura storica di riferimento.'::text, true),
         ('SIGNAL_CHANGE'::varchar, 'Cambi del segnale'::varchar,
-         'Eventi del ciclo di vita dei segnali monitorati.'::text, true)
+         'Eventi del ciclo di vita dei segnali monitorati.'::text, true),
+        ('SCREENER_SUMMARY'::varchar, 'Riepilogo screener'::varchar,
+         'Nuove opportunita, cambi del segnale e uscite dopo una scansione completa.'::text, false)
 ), default_source AS (
     SELECT us.source_id
     FROM public.user_sources us
@@ -47,7 +49,8 @@ ORDER BY CASE nt.notification_type
     WHEN 'MARKET_SIGNAL' THEN 4
     WHEN 'FIXED_PRICE' THEN 5
     WHEN 'PERCENT_MOVE' THEN 6
-    ELSE 7
+    WHEN 'SIGNAL_CHANGE' THEN 7
+    ELSE 8
 END;
 $$;
 
@@ -69,7 +72,8 @@ BEGIN
         'MARKET_SIGNAL',
         'FIXED_PRICE',
         'PERCENT_MOVE',
-        'SIGNAL_CHANGE'
+        'SIGNAL_CHANGE',
+        'SCREENER_SUMMARY'
     ) THEN
         RAISE EXCEPTION 'Unsupported notification type: %', p_notification_type;
     END IF;
