@@ -14,14 +14,18 @@ USER_ID = "00000000-0000-0000-0000-000000000002"
 def routes():
     with (
         patch("sqlalchemy.create_engine"),
-        patch("config.settings.settings", Mock(DATABASE_URL="postgresql+psycopg://test")),
+        patch(
+            "config.settings.settings", Mock(DATABASE_URL="postgresql+psycopg://test")
+        ),
     ):
         from routers import entities, market_screener
     return entities, market_screener
 
 
 @pytest.mark.parametrize("payload", [None, {"entity": {"entity_id": str(ENTITY_ID)}}])
-def test_overview_uses_authenticated_user_and_closes_session(monkeypatch, payload, routes):
+def test_overview_uses_authenticated_user_and_closes_session(
+    monkeypatch, payload, routes
+):
     entities, _ = routes
     captured = {}
 
@@ -72,17 +76,67 @@ def test_context_instruments_keeps_owner_checks(monkeypatch, missing, routes):
     monkeypatch.setattr(market_screener, "MarketScreenerApiRepository", Repository)
     if missing:
         with pytest.raises(HTTPException) as caught:
-            market_screener.list_context_instruments("UNIVERSE", ENTITY_ID, {"user_id": USER_ID})
+            market_screener.list_context_instruments(
+                "UNIVERSE", ENTITY_ID, {"user_id": USER_ID}
+            )
         assert caught.value.status_code == 404
     else:
-        assert market_screener.list_context_instruments("UNIVERSE", ENTITY_ID, {"user_id": USER_ID}) == [{"entity_id": str(ENTITY_ID)}]
-    assert captured == {"user_id": USER_ID, "context_type": "UNIVERSE", "context_id": str(ENTITY_ID), "closed": True}
+        assert market_screener.list_context_instruments(
+            "UNIVERSE", ENTITY_ID, {"user_id": USER_ID}
+        ) == [{"entity_id": str(ENTITY_ID)}]
+    assert captured == {
+        "user_id": USER_ID,
+        "context_type": "UNIVERSE",
+        "context_id": str(ENTITY_ID),
+        "closed": True,
+    }
+
+
+@pytest.mark.parametrize("watchlist_match", [None, False, True])
+def test_opportunities_forward_user_membership_filters(
+    monkeypatch, routes, watchlist_match
+):
+    _, market_screener = routes
+    captured = {}
+
+    class Session:
+        def close(self):
+            captured["closed"] = True
+
+    class Repository:
+        def __init__(self, session):
+            pass
+
+        def list_opportunities(self, **params):
+            captured.update(params)
+            return []
+
+    monkeypatch.setattr(market_screener, "SessionLocal", Session)
+    monkeypatch.setattr(market_screener, "MarketScreenerApiRepository", Repository)
+    assert (
+        market_screener.list_screener_opportunities(
+            portfolio_match=True,
+            watchlist_match=watchlist_match,
+            strategy_code=None,
+            minimum_score=0,
+            limit=1,
+            current_user={"user_id": USER_ID},
+        )
+        == []
+    )
+    assert captured["user_id"] == USER_ID
+    assert captured["portfolio_match"] is True
+    assert captured["watchlist_match"] is watchlist_match
+    assert captured["limit"] == 1
+    assert captured["closed"] is True
 
 
 def test_overview_installation_matches_authoritative_schema():
     root = Path(__file__).resolve().parents[1]
     schema = (root / "mip_schema.sql").read_text(encoding="utf-8")
-    installer = (root / "oneshot" / "install_entity_overview.sql").read_text(encoding="utf-8")
+    installer = (root / "oneshot" / "install_entity_overview.sql").read_text(
+        encoding="utf-8"
+    )
     signature = "FUNCTION public.sp_get_user_entity_overview"
     schema_body = schema.split(signature, 1)[1].split("$$;", 1)[0]
     installer_body = installer.split(signature, 1)[1].split("$$;", 1)[0]

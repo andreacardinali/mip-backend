@@ -61,6 +61,7 @@ class MarketScreenerApiRepository:
         direction: str | None = None,
         verdict: str | None = None,
         portfolio_match: bool | None = None,
+        watchlist_match: bool | None = None,
         consensus_direction: str | None = None,
         strategy_code: str | None = None,
         context_type: str | None = None,
@@ -69,6 +70,9 @@ class MarketScreenerApiRepository:
         query: str | None = None,
         limit: int = 100,
     ) -> list[dict[str, Any]]:
+        watchlist_argument = (
+            ",CAST(:watchlist_match AS boolean)" if watchlist_match is not None else ""
+        )
         rows = self.db.execute(
             text(
                 """SELECT payload
@@ -77,7 +81,9 @@ class MarketScreenerApiRepository:
             CAST(:verdict AS varchar),CAST(:portfolio_match AS boolean),CAST(:minimum_score AS numeric),
             CAST(:query AS text),CAST(:consensus_direction AS varchar),
             CAST(:strategy_code AS varchar),CAST(:context_type AS varchar),
-            CAST(:context_id AS uuid),CAST(:limit AS integer)) payload"""
+            CAST(:context_id AS uuid),CAST(:limit AS integer)"""
+                + watchlist_argument
+                + ") payload"
             ),
             {
                 "user_id": user_id,
@@ -85,6 +91,7 @@ class MarketScreenerApiRepository:
                 "direction": direction,
                 "verdict": verdict,
                 "portfolio_match": portfolio_match,
+                "watchlist_match": watchlist_match,
                 "consensus_direction": consensus_direction,
                 "strategy_code": strategy_code,
                 "context_type": context_type,

@@ -138,7 +138,8 @@ def test_summary_recipient_repository_calls_only_stored_routine() -> None:
     ]
 
 
-def test_opportunity_filters_and_limit_are_applied_by_sql() -> None:
+@pytest.mark.parametrize("watchlist_match", [None, False, True])
+def test_opportunity_filters_and_limit_are_applied_by_sql(watchlist_match) -> None:
     repository = runpy.run_path("market_screener/api_repository.py")[
         "MarketScreenerApiRepository"
     ]
@@ -152,6 +153,7 @@ def test_opportunity_filters_and_limit_are_applied_by_sql() -> None:
     assert (
         repository(SimpleNamespace(execute=execute)).list_opportunities(
             user_id="owner",
+            watchlist_match=watchlist_match,
             consensus_direction="BULLISH",
             strategy_code="SUPERTREND",
             context_type="WATCHLIST",
@@ -168,6 +170,29 @@ def test_opportunity_filters_and_limit_are_applied_by_sql() -> None:
     assert params["strategy_code"] == "SUPERTREND"
     assert params["context_type"] == "WATCHLIST"
     assert params["context_id"] == "watchlist"
+    assert params["watchlist_match"] is watchlist_match
+    assert ("CAST(:watchlist_match AS boolean)" in statement) == (
+        watchlist_match is not None
+    )
+
+
+def test_watchlist_filter_installer_matches_schema_and_filters_before_limit() -> None:
+    schema = Path("mip_schema.sql").read_text(encoding="utf-8")
+    installer = Path("oneshot/install_screener_watchlist_filter.sql").read_text(
+        encoding="utf-8"
+    )
+    pattern = r"FUNCTION public\.sp_market_screener_list_filtered_opportunities\([^\n]*p_watchlist_match boolean\).*?AS\s+\$\$(.*?)\$\$;"
+    bodies = [
+        re.search(pattern, sql, re.DOTALL).group(1) for sql in (schema, installer)
+    ]
+    assert bodies[0] == bodies[1]
+    assert (
+        "sp_get_user_entity_asset_match(p_user_id, coalesce(o.entity_id, i.entity_id), o.instrument_id)"
+        in bodies[0]
+    )
+    assert bodies[0].index("p_watchlist_match IS NULL") < bodies[0].index("LIMIT least")
+    assert "2147483647" in bodies[0]
+    assert "->> 'in_watchlist'" in bodies[0]
 
 
 @pytest.mark.parametrize(

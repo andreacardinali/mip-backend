@@ -667,6 +667,25 @@ Their target price therefore refers to that representative listing.
 
 ## Focused verification
 
+### Screener membership filters
+
+The Screener shows entity names by default and supports independent portfolio
+and watchlist membership filters. Portfolio membership includes other listings
+of the same entity; watchlist membership uses the authenticated user's entities.
+Selecting both filters combines them with AND, before the result limit.
+
+Review and manually apply `oneshot/install_screener_watchlist_filter.sql` with
+`psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f oneshot/install_screener_watchlist_filter.sql`.
+This installs an additional overload of the existing filtered-opportunities
+routine. Requests without a watchlist filter continue using the original overload.
+No installer is run on application startup. SQL contracts are checked offline in
+`tests/test_market_screener_signal_runtime_contract.py`; database execution and
+interactive layout checks remain separate manual checks.
+
+The header theme switch persists locally, using the system preference initially.
+The Jobs page keeps the selected run log above a separately scrolling job list,
+with quick access to a running execution or the latest recorded execution.
+
 ```sh
 pytest -q tests/test_alert_evaluator.py tests/test_auth_security.py tests/test_entities_import_options.py tests/test_intelligence_migration.py
 pytest -q tests/test_intelligence_api_fixes.py
