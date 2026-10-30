@@ -24,7 +24,9 @@ class ScreenerAnalysisRequest(BaseModel):
 def list_screener_contexts(current_user: CurrentUser = Depends(get_current_user)):
     db = SessionLocal()
     try:
-        return MarketScreenerApiRepository(db).list_contexts(user_id=current_user["user_id"])
+        return MarketScreenerApiRepository(db).list_contexts(
+            user_id=current_user["user_id"]
+        )
     finally:
         db.close()
 
@@ -42,8 +44,11 @@ def analyze_screener(
     db = SessionLocal()
     try:
         result = analyze_screener_context(
-            db, user_id=current_user["user_id"], context_type=request.context_type,
-            context_id=str(request.context_id), market_data_service=market_data,
+            db,
+            user_id=current_user["user_id"],
+            context_type=request.context_type,
+            context_id=str(request.context_id),
+            market_data_service=market_data,
             config=ScanConfig.from_settings(settings),
         )
         db.commit()
@@ -82,13 +87,16 @@ def list_screener_opportunities(
     current_user: CurrentUser = Depends(get_current_user),
 ):
     if (context_type is None) != (context_id is None):
-        raise HTTPException(422, "context_type and context_id must be supplied together")
+        raise HTTPException(
+            422, "context_type and context_id must be supplied together"
+        )
     db = SessionLocal()
     try:
         repository = MarketScreenerApiRepository(db)
         if context_type is not None:
             repository.context_instruments(
-                user_id=current_user["user_id"], context_type=context_type,
+                user_id=current_user["user_id"],
+                context_type=context_type,
                 context_id=str(context_id),
             )
         return repository.list_opportunities(

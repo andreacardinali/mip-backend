@@ -15,8 +15,13 @@ from services.market_analysis_scan import run_member_analysis_scan
 
 
 def analyze_screener_context(
-    db: Session, *, user_id: str, context_type: str, context_id: str,
-    market_data_service, config: ScanConfig,
+    db: Session,
+    *,
+    user_id: str,
+    context_type: str,
+    context_id: str,
+    market_data_service,
+    config: ScanConfig,
 ) -> dict[str, Any]:
     repository = MarketScreenerApiRepository(db)
     context = dict(user_id=user_id, context_type=context_type, context_id=context_id)
@@ -29,7 +34,9 @@ def analyze_screener_context(
     runs = MarketScreenerRunRepository(db)
     run_id = runs.start()
     scan = run_member_analysis_scan(
-        db, market_data_service=market_data_service, universe_id=universe_id,
+        db,
+        market_data_service=market_data_service,
+        universe_id=universe_id,
         universe_code=f"CONTEXT_{context_type}_{context_id}",
         members=[ScanMember(universe_id=universe_id, **item) for item in instruments],
         config=config,

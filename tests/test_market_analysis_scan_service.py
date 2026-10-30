@@ -35,9 +35,17 @@ def test_service_rejects_empty_universe(monkeypatch) -> None:
 def test_universe_delegates_to_shared_member_scan(monkeypatch) -> None:
     class MemberRepository(FakeRepository):
         def list_universe_members(self, *, universe_id):
-            return [{"universe_id": universe_id, "instrument_id": "i",
-                     "entity_id": "e", "symbol": "AAPL", "exchange": "NASDAQ",
-                     "currency_code": "USD", "isin": None}]
+            return [
+                {
+                    "universe_id": universe_id,
+                    "instrument_id": "i",
+                    "entity_id": "e",
+                    "symbol": "AAPL",
+                    "exchange": "NASDAQ",
+                    "currency_code": "USD",
+                    "isin": None,
+                }
+            ]
 
     captured = {}
 
