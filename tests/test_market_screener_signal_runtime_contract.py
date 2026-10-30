@@ -857,7 +857,17 @@ def test_gui_context_analysis_and_optional_refresh_contract() -> None:
     assert "context_id: selectedContext?.context_id" in page
     assert "strategy_code: strategy.trim().toUpperCase() || undefined" in page
     assert "useState(false)" in page.split("const [autoRefresh", 1)[1].split(";", 1)[0]
-    assert "autoRefresh && !analysisPending ? 60_000 : false" in page
+    assert 'analysisPending || progressQuery.data?.status === "RUNNING"' in page
+    assert "autoRefresh && !analysisRunning ? 60_000 : false" in page
+    assert "refetchInterval: analysisRunning ? 2_000 : refreshInterval" in page
+    assert (
+        'analysisPending || query.state.data?.status === "RUNNING" ? 2_000 : 10_000'
+        in page
+    )
+    assert (
+        "/screener/contexts/${contextType}/${encodeURIComponent(contextId)}/progress"
+        in service
+    )
     assert (
         'error.config.url === "/screener/analyze" && error.response?.status === 409'
         in api
@@ -882,7 +892,7 @@ def test_gui_context_analysis_and_optional_refresh_contract() -> None:
         assert "mutationKey: screenerAnalysisMutationKey," in view
         assert "mutationFn: analyzeScreenerContext" in view
         assert "analysis.isPending" not in view
-    assert "selectedContext && !analysisPending" in page
+    assert "selectedContext && !analysisRunning" in page
     assert (
         'export const screenerAnalysisMutationKey = ["screener-analysis"] as const'
         in service
@@ -941,7 +951,7 @@ def test_gui_screener_refreshes_only_selected_details() -> None:
     assert "selectedId ? [detailQuery.refetch()] : []" in refresh
     assert "selectedId && selected ? [signalEventsQuery.refetch()] : []" in refresh
     assert "selectedSnapshotId ? [snapshotItemsQuery.refetch()] : []" in refresh
-    assert "disabled={refreshing || analysisPending}" in page
+    assert "disabled={refreshing || analysisRunning}" in page
     assert "onClick={() => void refreshScreener()}" in page
 
 

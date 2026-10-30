@@ -1,6 +1,6 @@
 BEGIN;
 
-CREATE OR REPLACE FUNCTION public.sp_get_user_entities(p_user_id uuid, p_scope character varying DEFAULT 'ALL', p_query text DEFAULT '', p_limit integer DEFAULT 500) RETURNS TABLE(entity_id uuid, name character varying, entity_type character varying, country_code character varying, symbol character varying, exchange character varying, in_portfolio boolean, in_watchlist boolean, has_active_signals boolean)
+CREATE OR REPLACE FUNCTION public.sp_get_user_entities(p_user_id uuid, p_scope character varying DEFAULT 'ALL'::character varying, p_query text DEFAULT ''::text, p_limit integer DEFAULT 500) RETURNS TABLE(entity_id uuid, name character varying, entity_type character varying, country_code character varying, symbol character varying, exchange character varying, in_portfolio boolean, in_watchlist boolean, has_active_signals boolean)
     LANGUAGE sql STABLE
     AS $$
 WITH matched AS (
