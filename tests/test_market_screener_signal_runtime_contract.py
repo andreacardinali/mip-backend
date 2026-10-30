@@ -777,7 +777,7 @@ def test_gui_context_analysis_and_optional_refresh_contract() -> None:
     assert "context_id: selectedContext?.context_id" in page
     assert "strategy_code: strategy.trim().toUpperCase() || undefined" in page
     assert "useState(false)" in page.split("const [autoRefresh", 1)[1].split(";", 1)[0]
-    assert "autoRefresh && !analysis.isPending ? 60_000 : false" in page
+    assert "autoRefresh && !analysisPending ? 60_000 : false" in page
     assert (
         'error.config.url === "/screener/analyze" && error.response?.status === 409'
         in api
@@ -789,7 +789,22 @@ def test_gui_context_analysis_and_optional_refresh_contract() -> None:
         encoding="utf-8"
     )
     assert "context=ENTITY:${overview.entity.entity_id}" in entities
-    assert "context=INSTRUMENT:${row.instrument_id}" in entities
+    assert 'context_type: "ENTITY", context_id: overview.entity.entity_id' in entities
+    assert 'context_type: "INSTRUMENT", context_id: row.instrument_id' in entities
+    assert "if (!analysisPending) analysis.mutate" in entities
+    assert "disabled={analysisPending || !instrumentRows.length}" in entities
+    assert 'label="Analisi AI"' in entities
+    assert "llm_enabled: llmEnabled" in entities
+    for view in (page, entities):
+        assert "useIsMutating({ mutationKey: screenerAnalysisMutationKey }) > 0" in view
+        assert "mutationKey: screenerAnalysisMutationKey," in view
+        assert "mutationFn: analyzeScreenerContext" in view
+        assert "analysis.isPending" not in view
+    assert "selectedContext && !analysisPending" in page
+    assert 'export const screenerAnalysisMutationKey = ["screener-analysis"] as const' in service
+    assert "if (analysisInProgress) throw new Error" in service
+    assert "analysisInProgress = true;" in service
+    assert "finally {\n\t\tanalysisInProgress = false;" in service
     assert "/screener?query=" not in entities
     assert "Analizza entita" in entities
     assert 'directContextType === "ENTITY" || directContextType === "INSTRUMENT"' in page
@@ -833,7 +848,7 @@ def test_gui_screener_refreshes_only_selected_details() -> None:
     assert "selectedId ? [detailQuery.refetch()] : []" in refresh
     assert "selectedId && selected ? [signalEventsQuery.refetch()] : []" in refresh
     assert "selectedSnapshotId ? [snapshotItemsQuery.refetch()] : []" in refresh
-    assert "disabled={refreshing || analysis.isPending}" in page
+    assert "disabled={refreshing || analysisPending}" in page
     assert "onClick={() => void refreshScreener()}" in page
 
 

@@ -593,13 +593,21 @@ universe. Missing entities or instruments return 404. Results use identity-based
 membership filtering, not name searches. Reapply the updated
 `oneshot/install_screener_contexts.sql` manually to enable these scopes.
 
-The entity overview offers `Analizza entita` and an `Analizza` action on each
-instrument row. These open `/screener?context=ENTITY:<uuid>` or
-`/screener?context=INSTRUMENT:<uuid>` with the scope already selected; the user
-starts the scan and can optionally enable AI. The optional `context_name` URL
-parameter is a display label only. The general Screener retains the group
-selector, labelled `Ambito di analisi`. Notification scopes are unchanged;
-direct entity/instrument views do not expose group notification settings.
+The entity overview offers `Analizza entita` in its header and an `Analizza`
+action on each instrument row. Both start the scan directly, with optional AI,
+without leaving the overview. Analysis controls share their busy state across
+the overview and Screener, including route changes; the frontend service also
+rejects overlapping requests and releases its guard on success or failure.
+Successful scans refresh the affected entity and Screener data. This frontend
+guard applies to the current app session; the backend advisory lock still
+protects manual requests from other tabs or clients.
+
+`Segnali e analisi` opens `/screener?context=ENTITY:<uuid>`; direct
+`/screener?context=INSTRUMENT:<uuid>` URLs are also supported. The optional
+`context_name` URL parameter is a display label only. The general Screener
+retains the group selector, labelled `Ambito di analisi`. Notification scopes
+are unchanged; direct entity/instrument views do not expose group notification
+settings.
 
 `POST /api/screener/analyze` accepts a context type and UUID. It synchronously
 analyzes 1-1000 context instruments using the configured market-data provider
