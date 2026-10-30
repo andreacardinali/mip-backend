@@ -70,32 +70,34 @@ override server configuration, including disabled AI.
 its parameterized request also supports full refresh. The old full-refresh entry
 and standalone screener phase jobs are superseded. Their implementation modules
 remain internal dependencies, but their manifests are removed and the scheduler
-ignores their recurring registrations. Generic admin execution, re-enabling and
-schedule editing return 422. The admin list exposes `replaced_by`; superseded
-jobs are hidden by default and can be shown to inspect retained run/log history.
+deletes their database registrations at startup. Generic admin execution,
+re-enabling and schedule editing of those aliases return 422. The admin list
+shows the current database catalog without a separate superseded-job category.
 Advisory locks, coalescing and execution coordination remain unchanged.
 
-Existing database rows need a one-time consolidation. Preview locally without
-connecting to the database:
+At startup, the scheduler validates all discovered `*.job.json` definitions before
+opening a database session. It then registers or updates those definitions and
+deletes every existing catalog entry whose `job_key` is no longer defined. These
+catalog updates commit in one transaction; a failure rolls them all back. An empty
+or invalid catalog fails startup without changing existing jobs. Missing or
+inaccessible directories, traversal errors, unreadable files and symbolic links
+also abort bootstrap before any database access. Partial discovery is never used
+to reconcile the catalog.
 
-```powershell
-.\.venv\Scripts\python.exe -m oneshot.consolidate_scheduler_jobs
-```
+Manually install `oneshot/install_scheduler_catalog_pruning.sql` before restarting
+the updated scheduler. The stored routine removes undefined jobs, their manual
+requests, execution history and logs. Screener domain runs are preserved by
+clearing their references to deleted scheduler runs. Pruning refuses jobs holding
+an execution lock, unfinished runs or claimed incomplete requests; bootstrap
+rolls back rather than interrupting execution. Resolve stale unfinished runs
+before retrying bootstrap because stale-run recovery runs afterward. No schema
+installation runs automatically at startup.
 
-Before applying, back up the database, stop the scheduler and backend, and resolve
-any legacy execution requests already pending or processing. Use the UUID of an
-existing audit user, then explicitly apply:
-
-```powershell
-.\.venv\Scripts\python.exe -m oneshot.consolidate_scheduler_jobs --apply --actor <user-uuid>
-```
-
-The one-shot requires both replacement workers to exist and be enabled. It
-rejects active legacy runs and pending/processing legacy requests, disables
-superseded entries through the existing audited routine and clears next-run
-timestamps through the scheduler routine in one transaction. It is idempotent
-and does not delete jobs, requests, runs or logs. Restart only the updated backend
-and scheduler after successful consolidation. Nothing runs on startup.
+Restart the updated scheduler to reconcile manifest changes. Disabled jobs that
+still have a manifest remain in the catalog. The existing enabled preference of a
+defined job is preserved; its schedule is synchronized from its manifest at
+startup. The 30-second polling loop continues to read database settings without
+reloading manifests, preserving runtime schedule edits from the admin interface.
 
 ## Automatic Screener AI
 

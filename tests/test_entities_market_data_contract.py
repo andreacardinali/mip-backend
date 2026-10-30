@@ -69,68 +69,129 @@ def test_superseded_jobs_have_no_recurring_definitions():
     assert set(SUPERSEDED_JOBS.values()) <= definitions
 
 
-@pytest.mark.parametrize("enabled, next_run", [(True, None), (False, "stale"), (False, None)])
-def test_scheduler_consolidation_preserves_history_and_is_idempotent(enabled, next_run):
-    from oneshot.consolidate_scheduler_jobs import consolidate_jobs
+@pytest.fixture
+def scheduler_catalog(monkeypatch):
+    import scheduler_bootstrap
 
-    actor = UUID("00000000-0000-0000-0000-000000000001")
-    job_id = UUID("00000000-0000-0000-0000-000000000002")
+    definition = {
+        "job_key": "market_screener_pipeline",
+        "job_name": "Screener pipeline",
+        "python_module": "jobs.market_screener_pipeline.worker",
+        "trigger": {"type": "cron", "cron_expression": "0 5 * * *"},
+        "enabled_by_default": True,
+    }
     db = MagicMock()
-    db.execute.return_value.scalar_one.return_value = False
-    db.execute.return_value.mappings.return_value.all.return_value = [
-        {"job_key": "market_screener_pipeline", "enabled": True},
-        {"job_key": "refresh_entities_missing", "enabled": True},
-        {"job_key": "market_screener_ranking", "job_id": job_id,
-         "enabled": enabled, "next_run_at": next_run, "last_status": "SUCCESS"},
-    ]
-    assert consolidate_jobs(db, actor) == (
-        ["market_screener_ranking"] if enabled or next_run else []
-    )
-    statements = db.execute.call_args_list[2:]
-    assert len(statements) == int(enabled) + int(enabled or next_run is not None)
-    if enabled:
-        assert "sp_set_scheduler_job_enabled" in str(statements[0].args[0])
-        assert statements[0].args[1] == {
-            "actor_user_id": str(actor), "job_key": "market_screener_ranking", "enabled": False,
-        }
-    if enabled or next_run:
-        assert "sp_scheduler_update_next_run" in str(statements[-1].args[0])
-        assert statements[-1].args[1] == {"job_id": str(job_id), "next_run_at": None}
+    repository = MagicMock()
+    repository.register_job.return_value = {"job_id": "defined", "action": "UNCHANGED"}
+    monkeypatch.setattr(scheduler_bootstrap, "SessionLocal", lambda: db)
+    monkeypatch.setattr(scheduler_bootstrap, "SchedulerRepository", lambda session: repository)
+    monkeypatch.setattr(scheduler_bootstrap, "discover_job_definitions", lambda root: [Path("pipeline.job.json")])
+    monkeypatch.setattr(scheduler_bootstrap, "load_job_definition", lambda path, **kwargs: definition)
+    return scheduler_bootstrap, db, repository
+
+
+@pytest.mark.parametrize("removed_jobs", [[], [{"job_key": "removed_job", "job_id": UUID(int=2)}]])
+def test_scheduler_catalog_prunes_only_after_registration(scheduler_catalog, removed_jobs):
+    bootstrap, db, repository = scheduler_catalog
+    repository.prune_undefined_jobs.return_value = removed_jobs
+    bootstrap.bootstrap_scheduler_jobs(jobs_root=Path("jobs"), timezone="UTC")
+    repository.prune_undefined_jobs.assert_called_once_with(job_keys=["market_screener_pipeline"])
+    repository.register_job.assert_called_once()
+    assert [call[0] for call in repository.mock_calls] == ["register_job", "prune_undefined_jobs"]
+    db.commit.assert_called_once()
+    db.rollback.assert_not_called()
+    db.close.assert_called_once()
+
+
+@pytest.mark.parametrize("failure", ["register_job", "prune_undefined_jobs"])
+def test_scheduler_catalog_rolls_back_on_failure(scheduler_catalog, failure):
+    bootstrap, db, repository = scheduler_catalog
+    getattr(repository, failure).side_effect = RuntimeError("catalog failure")
+    with pytest.raises(RuntimeError, match="catalog failure"):
+        bootstrap.bootstrap_scheduler_jobs(jobs_root=Path("jobs"), timezone="UTC")
+    db.commit.assert_not_called()
+    db.rollback.assert_called_once()
+    db.close.assert_called_once()
+    if failure == "register_job":
+        repository.prune_undefined_jobs.assert_not_called()
+
+
+@pytest.mark.parametrize("problem", ["empty", "invalid", "duplicate"])
+def test_scheduler_catalog_validates_before_database_access(scheduler_catalog, monkeypatch, problem):
+    bootstrap, db, repository = scheduler_catalog
+    session_factory = MagicMock()
+    monkeypatch.setattr(bootstrap, "SessionLocal", session_factory)
+    if problem == "empty":
+        monkeypatch.setattr(bootstrap, "discover_job_definitions", lambda root: [])
+    elif problem == "invalid":
+        loader = MagicMock(side_effect=bootstrap.JobDefinitionError("invalid definition"))
+        monkeypatch.setattr(bootstrap, "load_job_definition", loader)
+    else:
+        monkeypatch.setattr(bootstrap, "discover_job_definitions", lambda root: [Path("first.job.json"), Path("second.job.json")])
+    with pytest.raises(bootstrap.JobDefinitionError):
+        bootstrap.bootstrap_scheduler_jobs(jobs_root=Path("jobs"), timezone="UTC")
+    session_factory.assert_not_called()
+    repository.register_job.assert_not_called()
+    repository.prune_undefined_jobs.assert_not_called()
+
+
+def test_scheduler_catalog_repository_uses_atomic_pruning_routine():
+    from scheduler_repository import SchedulerRepository
+
+    db = MagicMock()
+    catalog = [{"job_key": "removed_job", "enabled": True}]
+    db.execute.return_value.mappings.return_value.all.return_value = catalog
+    repository = SchedulerRepository(db)
+    assert repository.prune_undefined_jobs(job_keys=["defined_job"]) == catalog
+
+    calls = db.execute.call_args_list
+    assert len(calls) == 1
+    assert str(calls[0].args[0]) == "SELECT * FROM public.sp_scheduler_prune_undefined_jobs(CAST(:job_keys AS text[]))"
+    assert calls[0].args[1] == {"job_keys": ["defined_job"]}
     db.commit.assert_not_called()
     db.rollback.assert_not_called()
 
 
-@pytest.mark.parametrize("problem", ["missing", "disabled", "running", "pending"])
-def test_scheduler_consolidation_preflight_rejects_unsafe_changes(problem):
-    from oneshot.consolidate_scheduler_jobs import consolidate_jobs
+@pytest.mark.parametrize("problem", ["missing", "root_permission", "nested_permission", "unreadable"])
+def test_scheduler_catalog_access_failure_does_not_open_database(tmp_path, monkeypatch, problem):
+    import scheduler_bootstrap
 
-    db = MagicMock()
-    db.execute.return_value.scalar_one.return_value = problem == "pending"
-    jobs = [
-        {"job_key": "refresh_entities_missing", "enabled": True},
-        {"job_key": "market_screener_ranking", "enabled": True,
-         "job_id": UUID("00000000-0000-0000-0000-000000000002"),
-         "last_status": "RUNNING" if problem == "running" else "SUCCESS"},
-    ]
+    session_factory = MagicMock()
+    monkeypatch.setattr(scheduler_bootstrap, "SessionLocal", session_factory)
+    root = tmp_path / "jobs"
     if problem != "missing":
-        jobs.append({"job_key": "market_screener_pipeline", "enabled": problem != "disabled"})
-    db.execute.return_value.mappings.return_value.all.return_value = jobs
-    with pytest.raises(ValueError):
-        consolidate_jobs(db, UUID("00000000-0000-0000-0000-000000000001"))
-    assert db.execute.call_count == (2 if problem == "pending" else 1)
+        root.mkdir()
+        (root / "first.job.json").write_text("{}", encoding="utf-8")
+    if problem in {"root_permission", "nested_permission"}:
+        denied = root if problem == "root_permission" else root / "nested"
+        if problem == "nested_permission":
+            denied.mkdir()
+        original_scandir = scheduler_bootstrap.os.scandir
+
+        def scandir(directory):
+            if Path(directory) == denied:
+                raise PermissionError("denied")
+            return original_scandir(directory)
+
+        monkeypatch.setattr(scheduler_bootstrap.os, "scandir", scandir)
+    elif problem == "unreadable":
+        monkeypatch.setattr(Path, "read_text", MagicMock(side_effect=PermissionError("denied")))
+    with pytest.raises(scheduler_bootstrap.JobDefinitionError):
+        scheduler_bootstrap.bootstrap_scheduler_jobs(jobs_root=root, timezone="UTC")
+    session_factory.assert_not_called()
 
 
-def test_scheduler_consolidation_preview_does_not_connect(monkeypatch, capsys):
-    import sys
+def test_scheduler_definition_scan_includes_nested_files(tmp_path):
+    from scheduler_bootstrap import discover_job_definitions
 
-    from oneshot import consolidate_scheduler_jobs
-
-    db_module = MagicMock()
-    monkeypatch.setitem(sys.modules, "db", db_module)
-    monkeypatch.setattr(sys, "argv", ["consolidate_scheduler_jobs"])
-    consolidate_scheduler_jobs.main()
-    db_module.SessionLocal.assert_not_called()
-    assert "Preview only: no database connection or changes." in capsys.readouterr().out
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    first = tmp_path / "first.job.json"
+    second = nested / "second.job.json"
+    first.write_text("{}", encoding="utf-8")
+    second.write_text("{}", encoding="utf-8")
+    (nested / "ignored.json").write_text("{}", encoding="utf-8")
+    assert discover_job_definitions(tmp_path) == sorted([first, second])
 
 
 @pytest.mark.parametrize("fail_after_first", [False, True])

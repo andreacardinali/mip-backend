@@ -49,7 +49,6 @@ def list_jobs(_: CurrentUser = Depends(require_admin)):
             {
                 **dict(row),
                 "request_only": row["job_key"] in REQUEST_ONLY_JOBS,
-                "replaced_by": SUPERSEDED_JOBS.get(row["job_key"]),
             }
             for row in rows
         ]

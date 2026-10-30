@@ -206,6 +206,16 @@ class SchedulerRepository:
             },
         )
 
+    def prune_undefined_jobs(self, *, job_keys: list[str]) -> list[dict[str, Any]]:
+        rows = self.db.execute(
+            text(
+                "SELECT * FROM public.sp_scheduler_prune_undefined_jobs("
+                "CAST(:job_keys AS text[]))"
+            ),
+            {"job_keys": job_keys},
+        )
+        return [dict(row) for row in rows.mappings().all()]
+
     def register_job(
         self,
         *,

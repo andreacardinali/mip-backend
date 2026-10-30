@@ -1,6 +1,8 @@
 import importlib
 import json
 import logging
+import os
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +29,28 @@ class JobDefinitionError(
 def discover_job_definitions(
     root: Path,
 ) -> list[Path]:
-    return sorted(path for path in root.rglob(JOB_DEFINITION_PATTERN) if path.is_file())
+    definitions = []
+    directories = [root]
+    try:
+        while directories:
+            directory = directories.pop()
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    mode = entry.stat(follow_symlinks=False).st_mode
+                    path = Path(entry.path)
+                    if stat.S_ISLNK(mode):
+                        raise JobDefinitionError(
+                            f"Symbolic links are not allowed in job definitions: {path}"
+                        )
+                    if stat.S_ISDIR(mode):
+                        directories.append(path)
+                    elif path.match(JOB_DEFINITION_PATTERN):
+                        if not stat.S_ISREG(mode):
+                            raise JobDefinitionError(f"Not a regular job definition: {path}")
+                        definitions.append(path)
+    except OSError as exc:
+        raise JobDefinitionError(f"Unable to scan job definitions under {root}") from exc
+    return sorted(definitions)
 
 
 def load_job_definition(
@@ -216,6 +239,13 @@ def bootstrap_scheduler_jobs(
                 definition["job_key"],
                 result["job_id"],
                 result["action"],
+            )
+
+        for job in repository.prune_undefined_jobs(job_keys=sorted(job_keys)):
+            logger.info(
+                "Deleted scheduler job without definition job_key=%s job_id=%s",
+                job["job_key"],
+                job["job_id"],
             )
 
         db.commit()

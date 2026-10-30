@@ -361,11 +361,6 @@ def test_scheduler_job_list_exposes_contextual_execution(
         {
             **row,
             "request_only": request_only,
-            "replaced_by": (
-                "market_screener_pipeline"
-                if job_key == "market_screener_ranking"
-                else None
-            ),
         },
     ]
     assert "request_only" not in row
