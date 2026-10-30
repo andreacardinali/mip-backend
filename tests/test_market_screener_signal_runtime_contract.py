@@ -69,9 +69,13 @@ def test_gui_exports_authorized_results_with_native_grid_csv() -> None:
     page = Path("../mip-frontend/src/pages/ScreenerPage.tsx").read_text(
         encoding="utf-8"
     )
-    grid = re.search(r"<DataGrid\b(.*?)\n\s*/>", page, re.DOTALL)
-    assert grid is not None
-    options = grid.group(1)
+    grids = [
+        options
+        for options in re.findall(r"<DataGrid\b(.*?)/>", page, re.DOTALL)
+        if re.search(r"\brows\s*=\s*\{rows\}", options)
+    ]
+    assert len(grids) == 1, "Expected one grid for authorized screener results"
+    options = grids[0]
     assert re.search(r"\brows\s*=\s*\{rows\}", options)
     assert re.search(r"\bshowToolbar\b", options)
     assert re.search(r'fileName\s*:\s*"mip-screener"', options)
