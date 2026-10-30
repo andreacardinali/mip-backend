@@ -91,15 +91,21 @@ class Tests(unittest.TestCase):
         db.commit.side_effect = lambda: events.append("commit")
         db.rollback.side_effect = lambda: events.append("rollback")
         persist_article.side_effect = [
-            {"inserted": True}, RuntimeError("write failed"), {"inserted": True}
+            {"inserted": True},
+            RuntimeError("write failed"),
+            {"inserted": True},
         ]
 
         def fetch(reference, **kwargs):
             self.assertIn(events[-1], {"commit", "rollback"})
             events.append(reference.symbol)
-            return [NewsArticle(
-                headline="news", published_at=datetime.now(UTC), external_id=reference.symbol
-            )]
+            return [
+                NewsArticle(
+                    headline="news",
+                    published_at=datetime.now(UTC),
+                    external_id=reference.symbol,
+                )
+            ]
 
         md = Mock()
         md.get_news.side_effect = fetch
@@ -107,7 +113,10 @@ class Tests(unittest.TestCase):
 
         self.assertEqual(result["inserted"], 2)
         self.assertEqual(result["persistence_failed"], 1)
-        self.assertEqual(events, ["commit", "FIRST", "commit", "SECOND", "rollback", "THIRD", "commit"])
+        self.assertEqual(
+            events,
+            ["commit", "FIRST", "commit", "SECOND", "rollback", "THIRD", "commit"],
+        )
 
 
 if __name__ == "__main__":

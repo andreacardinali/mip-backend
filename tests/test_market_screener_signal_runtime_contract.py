@@ -24,12 +24,17 @@ def test_screener_analysis_timestamp_matches_schema_and_replaces_visible_rank() 
     )[0]
     assert "max(r.finished_at)" in timestamp_body
     assert "r.status = 'COMPLETED'" in timestamp_body
-    assert "(r.summary -> 'evaluated_instrument_ids') ? instrument.instrument_id::text" in timestamp_body
-    page = Path("../mip-frontend/src/pages/ScreenerPage.tsx").read_text(encoding="utf-8")
+    assert (
+        "(r.summary -> 'evaluated_instrument_ids') ? instrument.instrument_id::text"
+        in timestamp_body
+    )
+    page = Path("../mip-frontend/src/pages/ScreenerPage.tsx").read_text(
+        encoding="utf-8"
+    )
     columns = page.split("const columns:", 1)[1].split("\n  ];", 1)[0]
     assert 'field: "last_analysis_at", headerName: "Ultima analisi"' in columns
     assert 'type: "dateTime"' in columns
-    assert 'ranking_position: false' in page
+    assert "ranking_position: false" in page
     assert 'headerName: "#"' not in columns
     assert 'value ? value.toLocaleString("it-IT") : "N/D"' in columns
 
@@ -378,9 +383,10 @@ def test_incremental_analysis_installer_matches_schema() -> None:
     assert installer.startswith("BEGIN;")
     assert installer.rstrip().endswith("COMMIT;")
     for name, signature, returns, _delimiter, body in definitions:
-        assert re.sub(r"\s+", " ", returns + body).strip() == schema_definitions[
-            name, signature
-        ]
+        assert (
+            re.sub(r"\s+", " ", returns + body).strip()
+            == schema_definitions[name, signature]
+        )
     assert "pg_try_advisory_lock(" in installer
     assert "pg_advisory_unlock(" in installer
     assert "pg_try_advisory_xact_lock(" not in installer
@@ -425,7 +431,9 @@ def test_context_installer_matches_schema_and_filters_before_limit() -> None:
     assert "pos.quantity <> 0" in installer
     assert "mum.valid_to IS NULL" in installer
     assert "p_context_type = 'ENTITY' AND i.entity_id = p_context_id" in installer
-    assert "p_context_type = 'INSTRUMENT' AND i.instrument_id = p_context_id" in installer
+    assert (
+        "p_context_type = 'INSTRUMENT' AND i.instrument_id = p_context_id" in installer
+    )
     assert "p_user_id IS NULL OR NOT EXISTS" in installer
     assert (
         "CREATE UNIQUE INDEX uq_market_universes_code ON public.market_universes "
@@ -875,20 +883,31 @@ def test_gui_context_analysis_and_optional_refresh_contract() -> None:
         assert "mutationFn: analyzeScreenerContext" in view
         assert "analysis.isPending" not in view
     assert "selectedContext && !analysisPending" in page
-    assert 'export const screenerAnalysisMutationKey = ["screener-analysis"] as const' in service
+    assert (
+        'export const screenerAnalysisMutationKey = ["screener-analysis"] as const'
+        in service
+    )
     assert "if (analysisInProgress) throw new Error" in service
     assert "analysisInProgress = true;" in service
     assert "finally {\n\t\tanalysisInProgress = false;" in service
     assert "/screener?query=" not in entities
     assert "Analizza entita" in entities
-    assert 'directContextType === "ENTITY" || directContextType === "INSTRUMENT"' in page
+    assert (
+        'directContextType === "ENTITY" || directContextType === "INSTRUMENT"' in page
+    )
     assert "getScreenerContextInstruments(directScope!, directContextId)" in page
     assert "instrument_count: directContextQuery.data.length" in page
     assert "const selectedContext = directScope ? directContext" in page
     assert 'label="Ambito di analisi"' in page
-    assert 'selectedContext.context_type === "WATCHLIST" || selectedContext.context_type === "PORTFOLIO"' in page
+    assert (
+        'selectedContext.context_type === "WATCHLIST" || selectedContext.context_type === "PORTFOLIO"'
+        in page
+    )
     assert "directContextQuery.refetch()" in page
-    assert "/screener/contexts/${contextType}/${encodeURIComponent(contextId)}/instruments" in service
+    assert (
+        "/screener/contexts/${contextType}/${encodeURIComponent(contextId)}/instruments"
+        in service
+    )
 
 
 def test_gui_handles_missing_signal_arrays() -> None:

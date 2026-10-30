@@ -101,7 +101,9 @@ def analyze_screener(
                 context_id=str(request.context_id),
                 market_data_service=market_data,
                 config=ScanConfig.from_settings(settings),
-                llm_enabled=str(settings.get("MARKET_SCREENER_PIPELINE_LLM_ENABLED", True))
+                llm_enabled=str(
+                    settings.get("MARKET_SCREENER_PIPELINE_LLM_ENABLED", True)
+                )
                 .strip()
                 .lower()
                 in {"1", "true", "yes", "on"},

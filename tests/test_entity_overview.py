@@ -134,7 +134,9 @@ def test_opportunities_forward_user_membership_filters(
 
 
 @pytest.mark.parametrize("scope", ["ALL", "PORTFOLIO", "WATCHLIST", "SIGNALS"])
-def test_entity_list_filters_before_limit_for_authenticated_user(monkeypatch, routes, scope):
+def test_entity_list_filters_before_limit_for_authenticated_user(
+    monkeypatch, routes, scope
+):
     entities, _ = routes
     captured = {}
 
@@ -148,15 +150,22 @@ def test_entity_list_filters_before_limit_for_authenticated_user(monkeypatch, ro
             captured["closed"] = True
 
     monkeypatch.setattr(entities, "SessionLocal", Session)
-    assert asyncio.run(entities.get_entities(
-        current_user={"user_id": USER_ID}, scope=scope, query="  ABC  "
-    )) == [{"entity_id": str(ENTITY_ID)}]
+    assert asyncio.run(
+        entities.get_entities(
+            current_user={"user_id": USER_ID}, scope=scope, query="  ABC  "
+        )
+    ) == [{"entity_id": str(ENTITY_ID)}]
     assert captured == {
-        "user_id": USER_ID, "scope": scope, "query": "ABC", "closed": True,
+        "user_id": USER_ID,
+        "scope": scope,
+        "query": "ABC",
+        "closed": True,
     }
 
 
-@pytest.mark.parametrize("scope", ["ALL", "PORTFOLIO", "WATCHLIST", "SIGNALS", "UNKNOWN"])
+@pytest.mark.parametrize(
+    "scope", ["ALL", "PORTFOLIO", "WATCHLIST", "SIGNALS", "UNKNOWN"]
+)
 def test_entity_list_http_scope_validation(monkeypatch, routes, scope):
     entities, _ = routes
     session = Mock()
@@ -215,11 +224,16 @@ def test_overview_installation_matches_authoritative_schema():
     assert "public.market_analysis_scan_runs r" in analysis_body
     assert "r.status = 'COMPLETED'" in analysis_body
     assert "i.entity_id = e.entity_id" in analysis_body
-    assert "(r.summary -> 'evaluated_instrument_ids') ? i.instrument_id::text" in analysis_body
+    assert (
+        "(r.summary -> 'evaluated_instrument_ids') ? i.instrument_id::text"
+        in analysis_body
+    )
     assert "opportunities" not in analysis_body
     frontend = root.parent / "mip-frontend" / "src"
     page = (frontend / "pages" / "EntitiesPage.tsx").read_text(encoding="utf-8")
     types = (frontend / "types" / "entity.ts").read_text(encoding="utf-8")
     assert "last_analysis_at: string | null" in types
     assert "Ultima analisi: {timestamp(overview.last_analysis_at ?? null)}" in page
-    assert page.index("Ultima analisi:") < page.index("overview.opportunities.length === 0")
+    assert page.index("Ultima analisi:") < page.index(
+        "overview.opportunities.length === 0"
+    )

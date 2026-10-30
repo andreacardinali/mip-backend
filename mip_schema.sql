@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict cfwX50hcDjylBAgGcT67BBYcMDEJW83c2TOXoKobCntFj04hR7SOB0NfvBF8PL1
+\restrict sxnwtcB4eyQc78SmGDWehuJ2MeatIkR3fJlYQgzac9Z9hI45Wi5WzmBHDPJRoP5
 
 -- Dumped from database version 18.6 (Debian 18.6-1.pgdg13+2)
 -- Dumped by pg_dump version 18.6 (Debian 18.6-1.pgdg13+2)
@@ -2937,47 +2937,6 @@ $$;
 
 
 --
--- Name: sp_get_user_entities(uuid, character varying, text, integer); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION public.sp_get_user_entities(p_user_id uuid, p_scope character varying DEFAULT 'ALL', p_query text DEFAULT '', p_limit integer DEFAULT 500) RETURNS TABLE(entity_id uuid, name character varying, entity_type character varying, country_code character varying, symbol character varying, exchange character varying, in_portfolio boolean, in_watchlist boolean, has_active_signals boolean)
-    LANGUAGE sql STABLE
-    AS $$
-WITH matched AS (
-    SELECT e.entity_id, e.name, e.entity_type::varchar, e.country_code,
-        (membership.payload ->> 'in_portfolio')::boolean AS in_portfolio,
-        (membership.payload ->> 'in_watchlist')::boolean AS in_watchlist,
-        EXISTS (SELECT 1 FROM public.market_screener_opportunities o
-            WHERE o.entity_id = e.entity_id AND o.active) AS has_active_signals
-    FROM public.entities e
-    CROSS JOIN LATERAL (SELECT public.sp_get_user_entity_asset_match(
-        p_user_id, e.entity_id) AS payload) membership
-    WHERE e.active AND p_user_id IS NOT NULL
-)
-SELECT m.entity_id, m.name, m.entity_type, m.country_code,
-    NULL::varchar AS symbol, NULL::varchar AS exchange,
-    m.in_portfolio, m.in_watchlist, m.has_active_signals
-FROM matched m
-WHERE (p_scope = 'ALL'
-    OR (p_scope = 'PORTFOLIO' AND m.in_portfolio)
-    OR (p_scope = 'WATCHLIST' AND m.in_watchlist)
-    OR (p_scope = 'SIGNALS' AND m.has_active_signals))
-  AND (coalesce(btrim(p_query), '') = '' OR EXISTS (
-        SELECT 1 FROM unnest(ARRAY[m.name::text, m.entity_type::text]) value
-    WHERE strpos(lower(value), lower(btrim(p_query))) > 0
-    ) OR EXISTS (
-        SELECT 1 FROM public.instruments i
-        WHERE i.entity_id = m.entity_id AND EXISTS (
-                SELECT 1 FROM unnest(ARRAY[i.symbol::text, i.exchange::text]) value
-                WHERE strpos(lower(value), lower(btrim(p_query))) > 0
-        )
-  ))
-ORDER BY m.name, m.entity_id
-LIMIT least(greatest(p_limit, 1), 500);
-$$;
-
-
---
 -- Name: sp_get_entities_for_refresh(character varying, character varying); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -4196,6 +4155,47 @@ CREATE FUNCTION public.sp_get_user_context(p_user_id uuid) RETURNS TABLE(user_id
 
 
 --
+-- Name: sp_get_user_entities(uuid, character varying, text, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_get_user_entities(p_user_id uuid, p_scope character varying DEFAULT 'ALL'::character varying, p_query text DEFAULT ''::text, p_limit integer DEFAULT 500) RETURNS TABLE(entity_id uuid, name character varying, entity_type character varying, country_code character varying, symbol character varying, exchange character varying, in_portfolio boolean, in_watchlist boolean, has_active_signals boolean)
+    LANGUAGE sql STABLE
+    AS $$
+WITH matched AS (
+    SELECT e.entity_id, e.name, e.entity_type::varchar, e.country_code,
+        (membership.payload ->> 'in_portfolio')::boolean AS in_portfolio,
+        (membership.payload ->> 'in_watchlist')::boolean AS in_watchlist,
+        EXISTS (SELECT 1 FROM public.market_screener_opportunities o
+            WHERE o.entity_id = e.entity_id AND o.active) AS has_active_signals
+    FROM public.entities e
+    CROSS JOIN LATERAL (SELECT public.sp_get_user_entity_asset_match(
+        p_user_id, e.entity_id) AS payload) membership
+    WHERE e.active AND p_user_id IS NOT NULL
+)
+SELECT m.entity_id, m.name, m.entity_type, m.country_code,
+    NULL::varchar AS symbol, NULL::varchar AS exchange,
+    m.in_portfolio, m.in_watchlist, m.has_active_signals
+FROM matched m
+WHERE (p_scope = 'ALL'
+    OR (p_scope = 'PORTFOLIO' AND m.in_portfolio)
+    OR (p_scope = 'WATCHLIST' AND m.in_watchlist)
+    OR (p_scope = 'SIGNALS' AND m.has_active_signals))
+  AND (coalesce(btrim(p_query), '') = '' OR EXISTS (
+        SELECT 1 FROM unnest(ARRAY[m.name::text, m.entity_type::text]) value
+    WHERE strpos(lower(value), lower(btrim(p_query))) > 0
+    ) OR EXISTS (
+        SELECT 1 FROM public.instruments i
+        WHERE i.entity_id = m.entity_id AND EXISTS (
+                SELECT 1 FROM unnest(ARRAY[i.symbol::text, i.exchange::text]) value
+                WHERE strpos(lower(value), lower(btrim(p_query))) > 0
+        )
+  ))
+ORDER BY m.name, m.entity_id
+LIMIT least(greatest(p_limit, 1), 500);
+$$;
+
+
+--
 -- Name: sp_get_user_entity_asset_match(uuid, uuid, uuid); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -5103,7 +5103,6 @@ BEGIN
     SET llm_score = p_llm_score,
         composite_score = COALESCE(p_composite_score, composite_score),
         llm_analysis = p_llm_analysis,
-        last_llm_analysis_at = clock_timestamp(),
         enrichment_fingerprint = BTRIM(p_enrichment_fingerprint)
     WHERE signal_id = p_signal_id
       AND status IN ('CANDIDATE', 'CONFIRMED');
@@ -5238,6 +5237,29 @@ $$;
 
 
 --
+-- Name: sp_market_analysis_list_pending_context_llm_enrichment(character varying, uuid, character varying, uuid, integer, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_market_analysis_list_pending_context_llm_enrichment(p_enrichment_fingerprint character varying, p_user_id uuid, p_context_type character varying, p_context_id uuid, p_limit integer, p_min_interval_minutes integer) RETURNS SETOF jsonb
+    LANGUAGE plpgsql STABLE
+    AS $$
+DECLARE
+    v_instrument_ids uuid[];
+BEGIN
+    SELECT array_agg(instrument_id) INTO v_instrument_ids
+    FROM public.sp_market_screener_context_instruments(
+        p_user_id, p_context_type, p_context_id
+    );
+    RETURN QUERY SELECT to_jsonb(pending)
+    FROM public.sp_market_analysis_list_pending_llm_enrichment(
+        p_enrichment_fingerprint, p_limit, COALESCE(v_instrument_ids, '{}'::uuid[]),
+        p_min_interval_minutes
+    ) pending;
+END;
+$$;
+
+
+--
 -- Name: sp_market_analysis_list_pending_llm_enrichment(character varying, integer); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -5262,23 +5284,10 @@ CREATE FUNCTION public.sp_market_analysis_list_pending_llm_enrichment(p_enrichme
     );
 $$;
 
-CREATE FUNCTION public.sp_market_analysis_list_pending_context_llm_enrichment(p_enrichment_fingerprint character varying, p_user_id uuid, p_context_type character varying, p_context_id uuid, p_limit integer, p_min_interval_minutes integer) RETURNS SETOF jsonb
-    LANGUAGE plpgsql STABLE
-    AS $$
-DECLARE
-    v_instrument_ids uuid[];
-BEGIN
-    SELECT array_agg(instrument_id) INTO v_instrument_ids
-    FROM public.sp_market_screener_context_instruments(
-        p_user_id, p_context_type, p_context_id
-    );
-    RETURN QUERY SELECT to_jsonb(pending)
-    FROM public.sp_market_analysis_list_pending_llm_enrichment(
-        p_enrichment_fingerprint, p_limit, COALESCE(v_instrument_ids, '{}'::uuid[]),
-        p_min_interval_minutes
-    ) pending;
-END;
-$$;
+
+--
+-- Name: sp_market_analysis_list_pending_llm_enrichment(character varying, integer, uuid[], integer); Type: FUNCTION; Schema: public; Owner: -
+--
 
 CREATE FUNCTION public.sp_market_analysis_list_pending_llm_enrichment(p_enrichment_fingerprint character varying, p_limit integer, p_instrument_ids uuid[], p_min_interval_minutes integer) RETURNS TABLE(signal_id uuid, instrument_id uuid, entity_id uuid, symbol character varying, exchange character varying, entity_name character varying, strategy_code character varying, timeframe character varying, direction character varying, signal_type character varying, trend character varying, status character varying, confidence numeric, technical_score numeric, financial_score numeric, catalyst_score numeric, reference_price numeric, invalidation_price numeric, target_price numeric, observed_at timestamp with time zone, evidence jsonb)
     LANGUAGE plpgsql STABLE
@@ -6994,6 +7003,29 @@ $$;
 
 
 --
+-- Name: sp_market_screener_context_progress(uuid, character varying, uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_market_screener_context_progress(p_user_id uuid, p_context_type character varying, p_context_id uuid) RETURNS jsonb
+    LANGUAGE plpgsql STABLE
+    AS $$
+DECLARE
+    v_run jsonb;
+BEGIN
+    PERFORM 1 FROM public.sp_market_screener_context_instruments(
+        p_user_id, p_context_type, p_context_id
+    );
+    SELECT to_jsonb(r) INTO v_run FROM public.market_screener_runs r
+    WHERE r.phase_results #>> '{context,user_id}' = p_user_id::text
+      AND r.phase_results #>> '{context,context_type}' = p_context_type
+      AND r.phase_results #>> '{context,context_id}' = p_context_id::text
+    ORDER BY r.started_at DESC, r.screener_run_id DESC LIMIT 1;
+    RETURN v_run;
+END;
+$$;
+
+
+--
 -- Name: sp_market_screener_create_ranking_snapshot(uuid); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -7130,12 +7162,12 @@ CREATE FUNCTION public.sp_market_screener_enrich_opportunity_payload(p_payload j
             'source_exchange', instrument.exchange,
             'source_currency_code', instrument.currency_code,
             'source_isin', NULL,
-                        'last_analysis_at', (
-                                SELECT max(r.finished_at)
-                                FROM public.market_analysis_scan_runs r
-                                WHERE r.status = 'COMPLETED'
-                                    AND (r.summary -> 'evaluated_instrument_ids') ? instrument.instrument_id::text
-                        ),
+            'last_analysis_at', (
+                SELECT max(r.finished_at)
+                FROM public.market_analysis_scan_runs r
+                WHERE r.status = 'COMPLETED'
+                  AND (r.summary -> 'evaluated_instrument_ids') ? instrument.instrument_id::text
+            ),
             'strategy_code', opportunity.strategy_code,
             'signal_type', opportunity.signal_type,
             'signal_timeframe', opportunity.signal_timeframe,
@@ -7804,6 +7836,19 @@ $$;
 
 
 --
+-- Name: sp_market_screener_session_analysis_lock(boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_market_screener_session_analysis_lock(p_release boolean DEFAULT false) RETURNS boolean
+    LANGUAGE sql
+    AS $$
+    SELECT CASE WHEN p_release
+        THEN pg_advisory_unlock(hashtext('market_screener_analysis'))
+        ELSE pg_try_advisory_lock(hashtext('market_screener_analysis')) END;
+$$;
+
+
+--
 -- Name: sp_market_screener_snapshot_changes(uuid); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -7919,13 +7964,10 @@ CREATE FUNCTION public.sp_market_screener_try_analysis_lock() RETURNS boolean
     SELECT pg_try_advisory_xact_lock(hashtext('market_screener_analysis'));
 $$;
 
-CREATE FUNCTION public.sp_market_screener_session_analysis_lock(p_release boolean DEFAULT false) RETURNS boolean
-    LANGUAGE sql
-    AS $$
-    SELECT CASE WHEN p_release
-        THEN pg_advisory_unlock(hashtext('market_screener_analysis'))
-        ELSE pg_try_advisory_lock(hashtext('market_screener_analysis')) END;
-$$;
+
+--
+-- Name: sp_market_screener_update_progress(uuid, jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
 
 CREATE FUNCTION public.sp_market_screener_update_progress(p_run_id uuid, p_phases jsonb) RETURNS void
     LANGUAGE plpgsql
@@ -7934,24 +7976,6 @@ BEGIN
     UPDATE public.market_screener_runs
     SET phase_results = phase_results || p_phases
     WHERE screener_run_id = p_run_id AND status = 'RUNNING';
-END;
-$$;
-
-CREATE FUNCTION public.sp_market_screener_context_progress(p_user_id uuid, p_context_type character varying, p_context_id uuid) RETURNS jsonb
-    LANGUAGE plpgsql STABLE
-    AS $$
-DECLARE
-    v_run jsonb;
-BEGIN
-    PERFORM 1 FROM public.sp_market_screener_context_instruments(
-        p_user_id, p_context_type, p_context_id
-    );
-    SELECT to_jsonb(r) INTO v_run FROM public.market_screener_runs r
-    WHERE r.phase_results #>> '{context,user_id}' = p_user_id::text
-      AND r.phase_results #>> '{context,context_type}' = p_context_type
-      AND r.phase_results #>> '{context,context_id}' = p_context_id::text
-    ORDER BY r.started_at DESC, r.screener_run_id DESC LIMIT 1;
-    RETURN v_run;
 END;
 $$;
 
@@ -13258,10 +13282,10 @@ CREATE TABLE public.trading_signals (
     close_reason text,
     evidence jsonb DEFAULT '{}'::jsonb NOT NULL,
     llm_analysis jsonb,
-    last_llm_analysis_at timestamp with time zone,
     enrichment_fingerprint character varying(100),
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    last_llm_analysis_at timestamp with time zone,
     CONSTRAINT ck_trading_signals_confidence CHECK (((confidence >= (0)::numeric) AND (confidence <= (1)::numeric))),
     CONSTRAINT ck_trading_signals_direction CHECK (((direction)::text = ANY ((ARRAY['LONG'::character varying, 'SHORT'::character varying])::text[]))),
     CONSTRAINT ck_trading_signals_scores CHECK ((((technical_score IS NULL) OR ((technical_score >= (0)::numeric) AND (technical_score <= (100)::numeric))) AND ((financial_score IS NULL) OR ((financial_score >= (0)::numeric) AND (financial_score <= (100)::numeric))) AND ((catalyst_score IS NULL) OR ((catalyst_score >= (0)::numeric) AND (catalyst_score <= (100)::numeric))) AND ((llm_score IS NULL) OR ((llm_score >= (0)::numeric) AND (llm_score <= (100)::numeric))) AND ((composite_score IS NULL) OR ((composite_score >= (0)::numeric) AND (composite_score <= (100)::numeric))))),
@@ -16405,5 +16429,5 @@ ALTER TABLE ONLY public.watchlists
 -- PostgreSQL database dump complete
 --
 
-\unrestrict cfwX50hcDjylBAgGcT67BBYcMDEJW83c2TOXoKobCntFj04hR7SOB0NfvBF8PL1
+\unrestrict sxnwtcB4eyQc78SmGDWehuJ2MeatIkR3fJlYQgzac9Z9hI45Wi5WzmBHDPJRoP5
 

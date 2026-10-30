@@ -50,7 +50,11 @@ async def get_entities(
                 )
                 """
             ),
-            {"user_id": current_user["user_id"], "scope": scope, "query": query.strip()},
+            {
+                "user_id": current_user["user_id"],
+                "scope": scope,
+                "query": query.strip(),
+            },
         )
 
         return [dict(row._mapping) for row in rows]
