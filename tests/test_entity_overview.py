@@ -188,6 +188,11 @@ def test_entity_list_installation_matches_authoritative_schema():
     assert "o.entity_id = e.entity_id AND o.active" in schema_body
     assert schema_body.index("p_scope = 'PORTFOLIO'") < schema_body.index("LIMIT")
     assert schema_body.index("strpos(lower(value)") < schema_body.index("LIMIT")
+    assert "LEFT JOIN public.instruments" not in schema_body
+    assert "NULL::varchar AS symbol, NULL::varchar AS exchange" in schema_body
+    assert "WHERE i.entity_id = m.entity_id AND EXISTS (" in schema_body
+    assert "ARRAY[i.symbol::text, i.exchange::text]" in schema_body
+    assert "ORDER BY m.name, m.entity_id\nLIMIT" in schema_body
 
 
 def test_overview_installation_matches_authoritative_schema():

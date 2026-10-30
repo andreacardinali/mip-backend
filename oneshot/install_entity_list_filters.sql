@@ -14,20 +14,25 @@ WITH matched AS (
         p_user_id, e.entity_id) AS payload) membership
     WHERE e.active AND p_user_id IS NOT NULL
 )
-SELECT m.entity_id, m.name, m.entity_type, m.country_code, i.symbol, i.exchange,
+SELECT m.entity_id, m.name, m.entity_type, m.country_code,
+    NULL::varchar AS symbol, NULL::varchar AS exchange,
     m.in_portfolio, m.in_watchlist, m.has_active_signals
 FROM matched m
-LEFT JOIN public.instruments i ON i.entity_id = m.entity_id
 WHERE (p_scope = 'ALL'
     OR (p_scope = 'PORTFOLIO' AND m.in_portfolio)
     OR (p_scope = 'WATCHLIST' AND m.in_watchlist)
     OR (p_scope = 'SIGNALS' AND m.has_active_signals))
   AND (coalesce(btrim(p_query), '') = '' OR EXISTS (
-    SELECT 1 FROM unnest(ARRAY[m.name::text, i.symbol::text,
-        i.exchange::text, m.entity_type::text]) value
+        SELECT 1 FROM unnest(ARRAY[m.name::text, m.entity_type::text]) value
     WHERE strpos(lower(value), lower(btrim(p_query))) > 0
+    ) OR EXISTS (
+        SELECT 1 FROM public.instruments i
+        WHERE i.entity_id = m.entity_id AND EXISTS (
+                SELECT 1 FROM unnest(ARRAY[i.symbol::text, i.exchange::text]) value
+                WHERE strpos(lower(value), lower(btrim(p_query))) > 0
+        )
   ))
-ORDER BY m.name, m.entity_id, i.symbol, i.exchange, i.instrument_id
+ORDER BY m.name, m.entity_id
 LIMIT least(greatest(p_limit, 1), 500);
 $$;
 

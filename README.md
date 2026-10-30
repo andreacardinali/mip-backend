@@ -21,11 +21,16 @@ The authenticated user's portfolio/watchlist membership comes from
 opportunities, not a price-movement ranking. Search and scope are applied by
 `sp_get_user_entities` before the 500-row limit. Each returned row includes
 `in_portfolio`, `in_watchlist` and `has_active_signals`.
+The list returns one row per entity, including entities with multiple or no
+instruments. Symbol and exchange searches use an existence check across all
+instruments; the legacy result columns `symbol` and `exchange` are returned as
+null to preserve the function signature without duplicating entities.
 
 Before using this endpoint on the existing development database, manually apply
 `oneshot/install_entity_list_filters.sql` after the existing asset-match and
 screener routines are installed. The installer matches `mip_schema.sql`; it is
 not executed on startup. The legacy `sp_get_entities(integer)` is unchanged.
+Reapply this installer if an earlier version is already installed.
 
 ## Centralized HTTP Requests
 
