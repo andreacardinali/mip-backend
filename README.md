@@ -99,6 +99,18 @@ defined job is preserved; its schedule is synchronized from its manifest at
 startup. The 30-second polling loop continues to read database settings without
 reloading manifests, preserving runtime schedule edits from the admin interface.
 
+Each manifest must also provide a nonempty `description`. At every startup,
+bootstrap imports the description for new jobs and updates it for existing jobs
+when the JSON text changes, including disabled jobs. Descriptions are returned
+by the admin catalog API for display on the job management page. No execution
+or enablement behavior is changed.
+
+Before restarting the updated backend and scheduler, manually apply
+`oneshot/install_scheduler_job_descriptions.sql` to install the description
+column and stored-routine contracts. This one-time schema installation is
+transactional and is never performed by application startup. Later description
+edits require only a scheduler restart, not another SQL installation.
+
 ## Automatic Screener AI
 
 Screener and entity analyses enable AI automatically on the server. Set

@@ -82,6 +82,7 @@ def validate_job_definition(
         "schema_version",
         "job_key",
         "job_name",
+        "description",
         "python_module",
         "trigger",
         "enabled_by_default",
@@ -100,6 +101,7 @@ def validate_job_definition(
     for field in (
         "job_key",
         "job_name",
+        "description",
         "python_module",
     ):
         value = definition.get(field)
@@ -226,6 +228,7 @@ def bootstrap_scheduler_jobs(
             result = repository.register_job(
                 job_key=(definition["job_key"]),
                 job_name=(definition["job_name"]),
+                description=(definition["description"]),
                 python_module=(definition["python_module"]),
                 trigger_type=(trigger["type"]),
                 cron_expression=(trigger.get("cron_expression")),

@@ -221,6 +221,7 @@ class SchedulerRepository:
         *,
         job_key: str,
         job_name: str,
+        description: str,
         python_module: str,
         trigger_type: str,
         cron_expression: str | None,
@@ -239,13 +240,15 @@ class SchedulerRepository:
                         :trigger_type,
                         :cron_expression,
                         :interval_minutes,
-                        :enabled_by_default
+                        :enabled_by_default,
+                        :description
                     )
                     """
                 ),
                 {
                     "job_key": job_key,
                     "job_name": job_name,
+                    "description": description,
                     "python_module": python_module,
                     "trigger_type": trigger_type,
                     "cron_expression": cron_expression,

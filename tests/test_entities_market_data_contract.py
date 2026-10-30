@@ -74,8 +74,10 @@ def scheduler_catalog(monkeypatch):
     import scheduler_bootstrap
 
     definition = {
+        "schema_version": 1,
         "job_key": "market_screener_pipeline",
         "job_name": "Screener pipeline",
+        "description": "Runs the selected screener phases.",
         "python_module": "jobs.market_screener_pipeline.worker",
         "trigger": {"type": "cron", "cron_expression": "0 5 * * *"},
         "enabled_by_default": True,
@@ -101,6 +103,44 @@ def test_scheduler_catalog_prunes_only_after_registration(scheduler_catalog, rem
     db.commit.assert_called_once()
     db.rollback.assert_not_called()
     db.close.assert_called_once()
+
+
+def test_scheduler_catalog_imports_description_on_each_bootstrap(scheduler_catalog):
+    bootstrap, db, repository = scheduler_catalog
+    definition = bootstrap.load_job_definition(Path("pipeline.job.json"), timezone="UTC")
+    bootstrap.bootstrap_scheduler_jobs(jobs_root=Path("jobs"), timezone="UTC")
+    assert repository.register_job.call_args.kwargs["description"] == definition["description"]
+    definition["description"] = "Updated screener description."
+    bootstrap.bootstrap_scheduler_jobs(jobs_root=Path("jobs"), timezone="UTC")
+    assert repository.register_job.call_args.kwargs["description"] == definition["description"]
+    assert db.commit.call_count == 2
+
+
+@pytest.mark.parametrize("description", [None, "", "   ", 123])
+def test_scheduler_catalog_rejects_invalid_description(scheduler_catalog, description):
+    bootstrap, _, _ = scheduler_catalog
+    definition = dict(bootstrap.load_job_definition(Path("pipeline.job.json"), timezone="UTC"))
+    definition["description"] = description
+    with pytest.raises(bootstrap.JobDefinitionError, match="invalid description"):
+        bootstrap.validate_job_definition(definition, path=Path("pipeline.job.json"), timezone="UTC")
+
+
+def test_scheduler_repository_passes_description_to_registration():
+    from scheduler_repository import SchedulerRepository
+
+    db = MagicMock()
+    expected = {"job_id": "defined", "action": "UPDATED"}
+    db.execute.return_value.mappings.return_value.one.return_value = expected
+    repository = SchedulerRepository(db)
+    assert repository.register_job(
+        job_key="defined", job_name="Defined job", description="Updated description.",
+        python_module="jobs.worker", trigger_type="interval", cron_expression=None,
+        interval_minutes=15, enabled_by_default=True,
+    ) == expected
+    statement, parameters = db.execute.call_args.args
+    assert ":description" in str(statement)
+    assert parameters["description"] == "Updated description."
+    db.commit.assert_not_called()
 
 
 @pytest.mark.parametrize("failure", ["register_job", "prune_undefined_jobs"])
