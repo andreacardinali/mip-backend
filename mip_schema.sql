@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict FaimYTiEL3sDLJyPKTA5MH0h4J1DNqt57J7gz8eTSVJaUvSlCQLyKZqNrICzhJi
+\restrict cfwX50hcDjylBAgGcT67BBYcMDEJW83c2TOXoKobCntFj04hR7SOB0NfvBF8PL1
 
 -- Dumped from database version 18.6 (Debian 18.6-1.pgdg13+2)
 -- Dumped by pg_dump version 18.6 (Debian 18.6-1.pgdg13+2)
@@ -2910,54 +2910,6 @@ $$;
 -- Name: sp_get_entities(integer); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.sp_get_user_entity_overview(p_user_id uuid, p_entity_id uuid) RETURNS jsonb
-    LANGUAGE sql STABLE
-    AS $$
-    SELECT jsonb_build_object(
-        'entity', to_jsonb(e),
-        'asset_match', public.sp_get_user_entity_asset_match(p_user_id, e.entity_id),
-        'instruments', coalesce((
-            SELECT jsonb_agg(to_jsonb(i) ORDER BY i.symbol, i.exchange, i.instrument_id)
-            FROM public.instruments i WHERE i.entity_id = e.entity_id
-        ), '[]'::jsonb),
-        'universes', coalesce((
-            SELECT jsonb_agg(to_jsonb(u) ORDER BY u.name, u.universe_id)
-            FROM public.market_universes u WHERE u.active AND EXISTS (
-                SELECT 1 FROM public.market_universe_members m
-                JOIN public.instruments i ON i.instrument_id = m.instrument_id
-                WHERE m.universe_id = u.universe_id AND i.entity_id = e.entity_id
-                  AND m.valid_to IS NULL
-            )
-        ), '[]'::jsonb),
-        'news_count', (SELECT count(*) FROM public.news n WHERE EXISTS (
-            SELECT 1 FROM public.news_entities ne
-            WHERE ne.news_id = n.news_id AND ne.entity_id = e.entity_id
-        )),
-        'news', coalesce((SELECT jsonb_agg(to_jsonb(recent) ORDER BY recent.published_at DESC NULLS LAST, recent.news_id)
-            FROM (SELECT n.news_id, n.title, n.summary, n.url, n.published_at
-                FROM public.news n WHERE EXISTS (SELECT 1 FROM public.news_entities ne
-                    WHERE ne.news_id = n.news_id AND ne.entity_id = e.entity_id)
-                ORDER BY n.published_at DESC NULLS LAST, n.news_id LIMIT 50) recent
-        ), '[]'::jsonb),
-        'catalyst_count', (SELECT count(*) FROM public.catalysts c WHERE c.entity_id = e.entity_id),
-        'catalysts', coalesce((SELECT jsonb_agg(to_jsonb(recent) ORDER BY recent.catalyst_day DESC, recent.catalyst_id)
-            FROM (SELECT c.catalyst_id, c.title, c.catalyst_type, c.catalyst_date, c.catalyst_day, c.status, c.importance, c.source
-                FROM public.catalysts c WHERE c.entity_id = e.entity_id
-                ORDER BY c.catalyst_day DESC, c.catalyst_id LIMIT 50) recent
-        ), '[]'::jsonb),
-        'opportunities', coalesce((SELECT jsonb_agg(
-            public.sp_market_screener_enrich_consensus_payload(
-                public.sp_market_screener_enrich_opportunity_payload(
-                    public.sp_market_screener_get_user_opportunity(p_user_id, o.opportunity_id),
-                    o.opportunity_id), o.opportunity_id)
-            ORDER BY o.ranking_position, o.opportunity_id)
-            FROM public.market_screener_opportunities o WHERE o.entity_id = e.entity_id AND o.active
-        ), '[]'::jsonb),
-        'observed_at', statement_timestamp()
-    ) FROM public.entities e WHERE e.entity_id = p_entity_id;
-$$;
-
-
 CREATE FUNCTION public.sp_get_entities(p_limit integer DEFAULT 500) RETURNS TABLE(entity_id uuid, name character varying, entity_type character varying, country_code character varying, symbol character varying, exchange character varying)
     LANGUAGE sql
     AS $$
@@ -4327,6 +4279,58 @@ SELECT jsonb_build_object(
 )
 FROM portfolio_summary
 CROSS JOIN watchlist_summary;
+$$;
+
+
+--
+-- Name: sp_get_user_entity_overview(uuid, uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_get_user_entity_overview(p_user_id uuid, p_entity_id uuid) RETURNS jsonb
+    LANGUAGE sql STABLE
+    AS $$
+    SELECT jsonb_build_object(
+        'entity', to_jsonb(e),
+        'asset_match', public.sp_get_user_entity_asset_match(p_user_id, e.entity_id),
+        'instruments', coalesce((
+            SELECT jsonb_agg(to_jsonb(i) ORDER BY i.symbol, i.exchange, i.instrument_id)
+            FROM public.instruments i WHERE i.entity_id = e.entity_id
+        ), '[]'::jsonb),
+        'universes', coalesce((
+            SELECT jsonb_agg(to_jsonb(u) ORDER BY u.name, u.universe_id)
+            FROM public.market_universes u WHERE u.active AND EXISTS (
+                SELECT 1 FROM public.market_universe_members m
+                JOIN public.instruments i ON i.instrument_id = m.instrument_id
+                WHERE m.universe_id = u.universe_id AND i.entity_id = e.entity_id
+                  AND m.valid_to IS NULL
+            )
+        ), '[]'::jsonb),
+        'news_count', (SELECT count(*) FROM public.news n WHERE EXISTS (
+            SELECT 1 FROM public.news_entities ne
+            WHERE ne.news_id = n.news_id AND ne.entity_id = e.entity_id
+        )),
+        'news', coalesce((SELECT jsonb_agg(to_jsonb(recent) ORDER BY recent.published_at DESC NULLS LAST, recent.news_id)
+            FROM (SELECT n.news_id, n.title, n.summary, n.url, n.published_at
+                FROM public.news n WHERE EXISTS (SELECT 1 FROM public.news_entities ne
+                    WHERE ne.news_id = n.news_id AND ne.entity_id = e.entity_id)
+                ORDER BY n.published_at DESC NULLS LAST, n.news_id LIMIT 50) recent
+        ), '[]'::jsonb),
+        'catalyst_count', (SELECT count(*) FROM public.catalysts c WHERE c.entity_id = e.entity_id),
+        'catalysts', coalesce((SELECT jsonb_agg(to_jsonb(recent) ORDER BY recent.catalyst_day DESC, recent.catalyst_id)
+            FROM (SELECT c.catalyst_id, c.title, c.catalyst_type, c.catalyst_date, c.catalyst_day, c.status, c.importance, c.source
+                FROM public.catalysts c WHERE c.entity_id = e.entity_id
+                ORDER BY c.catalyst_day DESC, c.catalyst_id LIMIT 50) recent
+        ), '[]'::jsonb),
+        'opportunities', coalesce((SELECT jsonb_agg(
+            public.sp_market_screener_enrich_consensus_payload(
+                public.sp_market_screener_enrich_opportunity_payload(
+                    public.sp_market_screener_get_user_opportunity(p_user_id, o.opportunity_id),
+                    o.opportunity_id), o.opportunity_id)
+            ORDER BY o.ranking_position, o.opportunity_id)
+            FROM public.market_screener_opportunities o WHERE o.entity_id = e.entity_id AND o.active
+        ), '[]'::jsonb),
+        'observed_at', statement_timestamp()
+    ) FROM public.entities e WHERE e.entity_id = p_entity_id;
 $$;
 
 
@@ -7249,6 +7253,11 @@ CREATE FUNCTION public.sp_market_screener_list_filtered_opportunities(p_user_id 
     ORDER BY o.ranking_position NULLS LAST, o.composite_score DESC, o.opportunity_id
     LIMIT least(greatest(coalesce(p_limit, 100), 1), 1000);
 $$;
+
+
+--
+-- Name: sp_market_screener_list_filtered_opportunities(uuid, character varying, character varying, character varying, boolean, numeric, text, character varying, character varying, character varying, uuid, integer, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
 
 CREATE FUNCTION public.sp_market_screener_list_filtered_opportunities(p_user_id uuid, p_origin character varying, p_direction character varying, p_verdict character varying, p_portfolio_match boolean, p_minimum_score numeric, p_query text, p_consensus_direction character varying, p_strategy_code character varying, p_context_type character varying, p_context_id uuid, p_limit integer, p_watchlist_match boolean) RETURNS SETOF jsonb
     LANGUAGE sql STABLE
@@ -16255,5 +16264,5 @@ ALTER TABLE ONLY public.watchlists
 -- PostgreSQL database dump complete
 --
 
-\unrestrict FaimYTiEL3sDLJyPKTA5MH0h4J1DNqt57J7gz8eTSVJaUvSlCQLyKZqNrICzhJi
+\unrestrict cfwX50hcDjylBAgGcT67BBYcMDEJW83c2TOXoKobCntFj04hR7SOB0NfvBF8PL1
 
