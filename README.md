@@ -44,8 +44,8 @@ installation SQL runs automatically at application startup.
 
 Screener context analysis and user price-refresh requests cannot be enabled as
 recurring jobs or launched from the generic admin run endpoint. Their workers
-need contextual request metadata. Other jobs retain their existing schedules;
-entity refresh without a request retains its `MISSING` defaults. Pending requests
+need contextual request metadata. Independent jobs retain their existing schedules;
+the consolidated entity refresh without a request retains its `MISSING` defaults. Pending requests
 are deduplicated for the same job, user and validated payload.
 
 Screener retains its advisory locks, incremental commits and domain runs,
@@ -57,6 +57,45 @@ only populates the existing specialist queue for the authenticated user with a
 not that all prices are updated: the existing dispatcher performs acquisition,
 and the frontend continues price polling after awaiting the scheduler result.
 Data-write endpoints may still populate internal queues as part of their writes.
+
+### Consolidated Scheduler Workers
+
+`market_screener_pipeline` is the recurring and generic admin entry point for
+discovery, candidate resolution, analysis, AI enrichment and ranking. Its admin
+request optionally accepts `phases` and `stop_on_error`. Omitted phases run all
+configured phases; selected phases execute once in canonical order and cannot
+override server configuration, including disabled AI.
+
+`refresh_entities_missing` is the consolidated entity-refresh entry point;
+its parameterized request also supports full refresh. The old full-refresh entry
+and standalone screener phase jobs are superseded. Their implementation modules
+remain internal dependencies, but their manifests are removed and the scheduler
+ignores their recurring registrations. Generic admin execution, re-enabling and
+schedule editing return 422. The admin list exposes `replaced_by`; superseded
+jobs are hidden by default and can be shown to inspect retained run/log history.
+Advisory locks, coalescing and execution coordination remain unchanged.
+
+Existing database rows need a one-time consolidation. Preview locally without
+connecting to the database:
+
+```powershell
+.\.venv\Scripts\python.exe -m oneshot.consolidate_scheduler_jobs
+```
+
+Before applying, back up the database, stop the scheduler and backend, and resolve
+any legacy execution requests already pending or processing. Use the UUID of an
+existing audit user, then explicitly apply:
+
+```powershell
+.\.venv\Scripts\python.exe -m oneshot.consolidate_scheduler_jobs --apply --actor <user-uuid>
+```
+
+The one-shot requires both replacement workers to exist and be enabled. It
+rejects active legacy runs and pending/processing legacy requests, disables
+superseded entries through the existing audited routine and clears next-run
+timestamps through the scheduler routine in one transaction. It is idempotent
+and does not delete jobs, requests, runs or logs. Restart only the updated backend
+and scheduler after successful consolidation. Nothing runs on startup.
 
 ## Automatic Screener AI
 

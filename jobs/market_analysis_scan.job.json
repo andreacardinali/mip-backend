@@ -1,8 +1,0 @@
-{
-  "schema_version": 1,
-  "job_key": "market_analysis_scan",
-  "job_name": "Market Analysis Scan",
-  "python_module": "jobs.market_analysis_scan.worker",
-  "trigger": {"type": "cron", "cron_expression": "15 22 * * 1-5"},
-  "enabled_by_default": false
-}

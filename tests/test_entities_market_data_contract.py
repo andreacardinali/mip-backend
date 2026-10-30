@@ -3,6 +3,8 @@ import sys
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import MagicMock
+from uuid import UUID
 
 import pytest
 
@@ -55,22 +57,80 @@ def test_refresh_job_uses_service_transaction_boundaries(
     }
 
 
-def test_full_refresh_job_is_disabled_by_default(stub_database):
-    from jobs.entities import refresh_entities_full
+def test_superseded_jobs_have_no_recurring_definitions():
+    from job_runtime.requests import SUPERSEDED_JOBS
 
-    path = (
-        Path(__file__).resolve().parents[1] / "jobs" / "refresh_entities_full.job.json"
-    )
-    definition = json.loads(path.read_text(encoding="utf-8"))
-    existing = json.loads(
-        path.with_name("refresh_entities.job.json").read_text(encoding="utf-8")
-    )
+    root = Path(__file__).resolve().parents[1] / "jobs"
+    definitions = {
+        json.loads(path.read_text(encoding="utf-8"))["job_key"]
+        for path in root.rglob("*.job.json")
+    }
+    assert not definitions.intersection(SUPERSEDED_JOBS)
+    assert set(SUPERSEDED_JOBS.values()) <= definitions
 
-    assert definition["schema_version"] == existing["schema_version"]
-    assert definition["trigger"] == existing["trigger"]
-    assert definition["enabled_by_default"] is False
-    assert definition["job_key"] != existing["job_key"]
-    assert definition["python_module"] == refresh_entities_full.__name__
+
+@pytest.mark.parametrize("enabled, next_run", [(True, None), (False, "stale"), (False, None)])
+def test_scheduler_consolidation_preserves_history_and_is_idempotent(enabled, next_run):
+    from oneshot.consolidate_scheduler_jobs import consolidate_jobs
+
+    actor = UUID("00000000-0000-0000-0000-000000000001")
+    job_id = UUID("00000000-0000-0000-0000-000000000002")
+    db = MagicMock()
+    db.execute.return_value.scalar_one.return_value = False
+    db.execute.return_value.mappings.return_value.all.return_value = [
+        {"job_key": "market_screener_pipeline", "enabled": True},
+        {"job_key": "refresh_entities_missing", "enabled": True},
+        {"job_key": "market_screener_ranking", "job_id": job_id,
+         "enabled": enabled, "next_run_at": next_run, "last_status": "SUCCESS"},
+    ]
+    assert consolidate_jobs(db, actor) == (
+        ["market_screener_ranking"] if enabled or next_run else []
+    )
+    statements = db.execute.call_args_list[2:]
+    assert len(statements) == int(enabled) + int(enabled or next_run is not None)
+    if enabled:
+        assert "sp_set_scheduler_job_enabled" in str(statements[0].args[0])
+        assert statements[0].args[1] == {
+            "actor_user_id": str(actor), "job_key": "market_screener_ranking", "enabled": False,
+        }
+    if enabled or next_run:
+        assert "sp_scheduler_update_next_run" in str(statements[-1].args[0])
+        assert statements[-1].args[1] == {"job_id": str(job_id), "next_run_at": None}
+    db.commit.assert_not_called()
+    db.rollback.assert_not_called()
+
+
+@pytest.mark.parametrize("problem", ["missing", "disabled", "running", "pending"])
+def test_scheduler_consolidation_preflight_rejects_unsafe_changes(problem):
+    from oneshot.consolidate_scheduler_jobs import consolidate_jobs
+
+    db = MagicMock()
+    db.execute.return_value.scalar_one.return_value = problem == "pending"
+    jobs = [
+        {"job_key": "refresh_entities_missing", "enabled": True},
+        {"job_key": "market_screener_ranking", "enabled": True,
+         "job_id": UUID("00000000-0000-0000-0000-000000000002"),
+         "last_status": "RUNNING" if problem == "running" else "SUCCESS"},
+    ]
+    if problem != "missing":
+        jobs.append({"job_key": "market_screener_pipeline", "enabled": problem != "disabled"})
+    db.execute.return_value.mappings.return_value.all.return_value = jobs
+    with pytest.raises(ValueError):
+        consolidate_jobs(db, UUID("00000000-0000-0000-0000-000000000001"))
+    assert db.execute.call_count == (2 if problem == "pending" else 1)
+
+
+def test_scheduler_consolidation_preview_does_not_connect(monkeypatch, capsys):
+    import sys
+
+    from oneshot import consolidate_scheduler_jobs
+
+    db_module = MagicMock()
+    monkeypatch.setitem(sys.modules, "db", db_module)
+    monkeypatch.setattr(sys, "argv", ["consolidate_scheduler_jobs"])
+    consolidate_scheduler_jobs.main()
+    db_module.SessionLocal.assert_not_called()
+    assert "Preview only: no database connection or changes." in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("fail_after_first", [False, True])

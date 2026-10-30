@@ -11,7 +11,11 @@ from sqlalchemy import text
 
 from db import SessionLocal, engine
 from job_runtime.lock_logging import lock_identity, log_lock_contention
-from job_runtime.requests import REQUEST_ONLY_JOBS, current_job_request
+from job_runtime.requests import (
+    REQUEST_ONLY_JOBS,
+    SUPERSEDED_JOBS,
+    current_job_request,
+)
 from job_runtime.run_logging import (
     current_job_run_id,
     install_scheduler_run_log_handler,
@@ -367,6 +371,7 @@ def sync_jobs() -> None:
             str(job["job_id"]): job
             for job in repository.get_enabled_jobs()
             if job["python_module"] not in REQUEST_ONLY_JOBS.values()
+            and job.get("job_key") not in SUPERSEDED_JOBS
         }
         internal_ids = {SYNC_JOB_ID, MANUAL_RUN_POLL_JOB_ID}
         current_jobs = {

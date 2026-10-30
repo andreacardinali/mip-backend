@@ -358,21 +358,43 @@ def test_scheduler_job_list_exposes_contextual_execution(
     monkeypatch.setattr(system_admin, "SessionLocal", lambda: db)
 
     assert system_admin.list_jobs({"user_id": USER_ID}) == [
-        {**row, "request_only": request_only},
+        {
+            **row,
+            "request_only": request_only,
+            "replaced_by": (
+                "market_screener_pipeline"
+                if job_key == "market_screener_ranking"
+                else None
+            ),
+        },
     ]
     assert "request_only" not in row
     db.close.assert_called_once()
 
 
 @pytest.mark.parametrize(
-    "job_key", ["market_screener_context_analysis", "market_price_refresh_request"]
+    "job_key",
+    [
+        "market_screener_context_analysis",
+        "market_price_refresh_request",
+        "market_discovery_refresh",
+        "market_discovery_candidate_resolver",
+        "market_discovery_analysis_scan",
+        "market_analysis_scan",
+        "market_analysis_llm_enrichment",
+        "market_screener_ranking",
+        "refresh_entities_full",
+    ],
 )
-@pytest.mark.parametrize("operation", ["enable", "run"])
+@pytest.mark.parametrize("operation", ["enable", "run", "schedule"])
 def test_contextual_job_rejects_payloadless_admin_execution(
     monkeypatch, operation, job_key
 ):
+    from job_runtime.requests import SUPERSEDED_JOBS
     from routers import system_admin
 
+    if operation == "schedule" and job_key not in SUPERSEDED_JOBS:
+        pytest.skip("Contextual jobs are not part of scheduler consolidation")
     session_factory = MagicMock()
     monkeypatch.setattr(system_admin, "SessionLocal", session_factory)
     with pytest.raises(HTTPException) as raised:
@@ -382,6 +404,12 @@ def test_contextual_job_rejects_payloadless_admin_execution(
                 system_admin.JobUpdate(enabled=True),
                 current_user={"user_id": USER_ID},
             )
+        elif operation == "schedule":
+            system_admin.update_job(
+                job_key,
+                system_admin.JobUpdate(trigger_type="cron", cron_expression="0 5 * * *"),
+                current_user={"user_id": USER_ID},
+            )
         else:
             system_admin.run_job_now(job_key, current_user={"user_id": USER_ID})
     assert raised.value.status_code == 422
@@ -389,13 +417,20 @@ def test_contextual_job_rejects_payloadless_admin_execution(
 
 
 @pytest.mark.parametrize(
-    "module",
+    "job_key, module",
     [
-        "jobs.market_screener_context_analysis.worker",
-        "jobs.market_price_refresh.request",
+        ("market_screener_context_analysis", "jobs.market_screener_context_analysis.worker"),
+        ("market_price_refresh_request", "jobs.market_price_refresh.request"),
+        ("market_discovery_refresh", "jobs.market_discovery_refresh.worker"),
+        ("market_discovery_candidate_resolver", "jobs.market_discovery_candidate_resolver.worker"),
+        ("market_discovery_analysis_scan", "jobs.market_discovery_analysis_scan.worker"),
+        ("market_analysis_scan", "jobs.market_analysis_scan.worker"),
+        ("market_analysis_llm_enrichment", "jobs.market_analysis_llm_enrichment.worker"),
+        ("market_screener_ranking", "jobs.market_screener_ranking.worker"),
+        ("refresh_entities_full", "jobs.entities.refresh_entities_full"),
     ],
 )
-def test_contextual_job_is_not_registered_as_recurring(monkeypatch, module):
+def test_contextual_job_is_not_registered_as_recurring(monkeypatch, job_key, module):
     import scheduler
 
     db = MagicMock()
@@ -403,6 +438,7 @@ def test_contextual_job_is_not_registered_as_recurring(monkeypatch, module):
     repository.get_enabled_jobs.return_value = [
         {
             "job_id": JOB_ID,
+            "job_key": job_key,
             "python_module": module,
         }
     ]

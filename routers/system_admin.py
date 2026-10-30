@@ -7,7 +7,7 @@ from sqlalchemy import text
 
 from auth.security import CurrentUser, require_admin
 from db import SessionLocal
-from job_runtime.requests import REQUEST_ONLY_JOBS
+from job_runtime.requests import REQUEST_ONLY_JOBS, SUPERSEDED_JOBS
 from scheduler_repository import SchedulerRepository
 from scheduler_triggers import SCHEDULER_TIMEZONE, build_trigger
 from services.entity_refresh_request import RefreshEntitiesRequest
@@ -46,7 +46,11 @@ def list_jobs(_: CurrentUser = Depends(require_admin)):
     try:
         rows = db.execute(text("SELECT * FROM sp_list_scheduler_jobs()")).mappings()
         return [
-            {**dict(row), "request_only": row["job_key"] in REQUEST_ONLY_JOBS}
+            {
+                **dict(row),
+                "request_only": row["job_key"] in REQUEST_ONLY_JOBS,
+                "replaced_by": SUPERSEDED_JOBS.get(row["job_key"]),
+            }
             for row in rows
         ]
     finally:
@@ -59,6 +63,12 @@ def update_job(
     payload: JobUpdate,
     current_user: CurrentUser = Depends(require_admin),
 ):
+    if job_key in SUPERSEDED_JOBS and (
+        payload.enabled or payload.trigger_type is not None
+    ):
+        raise HTTPException(
+            status_code=422, detail=f"Use {SUPERSEDED_JOBS[job_key]} instead"
+        )
     if job_key in REQUEST_ONLY_JOBS and payload.enabled:
         raise HTTPException(
             status_code=422,
@@ -144,6 +154,10 @@ def run_job_now(
     current_user: CurrentUser = Depends(require_admin),
     payload: Annotated[dict[str, Any] | None, Body()] = None,
 ):
+    if job_key in SUPERSEDED_JOBS:
+        raise HTTPException(
+            status_code=422, detail=f"Use {SUPERSEDED_JOBS[job_key]} instead"
+        )
     if job_key in REQUEST_ONLY_JOBS:
         raise HTTPException(
             status_code=422, detail="Start this job from its contextual API"
