@@ -5,7 +5,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from oneshot.apply_intelligence_fixes import FUNCTION_NAMES, main, migration_statements
+from oneshot.apply_intelligence_fixes import (
+    FUNCTION_NAMES,
+    FUNCTION_OVERLOADS,
+    main,
+    migration_statements,
+)
 
 
 def test_migration_includes_each_reviewed_function_once():
@@ -13,11 +18,63 @@ def test_migration_includes_each_reviewed_function_once():
         encoding="utf-8"
     )
     statements = migration_statements(schema)
-    assert len(statements) == len(FUNCTION_NAMES) + 1
+    expected_names = [
+        name
+        for name in FUNCTION_NAMES
+        for _ in range(len(FUNCTION_OVERLOADS.get(name, (None,))))
+    ]
+    assert len(statements) == len(expected_names) + 1
     assert "ALTER TABLE public.positions" in statements[0]
-    for name, statement in zip(FUNCTION_NAMES, statements[1:], strict=True):
+    for name, statement in zip(expected_names, statements[1:], strict=True):
         assert statement.startswith(f"CREATE OR REPLACE FUNCTION public.{name}(")
         assert statement.endswith(("$$;", "$_$;"))
+
+
+def test_enrichment_overloads_install_shared_selection_before_wrapper():
+    schema = (Path(__file__).resolve().parents[1] / "mip_schema.sql").read_text(
+        encoding="utf-8"
+    )
+    statements = [
+        sql
+        for sql in migration_statements(schema)
+        if sql.startswith(
+            "CREATE OR REPLACE FUNCTION public.sp_market_analysis_list_pending_llm_enrichment("
+        )
+    ]
+    assert len(statements) == 2
+    assert "p_instrument_ids uuid[]) RETURNS" in statements[0]
+    assert "{quant,llm_eligible}" in statements[0]
+    assert "s.strategy_code <> 'SWING_EXIT'" in statements[0]
+    assert "p_limit integer DEFAULT 25) RETURNS" in statements[1]
+    assert "p_enrichment_fingerprint, p_limit, NULL::uuid[]" in statements[1]
+
+
+@pytest.mark.parametrize("change", ["missing", "duplicate", "unreviewed"])
+def test_migration_rejects_invalid_enrichment_overloads(change):
+    schema = (Path(__file__).resolve().parents[1] / "mip_schema.sql").read_text(
+        encoding="utf-8"
+    )
+    definition = next(
+        sql.replace("CREATE OR REPLACE FUNCTION", "CREATE FUNCTION", 1)
+        for sql in migration_statements(schema)
+        if sql.startswith(
+            "CREATE OR REPLACE FUNCTION public.sp_market_analysis_list_pending_llm_enrichment("
+        )
+    )
+    if change == "missing":
+        schema = schema.replace(definition, "", 1)
+    elif change == "duplicate":
+        schema += "\n" + definition
+    else:
+        schema = schema.replace(
+            "p_instrument_ids uuid[]) RETURNS",
+            "p_instrument_ids text[]) RETURNS",
+            1,
+        )
+    with pytest.raises(
+        ValueError, match="sp_market_analysis_list_pending_llm_enrichment"
+    ):
+        migration_statements(schema)
 
 
 def test_migration_rejects_missing_definition():

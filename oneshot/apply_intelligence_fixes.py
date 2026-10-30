@@ -33,6 +33,13 @@ FUNCTION_NAMES = (
     "sp_market_discovery_list_scan_candidates",
 )
 
+FUNCTION_OVERLOADS = {
+    "sp_market_analysis_list_pending_llm_enrichment": (
+        "p_enrichment_fingerprint character varying, p_limit integer, p_instrument_ids uuid[]",
+        "p_enrichment_fingerprint character varying, p_limit integer DEFAULT 25",
+    ),
+}
+
 
 def migration_statements(schema: str) -> list[str]:
     preflight_path = (
@@ -42,10 +49,26 @@ def migration_statements(schema: str) -> list[str]:
     for name in FUNCTION_NAMES:
         pattern = rf"^CREATE FUNCTION public\.{re.escape(name)}\(.*?^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$;"
         matches = re.findall(pattern, schema, flags=re.MULTILINE | re.DOTALL)
-        if len(matches) != 1:
-            raise ValueError(f"Expected exactly one pg_dump definition for {name}")
-        statements.append(
-            matches[0].replace("CREATE FUNCTION", "CREATE OR REPLACE FUNCTION", 1)
+        signatures = FUNCTION_OVERLOADS.get(name)
+        if signatures is None:
+            if len(matches) != 1:
+                raise ValueError(f"Expected exactly one pg_dump definition for {name}")
+            definitions = matches
+        else:
+            if len(matches) != len(signatures):
+                raise ValueError(f"Expected reviewed pg_dump overloads for {name}")
+            definitions = []
+            for signature in signatures:
+                prefix = f"CREATE FUNCTION public.{name}({signature}) RETURNS "
+                selected = [sql for sql in matches if sql.startswith(prefix)]
+                if len(selected) != 1:
+                    raise ValueError(
+                        f"Expected exactly one pg_dump definition for {name}({signature})"
+                    )
+                definitions.append(selected[0])
+        statements.extend(
+            sql.replace("CREATE FUNCTION", "CREATE OR REPLACE FUNCTION", 1)
+            for sql in definitions
         )
     return statements
 

@@ -601,6 +601,10 @@ from this checkout. The upgrade is transactional and safe to repeat; no legacy
 historical acquisition costs are guessed or backfilled. Keep this checkout with
 the deployment record because the migration reads its schema definitions.
 
+For pending AI enrichment, the runner installs both reviewed overloads, placing
+the instrument-scoped implementation before the two-argument compatibility
+wrapper. Missing, duplicate or unreviewed overload signatures are rejected.
+
 The runner executes DDL with `no_parameters=True`, preserving literal `%` markers
 inside PL/pgSQL without psycopg interpreting them as driver placeholders. A failed
 upgrade rolls back its transaction; rerun the corrected runner after a failure.
