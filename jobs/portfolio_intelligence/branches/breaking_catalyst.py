@@ -30,7 +30,9 @@ class BreakingCatalystBranch:
         template = context.prompts.get("breaking")
         collector = MarketEvidenceCollector(context.market_data, context.config)
         economic_events = collector.common_economic_events()
-        writer = IncrementalNotificationWriter(context.notification_queue)
+        writer = IncrementalNotificationWriter(
+            context.notification_queue, db=context.db
+        )
         progress = BatchProgress(
             job="portfolio_intelligence_breaking_catalyst",
             total_items=len(candidates),

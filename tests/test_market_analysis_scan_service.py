@@ -110,4 +110,79 @@ def test_incremental_scan_commits_each_member_before_loading_next(monkeypatch):
             members=[SimpleNamespace(symbol="FIRST"), SimpleNamespace(symbol="SECOND")],
             incremental=True,
         )
-    assert events == ["commit", "FIRST", "commit", "SECOND", "rollback", "FAILED", "commit"]
+    assert events == [
+        "commit",
+        "FIRST",
+        "commit",
+        "SECOND",
+        "rollback",
+        "FAILED",
+        "commit",
+    ]
+
+
+def test_incremental_scan_continues_after_member_persistence_failure(monkeypatch):
+    from types import SimpleNamespace
+
+    from market_analysis.scan import ScanResult
+    from services import market_analysis_scan as service
+
+    events = []
+    failures = []
+
+    class Repository:
+        def __init__(self, db):
+            pass
+
+        def start_scan_run(self, **kwargs):
+            return "run"
+
+        def finish_scan_run(self, **kwargs):
+            events.append(kwargs["status"])
+
+        def record_scan_failure(self, **kwargs):
+            failures.append(kwargs)
+
+    def scan(members, **kwargs):
+        events.append(members[0].symbol)
+        return ScanResult(processed=1, candidates=(), failures=())
+
+    def expire(*args):
+        if events[-1] == "BAD":
+            raise RuntimeError("write failed")
+        return 1
+
+    monkeypatch.setattr(service, "MarketAnalysisRepository", Repository)
+    monkeypatch.setattr(service, "scan_members", scan)
+    monkeypatch.setattr(service, "expire_evaluated_signals", expire)
+    db = SimpleNamespace(
+        commit=lambda: events.append("commit"),
+        rollback=lambda: events.append("rollback"),
+    )
+    result = service.run_member_analysis_scan(
+        db,
+        market_data_service=object(),
+        universe_id="universe",
+        universe_code="context",
+        members=[
+            SimpleNamespace(symbol=symbol, instrument_id=symbol)
+            for symbol in ("FIRST", "BAD", "THIRD")
+        ],
+        incremental=True,
+    )
+    assert result["status"] == "PARTIAL"
+    assert result["failed_symbols"] == ["BAD"]
+    assert result["expired_signals"] == 2
+    assert failures[0]["symbol"] == "BAD"
+    assert events == [
+        "commit",
+        "FIRST",
+        "commit",
+        "BAD",
+        "rollback",
+        "commit",
+        "THIRD",
+        "commit",
+        "COMPLETED",
+        "commit",
+    ]

@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 from market_analysis.quant_prefilter import QuantPrefilterConfig
 from market_analysis.scan import ScanConfig, ScanMember, ScanResult
@@ -141,7 +142,9 @@ def test_quant_exclusion_does_not_prevent_signal_persistence(monkeypatch):
     assert persisted[0]["candidate"].strategy_code == "TREND_PULLBACK"
 
 
-def test_discovery_commits_before_next_provider_call_and_preserves_failed_run(monkeypatch):
+def test_discovery_commits_before_next_provider_call_and_preserves_failed_run(
+    monkeypatch,
+):
     import pytest
 
     events = []
@@ -152,8 +155,12 @@ def test_discovery_commits_before_next_provider_call_and_preserves_failed_run(mo
 
         def list_scan_candidates(self, **kwargs):
             return [
-                {"instrument_id": symbol, "entity_id": symbol, "symbol": symbol,
-                 "universe_id": None}
+                {
+                    "instrument_id": symbol,
+                    "entity_id": symbol,
+                    "symbol": symbol,
+                    "universe_id": None,
+                }
                 for symbol in ("FIRST", "SECOND")
             ]
 
@@ -177,10 +184,18 @@ def test_discovery_commits_before_next_provider_call_and_preserves_failed_run(mo
             raise RuntimeError("interrupted")
         return ScanResult(1, (), ())
 
-    monkeypatch.setattr("services.market_discovery_analysis_scan.DiscoveryScanRepository", DiscoveryRepository)
-    monkeypatch.setattr("services.market_discovery_analysis_scan.MarketAnalysisRepository", Repository)
+    monkeypatch.setattr(
+        "services.market_discovery_analysis_scan.DiscoveryScanRepository",
+        DiscoveryRepository,
+    )
+    monkeypatch.setattr(
+        "services.market_discovery_analysis_scan.MarketAnalysisRepository", Repository
+    )
     monkeypatch.setattr("services.market_discovery_analysis_scan.scan_members", scan)
-    monkeypatch.setattr("services.market_discovery_analysis_scan.expire_evaluated_signals", lambda *args: 0)
+    monkeypatch.setattr(
+        "services.market_discovery_analysis_scan.expire_evaluated_signals",
+        lambda *args: 0,
+    )
     db = SimpleNamespace(
         commit=lambda: events.append("commit"),
         rollback=lambda: events.append("rollback"),
@@ -188,8 +203,89 @@ def test_discovery_commits_before_next_provider_call_and_preserves_failed_run(mo
 
     with pytest.raises(RuntimeError, match="interrupted"):
         run_market_discovery_analysis_scan(
-            db, market_data_service=object(), scan_config=ScanConfig(),
+            db,
+            market_data_service=object(),
+            scan_config=ScanConfig(),
             quant_config=QuantPrefilterConfig(),
         )
 
-    assert events == ["commit", "FIRST", "commit", "SECOND", "rollback", "FAILED", "commit"]
+    assert events == [
+        "commit",
+        "FIRST",
+        "commit",
+        "SECOND",
+        "rollback",
+        "FAILED",
+        "commit",
+    ]
+
+
+def test_discovery_rolls_back_failed_member_and_continues(monkeypatch):
+    events = []
+    discovery = Mock()
+    discovery.list_scan_candidates.return_value = [
+        {
+            "instrument_id": symbol,
+            "entity_id": symbol,
+            "symbol": symbol,
+            "universe_id": None,
+        }
+        for symbol in ("FIRST", "BAD", "THIRD")
+    ]
+    repository = Mock()
+    repository.upsert_universe.return_value = "universe"
+    repository.start_scan_run.return_value = "run"
+
+    def scan(members, **kwargs):
+        assert events[-1] == "commit"
+        events.append(members[0].symbol)
+        return ScanResult(1, (), ())
+
+    def expire(db, result, signal_ids):
+        if events[-1] == "BAD":
+            raise RuntimeError("persistence unavailable")
+        return 1
+
+    monkeypatch.setattr(
+        "services.market_discovery_analysis_scan.DiscoveryScanRepository",
+        lambda db: discovery,
+    )
+    monkeypatch.setattr(
+        "services.market_discovery_analysis_scan.MarketAnalysisRepository",
+        lambda db: repository,
+    )
+    monkeypatch.setattr("services.market_discovery_analysis_scan.scan_members", scan)
+    monkeypatch.setattr(
+        "services.market_discovery_analysis_scan.expire_evaluated_signals", expire
+    )
+    db = SimpleNamespace(
+        commit=lambda: events.append("commit"),
+        rollback=lambda: events.append("rollback"),
+    )
+
+    result = run_market_discovery_analysis_scan(
+        db,
+        market_data_service=object(),
+        scan_config=ScanConfig(),
+        quant_config=QuantPrefilterConfig(),
+    )
+
+    assert result["status"] == "PARTIAL"
+    assert result["processed"] == 3
+    assert result["failed_symbols"] == ["BAD"]
+    assert result["expired_signals"] == 2
+    assert events == [
+        "commit",
+        "FIRST",
+        "commit",
+        "BAD",
+        "rollback",
+        "commit",
+        "THIRD",
+        "commit",
+        "commit",
+    ]
+    failure = repository.record_scan_failure.call_args.kwargs
+    assert failure["symbol"] == "BAD"
+    assert "Persistence failed" in failure["reason"]
+    assert repository.finish_scan_run.call_args.kwargs["status"] == "COMPLETED"

@@ -630,7 +630,7 @@ membership filtering, not name searches. Reapply the updated
 `oneshot/install_screener_contexts.sql` manually to enable these scopes.
 
 The entity overview offers `Analizza entita` in its header and an `Analizza`
-action on each instrument row. Both start the scan directly, with optional AI,
+action on each instrument row. Both start the scan directly, with server-configured AI,
 without leaving the overview. Analysis controls share their busy state across
 the overview and Screener, including route changes; the frontend service also
 rejects overlapping requests and releases its guard on success or failure.
@@ -647,13 +647,28 @@ settings.
 
 `POST /api/screener/analyze` accepts a context type and UUID. It synchronously
 analyzes 1-1000 context instruments using the configured market-data provider
-and shared scan engine, then rebuilds the global ranking. The transaction also
-records a screener run and global ranking snapshot, returning `run_id` and
+and shared scan engine, committing technical results per instrument and reporting
+progress before rebuilding the global ranking. It also records a screener run
+and global ranking snapshot, returning `run_id` and
 `ranking_snapshot_id`. Partial scans remain in history but are excluded from
-complete snapshot comparisons. Exceptions roll back all writes; failed manual
-attempts do not leave a persisted run. Manual analyses do not enqueue summary
-notifications. A transaction advisory lock prevents overlapping manual analyses
-(409), but does not serialize them with the scheduled pipeline.
+complete snapshot comparisons. Later failures do not roll back results already
+committed. Manual analyses do not enqueue summary notifications. A dedicated
+session advisory lock protects the incremental manual scan across its commits;
+overlapping analyses are rejected with 409.
+
+Scheduled and automatic jobs also preserve independently committed results:
+technical scans commit each instrument, FMP sync commits each catalyst or filing,
+news ingestion commits each article, news enrichment commits each entity score,
+and notification writers commit each enqueue. Exchange-rate refresh commits each
+currency's current and historical rates together. Persistence failures roll back
+only the current unit and continue where recoverable; counters include committed
+work only. Earlier commits survive even if failure reporting or a later stage
+cannot complete. AI request batching is retained, but a score persistence failure
+does not repeat the provider request.
+
+Operations requiring a complete database-only view remain atomic: final quant
+eligibility/ranking updates and full universe membership replacement. These do
+not wrap third-party calls in one transaction across independent instruments.
 
 Technical watchlist/portfolio/entity/instrument universes are inactive and excluded from public
 context discovery. Empty or oversized contexts return 422. Offline service,

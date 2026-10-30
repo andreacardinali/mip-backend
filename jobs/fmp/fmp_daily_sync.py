@@ -120,16 +120,29 @@ def _run_source(
     try:
         received_rows = fetch()
         normalized_rows = normalize(received_rows)
-        upserted = persist(db, normalized_rows)
-        db.commit()
+        upserted = 0
+        failed = 0
+        for row in normalized_rows:
+            try:
+                count = persist(db, [row])
+                db.commit()
+                upserted += count
+            except Exception:
+                db.rollback()
+                failed += 1
+                logger.exception(
+                    "FMP item failed source=%s symbol=%s", name, row.get("symbol")
+                )
 
         result = {
-            "status": "SUCCESS",
+            "status": (
+                "PARTIAL" if failed and upserted else "FAILED" if failed else "SUCCESS"
+            ),
             "received": len(received_rows),
             "eligible": len(normalized_rows),
             "normalization_discarded": len(received_rows) - len(normalized_rows),
             "upserted": upserted,
-            "failed": 0,
+            "failed": failed,
         }
 
         logger.info(
@@ -243,7 +256,7 @@ def run() -> dict[str, Any]:
 
     if successful == len(sources):
         status = "SUCCESS"
-    elif successful == 0:
+    elif all(item["status"] == "FAILED" for item in sources.values()):
         status = "FAILED"
     else:
         status = "PARTIAL"

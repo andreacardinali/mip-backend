@@ -12,7 +12,13 @@ from market_analysis.quant_prefilter import (
     score_evaluated_signal,
 )
 from market_analysis.repository import MarketAnalysisRepository
-from market_analysis.scan import ScanConfig, ScanMember, ScanResult, scan_members
+from market_analysis.scan import (
+    ScanConfig,
+    ScanFailure,
+    ScanMember,
+    ScanResult,
+    scan_members,
+)
 from market_sources.discovery.scan_repository import DiscoveryScanRepository
 
 DISCOVERY_SCAN_UNIVERSE_CODE = "DISCOVERY_SCAN"
@@ -162,22 +168,42 @@ def run_market_discovery_analysis_scan(
                 market_data_service=market_data_service,
                 config=scan_config,
             )
-            member_signal_ids = persist_candidates(part.candidates, set())
-            if member_signal_ids:
-                lifecycle_events.extend(
+            try:
+                member_signal_ids = persist_candidates(part.candidates, set())
+                events = (
                     reconcile_persisted_signals(
                         db, member_signal_ids, stability_minutes=30
                     )
+                    if member_signal_ids
+                    else []
                 )
-            expired_signals += expire_evaluated_signals(db, part, member_signal_ids)
-            for failure in part.failures:
+                expired = expire_evaluated_signals(db, part, member_signal_ids)
+                for failure in part.failures:
+                    repository.record_scan_failure(
+                        run_id=run_id,
+                        instrument_id=failure.instrument_id,
+                        symbol=failure.symbol,
+                        reason=failure.reason,
+                    )
+                db.commit()
+            except Exception as error:
+                db.rollback()
+                failure = ScanFailure(
+                    instrument_id=member.instrument_id,
+                    symbol=member.symbol,
+                    reason=f"Persistence failed: {error}"[:500],
+                )
                 repository.record_scan_failure(
                     run_id=run_id,
                     instrument_id=failure.instrument_id,
                     symbol=failure.symbol,
                     reason=failure.reason,
                 )
-            db.commit()
+                db.commit()
+                part = ScanResult(processed=1, candidates=(), failures=(failure,))
+            else:
+                lifecycle_events.extend(events)
+                expired_signals += expired
             parts.append(part)
 
         scan_result = ScanResult(

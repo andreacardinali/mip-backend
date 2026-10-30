@@ -89,3 +89,30 @@ def test_filings_persist_explicit_timestamptz(sync_module):
     statement, params = db.execute.call_args.args
     assert "CAST(:accepted_at AS timestamptz)" in str(statement)
     assert params["accepted_at"] == instant
+
+
+def test_source_commits_each_row_and_continues_after_persistence_failure(sync_module):
+    events = []
+    db = Mock()
+    db.commit.side_effect = lambda: events.append("commit")
+    db.rollback.side_effect = lambda: events.append("rollback")
+    run_source = sync_module["_run_source"]
+    run_source.__globals__["SessionLocal"] = lambda: db
+    rows = [{"symbol": symbol} for symbol in ("FIRST", "BAD", "THIRD")]
+
+    def persist(session, items):
+        assert session is db
+        assert len(items) == 1
+        symbol = items[0]["symbol"]
+        events.append(symbol)
+        if symbol == "BAD":
+            raise RuntimeError("invalid row")
+        return 1
+
+    result = run_source("test", lambda: rows, lambda items: items, persist)
+    assert result["status"] == "PARTIAL"
+    assert result["received"] == result["eligible"] == 3
+    assert result["upserted"] == 2
+    assert result["failed"] == 1
+    assert events == ["FIRST", "commit", "BAD", "rollback", "THIRD", "commit"]
+    db.close.assert_called_once()

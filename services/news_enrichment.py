@@ -1,6 +1,6 @@
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from sqlalchemy import text
@@ -144,7 +144,7 @@ def _parse_scores(data, expected_ids):
 
 
 def _persist_scores(db, scores):
-    payload = [score.__dict__ for score in scores]
+    payload = [asdict(score) for score in scores]
     return int(
         db.execute(
             text("SELECT public.sp_news_update_entity_scores(CAST(:scores AS jsonb))"),
@@ -177,10 +177,6 @@ def _score_batch(db, *, provider: LLMProvider, rows, max_tokens, stats):
             )
         )
         scores = _parse_scores(response.data, expected)
-        with db.begin_nested():
-            updated = _persist_scores(db, scores)
-        db.commit()
-        stats.scored += updated
     except Exception as error:
         if db.in_transaction():
             db.rollback()
@@ -208,6 +204,19 @@ def _score_batch(db, *, provider: LLMProvider, rows, max_tokens, stats):
             max_tokens=max_tokens,
             stats=stats,
         )
+        return
+
+    for score in scores:
+        try:
+            updated = _persist_scores(db, [score])
+            db.commit()
+            stats.scored += updated
+        except Exception:
+            db.rollback()
+            stats.failed_items += 1
+            logger.exception(
+                "News score persistence failed news_entity_id=%s", score.news_entity_id
+            )
 
 
 def enrich_news(db: Session):

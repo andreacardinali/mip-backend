@@ -36,7 +36,9 @@ class UpcomingCatalystBranch:
         template = context.prompts.get("upcoming")
         collector = MarketEvidenceCollector(context.market_data, context.config)
         economic_events = collector.common_economic_events()
-        writer = IncrementalNotificationWriter(context.notification_queue)
+        writer = IncrementalNotificationWriter(
+            context.notification_queue, db=context.db
+        )
         progress = BatchProgress(
             job="portfolio_intelligence_upcoming_catalyst",
             total_items=len(candidates),

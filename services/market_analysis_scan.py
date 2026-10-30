@@ -13,7 +13,13 @@ from market_analysis.quant_prefilter import (
     score_evaluated_signal,
 )
 from market_analysis.repository import MarketAnalysisRepository
-from market_analysis.scan import ScanConfig, ScanMember, ScanResult, scan_members
+from market_analysis.scan import (
+    ScanConfig,
+    ScanFailure,
+    ScanMember,
+    ScanResult,
+    scan_members,
+)
 
 
 def run_market_analysis_scan(
@@ -89,47 +95,65 @@ def run_member_analysis_scan(
                     market_data_service=market_data_service,
                     config=effective_config,
                 )
-                member_signal_ids = []
-                for evaluated in part.candidates:
-                    quant_score, breakdown = score_evaluated_signal(
-                        evaluated, config=quant_config
-                    )
-                    candidate = replace(
-                        evaluated.candidate,
-                        evidence={
-                            **evaluated.candidate.evidence,
-                            "quant": {
-                                "score": quant_score,
-                                "breakdown": breakdown,
-                                "llm_eligible": False,
-                            },
-                        },
-                    )
-                    member_signal_ids.append(
-                        repository.upsert_signal(
-                            instrument_id=member.instrument_id,
-                            universe_id=member.universe_id,
-                            candidate=candidate,
-                            scores=evaluated.scores.to_dict(),
+                try:
+                    member_signal_ids = []
+                    for evaluated in part.candidates:
+                        quant_score, breakdown = score_evaluated_signal(
+                            evaluated, config=quant_config
                         )
-                    )
-                if member_signal_ids:
-                    member_lifecycle_events.extend(
+                        candidate = replace(
+                            evaluated.candidate,
+                            evidence={
+                                **evaluated.candidate.evidence,
+                                "quant": {
+                                    "score": quant_score,
+                                    "breakdown": breakdown,
+                                    "llm_eligible": False,
+                                },
+                            },
+                        )
+                        member_signal_ids.append(
+                            repository.upsert_signal(
+                                instrument_id=member.instrument_id,
+                                universe_id=member.universe_id,
+                                candidate=candidate,
+                                scores=evaluated.scores.to_dict(),
+                            )
+                        )
+                    events = (
                         reconcile_persisted_signals(
                             db, member_signal_ids, stability_minutes=30
                         )
+                        if member_signal_ids
+                        else []
                     )
-                member_expired_signals += expire_evaluated_signals(
-                    db, part, member_signal_ids
-                )
-                for failure in part.failures:
+                    expired = expire_evaluated_signals(db, part, member_signal_ids)
+                    for failure in part.failures:
+                        repository.record_scan_failure(
+                            run_id=run_id,
+                            instrument_id=failure.instrument_id,
+                            symbol=failure.symbol,
+                            reason=failure.reason,
+                        )
+                    db.commit()
+                except Exception as error:
+                    db.rollback()
+                    failure = ScanFailure(
+                        instrument_id=member.instrument_id,
+                        symbol=member.symbol,
+                        reason=f"Persistence failed: {error}"[:500],
+                    )
                     repository.record_scan_failure(
                         run_id=run_id,
                         instrument_id=failure.instrument_id,
                         symbol=failure.symbol,
                         reason=failure.reason,
                     )
-                db.commit()
+                    db.commit()
+                    part = ScanResult(processed=1, candidates=(), failures=(failure,))
+                else:
+                    member_lifecycle_events.extend(events)
+                    member_expired_signals += expired
                 parts.append(part)
                 if on_progress:
                     on_progress(index + 1, len(members), member.symbol)
@@ -142,7 +166,9 @@ def run_member_analysis_scan(
             )
         else:
             result = scan_members(
-                members, market_data_service=market_data_service, config=effective_config
+                members,
+                market_data_service=market_data_service,
+                config=effective_config,
             )
         quant_results = prefilter_evaluated_signals(
             result.candidates, config=quant_config

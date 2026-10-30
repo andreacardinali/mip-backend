@@ -56,9 +56,11 @@ def refresh_exchange_rates(
                     },
                 )
 
+            db.commit()
             updated += 1
 
         except Exception as exc:
+            db.rollback()
             errors.append(
                 {
                     "currency_code": currency_code,

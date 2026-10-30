@@ -1,7 +1,9 @@
 import unittest
+from unittest.mock import Mock
 
 from job_runtime.collections import batched, deduplicate_by
 from job_runtime.models import JobStatus
+from jobs.portfolio_intelligence.incremental import IncrementalNotificationWriter
 from jobs.portfolio_intelligence.messages import (
     format_breaking_catalyst_message,
     format_daily_mover_message,
@@ -11,9 +13,28 @@ from jobs.portfolio_intelligence.scoring import (
     breaking_catalyst_severity,
     upcoming_catalyst_severity,
 )
+from notifications.models import EnqueueResult, EnqueueStatus
 
 
 class RefactorTests(unittest.TestCase):
+    def test_incremental_writer_commits_and_retries_failed_keys(self):
+        db = Mock()
+        queue = Mock()
+        queue.enqueue.side_effect = [
+            EnqueueResult(EnqueueStatus.CREATED, notification_id="first"),
+            RuntimeError("write failed"),
+            EnqueueResult(EnqueueStatus.CREATED, notification_id="second"),
+        ]
+        writer = IncrementalNotificationWriter(queue, db=db)
+        self.assertTrue(writer.enqueue(notification_key="FIRST"))
+        db.commit.assert_called_once()
+        with self.assertRaisesRegex(RuntimeError, "write failed"):
+            writer.enqueue(notification_key="SECOND")
+        db.rollback.assert_called_once()
+        self.assertTrue(writer.enqueue(notification_key="SECOND"))
+        self.assertFalse(writer.enqueue(notification_key="FIRST"))
+        self.assertEqual(db.commit.call_count, 2)
+
     def test_batched_validates_size(self):
         with self.assertRaises(ValueError):
             list(batched([1, 2], 0))
