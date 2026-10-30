@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 from uuid import UUID
@@ -91,5 +92,48 @@ def test_scheduler_contended_manual_run_is_deferred_and_releases_connection(
     repository.defer_manual_request.assert_called_once_with(UUID(RUN_ID))
     repository.start_run.assert_not_called()
     db.commit.assert_called_once()
+    db.close.assert_called_once()
+    connection.close.assert_called_once()
+
+
+@pytest.mark.parametrize("manual_request", [False, True])
+def test_scheduler_skipped_worker_preserves_result_without_failure(
+    monkeypatch, manual_request
+):
+    import scheduler
+
+    db = MagicMock()
+    connection = MagicMock()
+    connection.execute.return_value.scalar_one.return_value = True
+    result = {"status": "SKIPPED", "reason": "analysis_already_running"}
+    worker = MagicMock(return_value=result)
+    monkeypatch.setattr(scheduler, "SessionLocal", lambda: db)
+    monkeypatch.setattr(
+        scheduler, "engine", SimpleNamespace(connect=lambda: connection)
+    )
+    monkeypatch.setattr(
+        scheduler.importlib,
+        "import_module",
+        lambda name: SimpleNamespace(run=worker),
+    )
+
+    assert scheduler.execute_job(
+        JOB_ID, "jobs.market_screener_pipeline.worker", RUN_ID, manual_request
+    ) == result
+
+    completion = db.execute.call_args_list[1]
+    assert "sp_complete_scheduler_job" in str(completion.args[0])
+    parameters = completion.args[1]
+    assert parameters["status"] == "SUCCESS"
+    assert parameters["error"] is None
+    assert json.loads(parameters["result"]) == result
+    assert db.execute.call_count == (3 if manual_request else 2)
+    if manual_request:
+        assert "sp_scheduler_complete_job_run_request" in str(
+            db.execute.call_args_list[2].args[0]
+        )
+    worker.assert_called_once_with()
+    db.rollback.assert_not_called()
+    assert db.commit.call_count == 2
     db.close.assert_called_once()
     connection.close.assert_called_once()

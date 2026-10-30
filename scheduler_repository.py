@@ -119,6 +119,8 @@ class SchedulerRepository:
         database_status = status.strip().upper()
         if database_status == "INCOMPLETE":
             database_status = "PARTIAL"
+        elif database_status == "SKIPPED":
+            database_status = "SUCCESS"
         payload = json.dumps(result, default=str) if result is not None else None
         self.db.execute(
             text(

@@ -106,6 +106,7 @@ def execute_job(
             "PARTIAL",
             "FAILED",
             "INCOMPLETE",
+            "SKIPPED",
         }
         if result_status not in supported_statuses:
             raise ValueError(f"Unsupported job result status: {result_status}")
