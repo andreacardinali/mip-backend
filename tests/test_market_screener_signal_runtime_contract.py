@@ -26,12 +26,12 @@ def test_screener_analysis_timestamp_matches_schema_and_replaces_visible_rank() 
     assert "r.status = 'COMPLETED'" in timestamp_body
     assert "(r.summary -> 'evaluated_instrument_ids') ? instrument.instrument_id::text" in timestamp_body
     page = Path("../mip-frontend/src/pages/ScreenerPage.tsx").read_text(encoding="utf-8")
-    assert 'field: "last_analysis_at", headerName: "Ultima analisi"' in page
-    assert 'type: "dateTime"' in page
+    columns = page.split("const columns:", 1)[1].split("\n  ];", 1)[0]
+    assert 'field: "last_analysis_at", headerName: "Ultima analisi"' in columns
+    assert 'type: "dateTime"' in columns
     assert 'ranking_position: false' in page
-    columns = page.split("const columns:", 1)[1].split("const changeColumns:", 1)[0]
     assert 'headerName: "#"' not in columns
-    assert 'value ? value.toLocaleString("it-IT") : "N/D"' in page
+    assert 'value ? value.toLocaleString("it-IT") : "N/D"' in columns
 
 
 @pytest.mark.parametrize(
