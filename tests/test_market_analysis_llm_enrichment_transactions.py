@@ -6,8 +6,10 @@ from services import market_analysis_llm_enrichment as service
 from services.market_analysis_llm_enrichment import run_market_analysis_llm_enrichment
 
 
+@pytest.mark.parametrize("interval", [None, "45", "0"])
 def test_configured_enrichment_skips_provider_when_context_has_no_candidates(
     monkeypatch,
+    interval,
 ):
     def unexpected_provider(config):
         raise AssertionError("No provider should be created for an empty context")
@@ -19,6 +21,11 @@ def test_configured_enrichment_skips_provider_when_context_has_no_candidates(
             "MARKET_ANALYSIS_ENRICHMENT_RUN_MAX_SIGNALS": 7,
             "MARKET_ANALYSIS_ENRICHMENT_LLM_MODEL": "test-model",
             "MARKET_ANALYSIS_ENRICHMENT_LLM_BASE_URL": "http://localhost:11434",
+            **(
+                {"MARKET_ANALYSIS_ENRICHMENT_MIN_INTERVAL_MINUTES": interval}
+                if interval is not None
+                else {}
+            ),
         },
         load_candidates=lambda **kwargs: calls.append(kwargs) or [],
         persist_enrichment=lambda *args, **kwargs: False,
@@ -26,8 +33,68 @@ def test_configured_enrichment_skips_provider_when_context_has_no_candidates(
     assert result["status"] == "SUCCESS"
     assert result["selected"] == result["enriched"] == result["failed"] == 0
     assert calls == [
-        {"contract_fingerprint": result["enrichment_fingerprint"], "limit": 7}
+        {
+            "contract_fingerprint": result["enrichment_fingerprint"],
+            "limit": 7,
+            "min_interval_minutes": 30 if interval is None else int(interval),
+        }
     ]
+
+
+@pytest.mark.parametrize("interval", ["-1", "invalid", "1.5", ""])
+def test_invalid_freshness_interval_does_not_load_candidates(monkeypatch, interval):
+    def unexpected(*args, **kwargs):
+        raise AssertionError("Invalid interval must not access candidates or provider")
+
+    monkeypatch.setattr(service, "create_provider", unexpected)
+    result = service.run_configured_market_analysis_llm_enrichment(
+        settings={
+            "MARKET_ANALYSIS_ENRICHMENT_LLM_MODEL": "test-model",
+            "MARKET_ANALYSIS_ENRICHMENT_LLM_BASE_URL": "http://localhost:11434",
+            "MARKET_ANALYSIS_ENRICHMENT_MIN_INTERVAL_MINUTES": interval,
+        },
+        load_candidates=unexpected,
+        persist_enrichment=unexpected,
+    )
+    assert result == {"status": "FAILED", "reason": "invalid_configuration"}
+
+
+@pytest.mark.parametrize("context", [False, True])
+def test_candidate_repository_passes_freshness_interval_to_sql(context):
+    from market_analysis.llm_enrichment_repository import (
+        MarketAnalysisLLMEnrichmentRepository,
+    )
+
+    calls = []
+
+    class Result:
+        def mappings(self):
+            return []
+
+        def scalars(self):
+            return []
+
+    class Database:
+        def execute(self, statement, parameters):
+            calls.append((str(statement), parameters))
+            return Result()
+
+    repository = MarketAnalysisLLMEnrichmentRepository(Database())
+    parameters = {
+        "enrichment_fingerprint": "fingerprint",
+        "limit": 7,
+        "min_interval_minutes": 45,
+    }
+    if context:
+        parameters.update(user_id="owner", context_type="WATCHLIST", context_id="list")
+        assert repository.list_pending_context(**parameters) == []
+    else:
+        assert repository.list_pending(**parameters) == []
+    statement, bound_parameters = calls[0]
+    assert "CAST(:min_interval_minutes AS integer)" in statement
+    assert bound_parameters == parameters
+    if not context:
+        assert "NULL::uuid[]" in statement
 
 
 def test_configured_enrichment_reuses_fingerprint_and_persistence(monkeypatch):

@@ -73,12 +73,13 @@ def analyze_screener_context(
 
         enrichment_repository = MarketAnalysisLLMEnrichmentRepository(db)
 
-        def load_candidates(*, contract_fingerprint, limit):
+        def load_candidates(*, contract_fingerprint, limit, min_interval_minutes=30):
             with db.begin_nested():
                 return enrichment_repository.list_pending_context(
                     **context,
                     enrichment_fingerprint=contract_fingerprint,
                     limit=limit,
+                    min_interval_minutes=min_interval_minutes,
                 )
 
         def persist(signal, enrichment, analysis, composite, *, contract_fingerprint):

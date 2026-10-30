@@ -458,6 +458,7 @@ def test_manual_context_scan_records_history_in_callers_transaction(
             **context,
             "enrichment_fingerprint": "fingerprint",
             "limit": 7,
+            "min_interval_minutes": 45,
         }
         return [{"signal_id": "signal"}]
 
@@ -471,7 +472,9 @@ def test_manual_context_scan_records_history_in_callers_transaction(
         calls.append("ai")
         if outcome == "ai_failure":
             raise RuntimeError("private provider details")
-        signal = load_candidates(contract_fingerprint="fingerprint", limit=7)[0]
+        signal = load_candidates(
+            contract_fingerprint="fingerprint", limit=7, min_interval_minutes=45
+        )[0]
         assert persist_enrichment(
             signal,
             SimpleNamespace(llm_score=75),

@@ -11,17 +11,22 @@ class MarketAnalysisLLMEnrichmentRepository:
         self.db = db
 
     def list_pending(
-        self, *, enrichment_fingerprint: str, limit: int
+        self, *, enrichment_fingerprint: str, limit: int, min_interval_minutes: int = 30
     ) -> list[dict[str, Any]]:
         rows = self.db.execute(
             text(
                 """
                 SELECT * FROM public.sp_market_analysis_list_pending_llm_enrichment(
-                    CAST(:enrichment_fingerprint AS varchar), CAST(:limit AS integer)
+                    CAST(:enrichment_fingerprint AS varchar), CAST(:limit AS integer),
+                    NULL::uuid[], CAST(:min_interval_minutes AS integer)
                 )
             """
             ),
-            {"enrichment_fingerprint": enrichment_fingerprint, "limit": limit},
+            {
+                "enrichment_fingerprint": enrichment_fingerprint,
+                "limit": limit,
+                "min_interval_minutes": min_interval_minutes,
+            },
         ).mappings()
         return [dict(row) for row in rows]
 
@@ -33,6 +38,7 @@ class MarketAnalysisLLMEnrichmentRepository:
         context_id: str,
         enrichment_fingerprint: str,
         limit: int,
+        min_interval_minutes: int = 30,
     ) -> list[dict[str, Any]]:
         return list(
             self.db.execute(
@@ -41,7 +47,7 @@ class MarketAnalysisLLMEnrichmentRepository:
                 SELECT * FROM public.sp_market_analysis_list_pending_context_llm_enrichment(
                     CAST(:enrichment_fingerprint AS varchar), CAST(:user_id AS uuid),
                     CAST(:context_type AS varchar), CAST(:context_id AS uuid),
-                    CAST(:limit AS integer)
+                    CAST(:limit AS integer), CAST(:min_interval_minutes AS integer)
                 )
             """
                 ),
@@ -51,6 +57,7 @@ class MarketAnalysisLLMEnrichmentRepository:
                     context_id=context_id,
                     enrichment_fingerprint=enrichment_fingerprint,
                     limit=limit,
+                    min_interval_minutes=min_interval_minutes,
                 ),
             ).scalars()
         )

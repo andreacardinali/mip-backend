@@ -22,6 +22,13 @@ signals through batch splitting. A later analysis can try the endpoint again;
 this is not a persistent endpoint cooldown. Scheduled pipelines retain their
 explicit `MARKET_SCREENER_PIPELINE_STOP_ON_ERROR` policy (default: false).
 
+Set `MARKET_ANALYSIS_ENRICHMENT_MIN_INTERVAL_MINUTES=30` in `.env` to configure
+the AI freshness safeguard for manual context/entity analyses and scheduled
+enrichment jobs. The default is 30 minutes when omitted. Values must be
+nonnegative integers; `0` disables the time-based safeguard (other candidate
+eligibility rules still apply). Invalid values return `invalid_configuration`
+without loading AI candidates or calling the provider.
+
 ## Temporary Development Utilities
 
 MIP currently has a single live development instance. Periodic database dumps
