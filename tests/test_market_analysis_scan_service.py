@@ -64,3 +64,50 @@ def test_universe_delegates_to_shared_member_scan(monkeypatch) -> None:
     ) == {"status": "SUCCESS"}
     assert captured["universe_id"] == "u"
     assert captured["members"][0].symbol == "AAPL"
+    assert captured["incremental"] is True
+
+
+def test_incremental_scan_commits_each_member_before_loading_next(monkeypatch):
+    from types import SimpleNamespace
+
+    import pytest
+
+    from market_analysis.scan import ScanResult
+    from services import market_analysis_scan as service
+
+    events = []
+
+    class Repository:
+        def __init__(self, db):
+            pass
+
+        def start_scan_run(self, **kwargs):
+            return "run"
+
+        def finish_scan_run(self, **kwargs):
+            events.append(kwargs["status"])
+
+    def scan(members, **kwargs):
+        events.append(members[0].symbol)
+        if members[0].symbol == "SECOND":
+            assert events[-2] == "commit"
+            raise RuntimeError("interrupted")
+        return ScanResult(processed=1, candidates=(), failures=())
+
+    monkeypatch.setattr(service, "MarketAnalysisRepository", Repository)
+    monkeypatch.setattr(service, "scan_members", scan)
+    monkeypatch.setattr(service, "expire_evaluated_signals", lambda *args: 0)
+    db = SimpleNamespace(
+        commit=lambda: events.append("commit"),
+        rollback=lambda: events.append("rollback"),
+    )
+    with pytest.raises(RuntimeError, match="interrupted"):
+        service.run_member_analysis_scan(
+            db,
+            market_data_service=object(),
+            universe_id="universe",
+            universe_code="context",
+            members=[SimpleNamespace(symbol="FIRST"), SimpleNamespace(symbol="SECOND")],
+            incremental=True,
+        )
+    assert events == ["commit", "FIRST", "commit", "SECOND", "rollback", "FAILED", "commit"]

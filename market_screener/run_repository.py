@@ -24,6 +24,24 @@ class MarketScreenerRunRepository:
             text("SELECT public.sp_market_screener_start_run()")
         ).scalar_one()
 
+    def session_analysis_lock(self, *, release: bool = False) -> bool:
+        return bool(self.db.execute(
+            text("SELECT public.sp_market_screener_session_analysis_lock(:release)"),
+            {"release": release},
+        ).scalar_one())
+
+    def progress(self, *, run_id: UUID, phase_results: dict[str, Any]) -> None:
+        self.db.execute(
+            text("SELECT public.sp_market_screener_update_progress(CAST(:run_id AS uuid), CAST(:phases AS jsonb))"),
+            {"run_id": str(run_id), "phases": json.dumps(phase_results, default=str)},
+        )
+
+    def context_progress(self, *, user_id: str, context_type: str, context_id: str):
+        return self.db.execute(
+            text("SELECT public.sp_market_screener_context_progress(CAST(:user_id AS uuid), CAST(:context_type AS varchar), CAST(:context_id AS uuid))"),
+            {"user_id": user_id, "context_type": context_type, "context_id": context_id},
+        ).scalar_one_or_none()
+
     def complete(
         self,
         *,

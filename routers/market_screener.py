@@ -11,6 +11,7 @@ from auth.security import CurrentUser, get_current_user
 from db import SessionLocal
 from market_analysis.lifecycle_repository import SignalLifecycleRepository
 from market_screener.api_repository import MarketScreenerApiRepository
+from market_screener.run_repository import MarketScreenerRunRepository
 
 router = APIRouter()
 
@@ -56,6 +57,29 @@ def list_screener_contexts(current_user: CurrentUser = Depends(get_current_user)
         db.close()
 
 
+@router.get("/contexts/{context_type}/{context_id}/progress")
+def context_analysis_progress(
+    context_type: ScreenerContextType,
+    context_id: UUID,
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    db = SessionLocal()
+    try:
+        context = dict(
+            user_id=current_user["user_id"],
+            context_type=context_type,
+            context_id=str(context_id),
+        )
+        MarketScreenerApiRepository(db).context_instruments(**context)
+        return MarketScreenerRunRepository(db).context_progress(**context)
+    except DBAPIError as error:
+        if getattr(error.orig, "pgcode", None) == "P0002":
+            raise HTTPException(404, "Context not found") from error
+        raise
+    finally:
+        db.close()
+
+
 @router.post("/analyze")
 def analyze_screener(
     request: ScreenerAnalysisRequest,
@@ -64,27 +88,32 @@ def analyze_screener(
     from config.settings import settings
     from market_analysis.scan import ScanConfig
     from market_data.factory import market_data
+    from market_screener.coordination import hold_incremental_analysis_lock
     from market_screener.service import analyze_screener_context
 
     db = SessionLocal()
     try:
-        result = analyze_screener_context(
-            db,
-            user_id=current_user["user_id"],
-            context_type=request.context_type,
-            context_id=str(request.context_id),
-            market_data_service=market_data,
-            config=ScanConfig.from_settings(settings),
-            llm_enabled=str(settings.get("MARKET_SCREENER_PIPELINE_LLM_ENABLED", True))
-            .strip()
-            .lower()
-            in {"1", "true", "yes", "on"},
-            llm_settings=settings,
-        )
-        db.commit()
+        with hold_incremental_analysis_lock(db):
+            result = analyze_screener_context(
+                db,
+                user_id=current_user["user_id"],
+                context_type=request.context_type,
+                context_id=str(request.context_id),
+                market_data_service=market_data,
+                config=ScanConfig.from_settings(settings),
+                llm_enabled=str(settings.get("MARKET_SCREENER_PIPELINE_LLM_ENABLED", True))
+                .strip()
+                .lower()
+                in {"1", "true", "yes", "on"},
+                llm_settings=settings,
+                incremental=True,
+            )
+            db.commit()
         return result
     except ValueError as error:
         db.rollback()
+        if str(error) == "Analysis already running":
+            raise HTTPException(409, str(error)) from error
         raise HTTPException(422, str(error)) from error
     except DBAPIError as error:
         db.rollback()

@@ -35,6 +35,7 @@ FUNCTION_NAMES = (
 
 FUNCTION_OVERLOADS = {
     "sp_market_analysis_list_pending_llm_enrichment": (
+        "p_enrichment_fingerprint character varying, p_limit integer, p_instrument_ids uuid[], p_min_interval_minutes integer",
         "p_enrichment_fingerprint character varying, p_limit integer, p_instrument_ids uuid[]",
         "p_enrichment_fingerprint character varying, p_limit integer DEFAULT 25",
     ),

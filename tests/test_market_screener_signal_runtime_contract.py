@@ -683,6 +683,7 @@ def test_screener_context_http_contract(
             "config": config,
             "llm_enabled": llm_enabled,
             "llm_settings": settings,
+            "incremental": True,
         }
         calls.append("analyze")
         if scenario == "analyze_missing":
@@ -739,6 +740,9 @@ def test_screener_context_http_contract(
         },
         "market_data.factory": {"market_data": provider},
         "market_screener.service": {"analyze_screener_context": analyze},
+        "market_screener.coordination": {
+            "hold_incremental_analysis_lock": lambda session: nullcontext(),
+        },
     }
     with monkeypatch.context() as patch:
         for name, attributes in modules.items():

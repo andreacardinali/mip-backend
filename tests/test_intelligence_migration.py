@@ -41,12 +41,14 @@ def test_enrichment_overloads_install_shared_selection_before_wrapper():
             "CREATE OR REPLACE FUNCTION public.sp_market_analysis_list_pending_llm_enrichment("
         )
     ]
-    assert len(statements) == 2
-    assert "p_instrument_ids uuid[]) RETURNS" in statements[0]
+    assert len(statements) == 3
+    assert "p_min_interval_minutes integer) RETURNS" in statements[0]
     assert "{quant,llm_eligible}" in statements[0]
     assert "s.strategy_code <> 'SWING_EXIT'" in statements[0]
-    assert "p_limit integer DEFAULT 25) RETURNS" in statements[1]
-    assert "p_enrichment_fingerprint, p_limit, NULL::uuid[]" in statements[1]
+    assert "p_instrument_ids uuid[]) RETURNS" in statements[1]
+    assert "p_instrument_ids, 30" in statements[1]
+    assert "p_limit integer DEFAULT 25) RETURNS" in statements[2]
+    assert "p_enrichment_fingerprint, p_limit, NULL::uuid[]" in statements[2]
 
 
 @pytest.mark.parametrize("change", ["missing", "duplicate", "unreviewed"])

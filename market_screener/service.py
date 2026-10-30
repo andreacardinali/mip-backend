@@ -24,6 +24,7 @@ def analyze_screener_context(
     config: ScanConfig,
     llm_enabled: bool = False,
     llm_settings=None,
+    incremental: bool = False,
 ) -> dict[str, Any]:
     repository = MarketScreenerApiRepository(db)
     context = dict(user_id=user_id, context_type=context_type, context_id=context_id)
@@ -35,6 +36,22 @@ def analyze_screener_context(
     universe_id = repository.prepare_context_scan(**context)
     runs = MarketScreenerRunRepository(db)
     run_id = runs.start()
+
+    def progress(completed, total, symbol):
+        runs.progress(
+            run_id=run_id,
+            phase_results={
+                "context": context,
+                "progress": {
+                    "phase": "TECHNICAL",
+                    "completed": completed,
+                    "total": total,
+                    "symbol": symbol,
+                },
+            },
+        )
+        db.commit()
+
     scan = run_member_analysis_scan(
         db,
         market_data_service=market_data_service,
@@ -42,6 +59,7 @@ def analyze_screener_context(
         universe_code=f"CONTEXT_{context_type}_{context_id}",
         members=[ScanMember(universe_id=universe_id, **item) for item in instruments],
         config=config,
+        **({"incremental": True, "on_progress": progress} if incremental else {}),
     )
     phases = {"context": context, "analysis_scan": scan}
     status = scan["status"]
@@ -65,13 +83,16 @@ def analyze_screener_context(
 
         def persist(signal, enrichment, analysis, composite, *, contract_fingerprint):
             with db.begin_nested():
-                return enrichment_repository.apply(
+                persisted = enrichment_repository.apply(
                     signal_id=str(signal["signal_id"]),
                     enrichment_fingerprint=contract_fingerprint,
                     llm_score=enrichment.llm_score,
                     llm_analysis=analysis,
                     composite_score=composite,
                 )
+            if incremental:
+                db.commit()
+            return persisted
 
         try:
             phases["llm_enrichment"] = run_configured_market_analysis_llm_enrichment(

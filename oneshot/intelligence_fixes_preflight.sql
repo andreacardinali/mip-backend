@@ -1,5 +1,8 @@
 SET LOCAL lock_timeout = '10s';
 
+ALTER TABLE public.trading_signals
+    ADD COLUMN IF NOT EXISTS last_llm_analysis_at timestamptz;
+
 ALTER TABLE public.positions
     ADD COLUMN IF NOT EXISTS cost_basis_amount numeric(20,8),
     ADD COLUMN IF NOT EXISTS cost_basis_currency character(3);
