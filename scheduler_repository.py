@@ -15,6 +15,13 @@ class SchedulerRepository:
         rows = self.db.execute(text("SELECT * FROM sp_get_enabled_scheduler_jobs()"))
         return [dict(row) for row in rows.mappings().all()]
 
+    def get_requester_username(self, user_id: str) -> str | None:
+        with self.db.begin_nested():
+            return self.db.execute(
+                text("SELECT username FROM public.sp_get_user_context(CAST(:user_id AS uuid))"),
+                {"user_id": user_id},
+            ).scalar_one_or_none()
+
     def claim_manual_runs(self, limit: int = 5) -> list[dict[str, Any]]:
         rows = self.db.execute(
             text("SELECT * FROM public.sp_scheduler_claim_execution_requests(:limit)"),

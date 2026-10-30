@@ -93,6 +93,13 @@ def execute_job(
         db.commit()
         run_started = True
 
+        requester_label = requested_by or "-"
+        if requested_by:
+            try:
+                requester_label = repository.get_requester_username(str(requested_by)) or requester_label
+            except Exception:
+                logger.warning("Unable to resolve job requester username user_id=%s", requested_by)
+
         logger.info(
             "Job execution started job_id=%s run_id=%s module=%s caller=%s source=%s requested_by=%s parent_run_id=%s",
             job_id,
@@ -100,7 +107,7 @@ def execute_job(
             python_module,
             caller,
             request_source or caller,
-            requested_by or "-",
+            requester_label,
             parent_job_run_id or "-",
         )
 

@@ -20,6 +20,10 @@ execution status, result and error; another user's execution returns 404.
 
 Each started job logs its caller (`MANUAL`, `SCHEDULE`, or `JOB` for a nested
 execution), request source, requesting user and parent run ID when present.
+The `requested_by` log field shows the username resolved through the existing
+`sp_get_user_context` routine, falling back to the UUID when the user is missing
+or the lookup fails. Lookup failures do not stop execution; stored request IDs
+and the worker request context retain the original UUID.
 These entries are included in the existing persisted run logs. Lock acquisition
 and contention handling are unchanged.
 

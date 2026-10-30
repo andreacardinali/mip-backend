@@ -475,12 +475,16 @@ def test_scheduler_contended_manual_run_is_deferred_and_releases_connection(
 
 @pytest.mark.parametrize("fails", [False, True])
 @pytest.mark.parametrize("caller", ["MANUAL", "SCHEDULE", "JOB"])
-def test_scheduler_request_context_is_available_and_reset(monkeypatch, fails, caller):
+@pytest.mark.parametrize("requester_lookup", ["found", "missing", "error"])
+def test_scheduler_request_context_is_available_and_reset(monkeypatch, fails, caller, requester_lookup):
     import scheduler
     from job_runtime.requests import current_job_request
 
     db = MagicMock()
     repository = MagicMock()
+    repository.get_requester_username.return_value = "admin" if requester_lookup == "found" else None
+    if requester_lookup == "error":
+        repository.get_requester_username.side_effect = RuntimeError("lookup failed")
     connection = MagicMock()
     manual_request = caller == "MANUAL"
     request = {"payload": {"context_id": JOB_ID}, "requested_by": USER_ID, "source": "SCREENER_UI"} if manual_request else None
@@ -517,11 +521,38 @@ def test_scheduler_request_context_is_available_and_reset(monkeypatch, fails, ca
         assert start_log[4:] == (
             caller,
             "SCREENER_UI" if manual_request else caller,
-            USER_ID if manual_request else "-",
+            ("admin" if requester_lookup == "found" else USER_ID) if manual_request else "-",
             parent_run_id or "-",
         )
+        if manual_request:
+            repository.get_requester_username.assert_called_once_with(USER_ID)
+        else:
+            repository.get_requester_username.assert_not_called()
     finally:
         scheduler.current_job_run_id.reset(parent_token)
+
+
+@pytest.mark.parametrize("username", ["admin", None])
+def test_scheduler_requester_username_uses_existing_user_routine(username):
+    from scheduler_repository import SchedulerRepository
+
+    db = MagicMock()
+    db.execute.return_value.scalar_one_or_none.return_value = username
+    assert SchedulerRepository(db).get_requester_username(USER_ID) == username
+    query, parameters = db.execute.call_args.args
+    assert "SELECT username FROM public.sp_get_user_context" in str(query)
+    assert parameters == {"user_id": USER_ID}
+    db.begin_nested.assert_called_once_with()
+
+
+def test_scheduler_requester_lookup_error_exits_savepoint():
+    from scheduler_repository import SchedulerRepository
+
+    db = MagicMock()
+    db.execute.side_effect = RuntimeError("lookup failed")
+    with pytest.raises(RuntimeError, match="lookup failed"):
+        SchedulerRepository(db).get_requester_username(USER_ID)
+    assert db.begin_nested.return_value.__exit__.call_args.args[0] is RuntimeError
 
 
 @pytest.mark.parametrize("manual_request", [False, True])
