@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict sxnwtcB4eyQc78SmGDWehuJ2MeatIkR3fJlYQgzac9Z9hI45Wi5WzmBHDPJRoP5
+\restrict UqRGFC32TJkKBLz2Ia7JuawF0JB95D44lkMtv9VPGqhKhRNFMtam8EHe5UhDqyW
 
 -- Dumped from database version 18.6 (Debian 18.6-1.pgdg13+2)
 -- Dumped by pg_dump version 18.6 (Debian 18.6-1.pgdg13+2)
@@ -7009,18 +7009,28 @@ $$;
 CREATE FUNCTION public.sp_market_screener_context_progress(p_user_id uuid, p_context_type character varying, p_context_id uuid) RETURNS jsonb
     LANGUAGE plpgsql STABLE
     AS $$
-DECLARE
-    v_run jsonb;
+DECLARE v_request public.scheduler_manual_run_requests; v_run jsonb; v_execution jsonb;
 BEGIN
     PERFORM 1 FROM public.sp_market_screener_context_instruments(
         p_user_id, p_context_type, p_context_id
     );
+    SELECT r.* INTO v_request FROM public.scheduler_manual_run_requests r
+    JOIN public.scheduler_jobs job ON job.job_id = r.job_id
+    WHERE job.job_key = 'market_screener_context_analysis' AND r.requested_by = p_user_id
+      AND r.payload->>'context_type' = p_context_type
+      AND r.payload->>'context_id' = p_context_id::text
+    ORDER BY r.requested_at DESC LIMIT 1;
     SELECT to_jsonb(r) INTO v_run FROM public.market_screener_runs r
     WHERE r.phase_results #>> '{context,user_id}' = p_user_id::text
       AND r.phase_results #>> '{context,context_type}' = p_context_type
       AND r.phase_results #>> '{context,context_id}' = p_context_id::text
     ORDER BY r.started_at DESC, r.screener_run_id DESC LIMIT 1;
-    RETURN v_run;
+    IF v_request.request_id IS NULL OR (
+        v_run IS NOT NULL AND (v_run->>'started_at')::timestamptz > v_request.requested_at
+        AND v_run->>'job_run_id' IS DISTINCT FROM v_request.job_run_id::text
+    ) THEN RETURN v_run; END IF;
+    v_execution := public.sp_scheduler_execution_status(v_request.job_run_id, p_user_id);
+    RETURN v_execution || jsonb_build_object('screener_run_id', v_execution->'domain_run_id');
 END;
 $$;
 
@@ -7243,6 +7253,19 @@ $$;
 CREATE FUNCTION public.sp_market_screener_enrich_snapshot_consensus_payload(p_payload jsonb, p_item_id uuid) RETURNS jsonb
     LANGUAGE sql STABLE
     AS $$ SELECT CASE WHEN p_payload IS NULL THEN NULL ELSE p_payload || jsonb_build_object('strategy_count',i.strategy_count,'bullish_strategy_count',i.bullish_strategy_count,'bearish_strategy_count',i.bearish_strategy_count,'consensus_direction',i.consensus_direction,'consensus_score',i.consensus_score,'conflict_score',i.conflict_score,'supporting_strategies',i.supporting_strategies,'opposing_strategies',i.opposing_strategies) END FROM public.market_screener_ranking_snapshot_items i WHERE i.ranking_snapshot_item_id=p_item_id $$;
+
+
+--
+-- Name: sp_market_screener_fail_job_run(uuid, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_market_screener_fail_job_run(p_job_run_id uuid, p_error text) RETURNS void
+    LANGUAGE sql
+    AS $$
+    UPDATE public.market_screener_runs SET status = 'FAILED', error_message = p_error,
+        completed_at = now(), updated_at = now()
+    WHERE job_run_id = p_job_run_id AND status = 'RUNNING';
+$$;
 
 
 --
@@ -7921,6 +7944,23 @@ SELECT jsonb_build_object(
     'changes', coalesce((SELECT jsonb_agg(payload ORDER BY ranking_position, symbol)
                         FROM changes), '[]'::jsonb)
 ) FROM current_snapshot current;
+$$;
+
+
+--
+-- Name: sp_market_screener_start_job_run(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_market_screener_start_job_run(p_job_run_id uuid) RETURNS uuid
+    LANGUAGE plpgsql
+    AS $$
+DECLARE v_run_id uuid;
+BEGIN
+    v_run_id := public.sp_market_screener_start_run();
+    UPDATE public.market_screener_runs SET job_run_id = p_job_run_id
+    WHERE screener_run_id = v_run_id;
+    RETURN v_run_id;
+END;
 $$;
 
 
@@ -9403,6 +9443,19 @@ $$;
 
 
 --
+-- Name: sp_scheduler_claim_execution_requests(integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_scheduler_claim_execution_requests(p_limit integer DEFAULT 5) RETURNS TABLE(request_id uuid, job_run_id uuid, job_id uuid, job_key character varying, job_name character varying, python_module character varying, payload jsonb, requested_by uuid, source character varying)
+    LANGUAGE sql
+    AS $$
+    SELECT c.*, r.payload, r.requested_by, r.source
+    FROM public.sp_scheduler_claim_job_runs(p_limit) c
+    JOIN public.scheduler_manual_run_requests r ON r.request_id = c.request_id;
+$$;
+
+
+--
 -- Name: sp_scheduler_claim_job_runs(integer); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -9471,6 +9524,35 @@ CREATE FUNCTION public.sp_scheduler_defer_job_run_request(p_job_run_id uuid) RET
     UPDATE public.scheduler_manual_run_requests
     SET status = 'PENDING', claimed_at = NULL
     WHERE job_run_id = p_job_run_id AND status = 'PROCESSING';
+$$;
+
+
+--
+-- Name: sp_scheduler_execution_status(uuid, uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_scheduler_execution_status(p_job_run_id uuid, p_user_id uuid) RETURNS jsonb
+    LANGUAGE sql STABLE
+    AS $$
+    SELECT jsonb_build_object(
+        'request_id', request.request_id, 'job_run_id', request.job_run_id,
+        'job_key', job.job_key, 'source', request.source,
+        'status', CASE WHEN request.status = 'PENDING' THEN 'QUEUED'
+            WHEN request.status = 'FAILED' THEN 'FAILED'
+            WHEN run.status IS NOT NULL THEN run.status
+            WHEN request.status = 'COMPLETED' THEN 'SUCCESS' ELSE 'QUEUED' END,
+        'requested_at', request.requested_at, 'started_at', run.started_at,
+        'completed_at', request.completed_at,
+        'error_message', coalesce(request.error_message, run.error_message),
+        'result', run.result, 'domain_run_id', screener.screener_run_id,
+        'phase_results', coalesce(screener.phase_results, '{}'::jsonb)
+    )
+    FROM public.scheduler_manual_run_requests request
+    JOIN public.scheduler_jobs job ON job.job_id = request.job_id
+    LEFT JOIN public.scheduler_job_runs run ON run.job_run_id = request.job_run_id
+    LEFT JOIN public.market_screener_runs screener ON screener.job_run_id = request.job_run_id
+    WHERE request.job_run_id = p_job_run_id AND request.requested_by = p_user_id
+    ORDER BY screener.started_at DESC NULLS LAST LIMIT 1;
 $$;
 
 
@@ -9612,6 +9694,47 @@ BEGIN
     WHERE job_id = p_job_id AND status = 'PROCESSING'
       AND claimed_at < now() - interval '5 minutes';
     RETURN v_recovered;
+END;
+$$;
+
+
+--
+-- Name: sp_scheduler_request_execution(character varying, uuid, jsonb, character varying); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_scheduler_request_execution(p_job_key character varying, p_requested_by uuid, p_payload jsonb, p_source character varying) RETURNS TABLE(request_id uuid, job_run_id uuid, status character varying)
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_job_id uuid;
+BEGIN
+    IF p_requested_by IS NULL OR jsonb_typeof(p_payload) IS DISTINCT FROM 'object'
+       OR p_source IS NULL OR btrim(p_source) = '' THEN
+        RAISE EXCEPTION 'Invalid execution request' USING ERRCODE = '22023';
+    END IF;
+    SELECT sj.job_id INTO v_job_id FROM public.scheduler_jobs sj
+    WHERE sj.job_key = p_job_key;
+    IF v_job_id IS NULL THEN
+        RAISE EXCEPTION 'Scheduler job not found: %', p_job_key USING ERRCODE = 'P0002';
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'mip.request.' || v_job_id::text || p_requested_by::text || p_payload::text, 0
+    ));
+    RETURN QUERY SELECT r.request_id, r.job_run_id, 'QUEUED'::varchar
+        FROM public.scheduler_manual_run_requests r
+        WHERE r.job_id = v_job_id AND r.requested_by = p_requested_by
+          AND r.payload = p_payload AND r.status IN ('PENDING', 'PROCESSING')
+        ORDER BY r.requested_at LIMIT 1;
+    IF FOUND THEN RETURN; END IF;
+    RETURN QUERY
+        INSERT INTO public.scheduler_manual_run_requests(job_id, requested_by, payload, source)
+        VALUES (v_job_id, p_requested_by, p_payload, p_source)
+        RETURNING scheduler_manual_run_requests.request_id,
+            scheduler_manual_run_requests.job_run_id, 'QUEUED'::varchar;
+    PERFORM public.sp_record_system_audit(
+        p_requested_by, 'SCHEDULER_JOB_RUN_REQUESTED', 'SCHEDULER_JOB', p_job_key,
+        jsonb_build_object('source', p_source, 'payload', p_payload)
+    );
 END;
 $$;
 
@@ -9921,8 +10044,18 @@ CREATE FUNCTION public.sp_start_scheduler_job(p_job_run_id uuid, p_job_id uuid, 
     LANGUAGE plpgsql
     AS $$
 BEGIN
-    INSERT INTO scheduler_job_runs(job_run_id, job_id, started_at, status)
-    VALUES (p_job_run_id, p_job_id, p_started_at, 'RUNNING');
+    INSERT INTO public.scheduler_job_runs AS run(job_run_id, job_id, started_at, status)
+    VALUES (p_job_run_id, p_job_id, p_started_at, 'RUNNING')
+    ON CONFLICT (job_run_id) DO UPDATE SET
+        started_at = EXCLUDED.started_at, status = 'RUNNING',
+        completed_at = NULL, error_message = NULL, result = NULL
+    WHERE run.job_id = p_job_id AND run.status = 'SUCCESS'
+      AND run.result->>'reason' = 'analysis_already_running'
+      AND EXISTS (SELECT 1 FROM public.scheduler_manual_run_requests request
+          WHERE request.job_run_id = p_job_run_id AND request.status = 'PROCESSING');
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Execution already started: %', p_job_run_id;
+    END IF;
 END;
 $$;
 
@@ -12701,6 +12834,7 @@ CREATE TABLE public.market_screener_runs (
     error_message text,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    job_run_id uuid,
     CONSTRAINT ck_market_screener_run_status CHECK (((status)::text = ANY ((ARRAY['RUNNING'::character varying, 'SUCCESS'::character varying, 'PARTIAL'::character varying, 'FAILED'::character varying])::text[])))
 );
 
@@ -13071,6 +13205,8 @@ CREATE TABLE public.scheduler_manual_run_requests (
     claimed_at timestamp with time zone,
     completed_at timestamp with time zone,
     error_message text,
+    payload jsonb DEFAULT '{}'::jsonb NOT NULL,
+    source character varying DEFAULT 'ADMIN_UI'::character varying NOT NULL,
     CONSTRAINT ck_scheduler_manual_run_status CHECK (((status)::text = ANY ((ARRAY['PENDING'::character varying, 'PROCESSING'::character varying, 'COMPLETED'::character varying, 'FAILED'::character varying])::text[])))
 );
 
@@ -14729,6 +14865,13 @@ CREATE INDEX ix_market_screener_opportunities_entity ON public.market_screener_o
 
 
 --
+-- Name: ix_market_screener_runs_job_run; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_market_screener_runs_job_run ON public.market_screener_runs USING btree (job_run_id);
+
+
+--
 -- Name: ix_market_screener_runs_started; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -16066,6 +16209,14 @@ ALTER TABLE ONLY public.market_screener_ranking_snapshots
 
 
 --
+-- Name: market_screener_runs market_screener_runs_job_run_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.market_screener_runs
+    ADD CONSTRAINT market_screener_runs_job_run_id_fkey FOREIGN KEY (job_run_id) REFERENCES public.scheduler_job_runs(job_run_id);
+
+
+--
 -- Name: market_universe_members market_universe_members_instrument_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -16429,5 +16580,5 @@ ALTER TABLE ONLY public.watchlists
 -- PostgreSQL database dump complete
 --
 
-\unrestrict sxnwtcB4eyQc78SmGDWehuJ2MeatIkR3fJlYQgzac9Z9hI45Wi5WzmBHDPJRoP5
+\unrestrict UqRGFC32TJkKBLz2Ia7JuawF0JB95D44lkMtv9VPGqhKhRNFMtam8EHe5UhDqyW
 

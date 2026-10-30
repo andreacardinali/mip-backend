@@ -39,15 +39,19 @@ def lock_identity(connection, owner: str, *, session_scoped: bool = False):
                     )
                     connection.commit()
             except Exception:
-                logger.warning("Unable to restore lock owner owner=%s", owner, exc_info=True)
+                logger.warning(
+                    "Unable to restore lock owner owner=%s", owner, exc_info=True
+                )
                 connection.invalidate()
 
 
 def log_lock_contention(connection, *, lock_name: str, owner: str, scheduler=False):
     try:
         with connection.begin_nested():
-            holders = connection.execute(
-                text("""
+            holders = (
+                connection.execute(
+                    text(
+                        """
                     WITH lock_key AS (
                         SELECT CASE WHEN :scheduler
                             THEN hashtextextended(:lock_name, 0)
@@ -69,15 +73,23 @@ def log_lock_contention(connection, *, lock_name: str, owner: str, scheduler=Fal
                       AND locks.objsubid = 1
                       AND locks.classid = ((lock_key.value >> 32) & 4294967295)::oid
                       AND locks.objid = (lock_key.value & 4294967295)::oid
-                """),
-                {"lock_name": lock_name, "scheduler": scheduler},
-            ).mappings().all()
+                """
+                    ),
+                    {"lock_name": lock_name, "scheduler": scheduler},
+                )
+                .mappings()
+                .all()
+            )
         logger.warning(
             "Lock contention lock=%s requester=%s blockers=%s",
-            lock_name, owner, [dict(holder) for holder in holders] or "released_or_not_visible",
+            lock_name,
+            owner,
+            [dict(holder) for holder in holders] or "released_or_not_visible",
         )
     except Exception:
         logger.warning(
             "Lock contention lock=%s requester=%s blockers=unavailable",
-            lock_name, owner, exc_info=True,
+            lock_name,
+            owner,
+            exc_info=True,
         )

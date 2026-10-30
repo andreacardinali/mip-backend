@@ -18,7 +18,9 @@ class SchedulerRepository:
     def get_requester_username(self, user_id: str) -> str | None:
         with self.db.begin_nested():
             return self.db.execute(
-                text("SELECT username FROM public.sp_get_user_context(CAST(:user_id AS uuid))"),
+                text(
+                    "SELECT username FROM public.sp_get_user_context(CAST(:user_id AS uuid))"
+                ),
                 {"user_id": user_id},
             ).scalar_one_or_none()
 
@@ -32,18 +34,22 @@ class SchedulerRepository:
     def request_run(
         self, *, job_key: str, requested_by: str, payload: dict[str, Any], source: str
     ) -> dict[str, Any]:
-        row = self.db.execute(
-            text(
-                "SELECT * FROM public.sp_scheduler_request_execution("
-                ":job_key, CAST(:requested_by AS uuid), CAST(:payload AS jsonb), :source)"
-            ),
-            {
-                "job_key": job_key,
-                "requested_by": requested_by,
-                "payload": json.dumps(payload),
-                "source": source,
-            },
-        ).mappings().one()
+        row = (
+            self.db.execute(
+                text(
+                    "SELECT * FROM public.sp_scheduler_request_execution("
+                    ":job_key, CAST(:requested_by AS uuid), CAST(:payload AS jsonb), :source)"
+                ),
+                {
+                    "job_key": job_key,
+                    "requested_by": requested_by,
+                    "payload": json.dumps(payload),
+                    "source": source,
+                },
+            )
+            .mappings()
+            .one()
+        )
         return dict(row)
 
     def request_status(self, *, job_run_id: str, user_id: str):

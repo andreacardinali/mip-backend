@@ -18,7 +18,11 @@ def run() -> dict:
             max_age_seconds=LIVE_PRICE_MAX_AGE_SECONDS,
         )
         db.commit()
-        return {"status": "SUCCESS", "max_age_seconds": LIVE_PRICE_MAX_AGE_SECONDS, **result}
+        return {
+            "status": "SUCCESS",
+            "max_age_seconds": LIVE_PRICE_MAX_AGE_SECONDS,
+            **result,
+        }
     except Exception:
         db.rollback()
         raise

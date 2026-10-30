@@ -57,7 +57,10 @@ def update_job(
     current_user: CurrentUser = Depends(require_admin),
 ):
     if job_key in REQUEST_ONLY_JOBS and payload.enabled:
-        raise HTTPException(status_code=422, detail="This job only accepts contextual execution requests")
+        raise HTTPException(
+            status_code=422,
+            detail="This job only accepts contextual execution requests",
+        )
     if payload.enabled is None and payload.trigger_type is None:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -138,7 +141,9 @@ def run_job_now(
     current_user: CurrentUser = Depends(require_admin),
 ):
     if job_key in REQUEST_ONLY_JOBS:
-        raise HTTPException(status_code=422, detail="Start this job from its contextual API")
+        raise HTTPException(
+            status_code=422, detail="Start this job from its contextual API"
+        )
     db = SessionLocal()
     try:
         request = SchedulerRepository(db).request_run(

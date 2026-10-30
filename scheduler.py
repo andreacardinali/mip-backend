@@ -75,8 +75,10 @@ def execute_job(
         lock_connection = engine.connect()
         if not _try_job_lock(lock_connection, job_id):
             log_lock_contention(
-                lock_connection, lock_name=f"mip.scheduler.{job_uuid}",
-                owner=f"mip:run:{job_run_id}", scheduler=True,
+                lock_connection,
+                lock_name=f"mip.scheduler.{job_uuid}",
+                owner=f"mip:run:{job_run_id}",
+                scheduler=True,
             )
             if manual_request:
                 repository.defer_manual_request(job_run_id)
@@ -96,9 +98,14 @@ def execute_job(
         requester_label = requested_by or "-"
         if requested_by:
             try:
-                requester_label = repository.get_requester_username(str(requested_by)) or requester_label
+                requester_label = (
+                    repository.get_requester_username(str(requested_by))
+                    or requester_label
+                )
             except Exception:
-                logger.warning("Unable to resolve job requester username user_id=%s", requested_by)
+                logger.warning(
+                    "Unable to resolve job requester username user_id=%s", requested_by
+                )
 
         logger.info(
             "Job execution started job_id=%s run_id=%s module=%s caller=%s source=%s requested_by=%s parent_run_id=%s",
@@ -216,7 +223,11 @@ def poll_manual_runs() -> None:
                         True,
                         {
                             "payload": request.get("payload") or {},
-                            "requested_by": str(request["requested_by"]) if request["requested_by"] else None,
+                            "requested_by": (
+                                str(request["requested_by"])
+                                if request["requested_by"]
+                                else None
+                            ),
                             "source": request["source"],
                         },
                     ],
@@ -353,7 +364,8 @@ def sync_jobs() -> None:
     repository = SchedulerRepository(db)
     try:
         desired_jobs = {
-            str(job["job_id"]): job for job in repository.get_enabled_jobs()
+            str(job["job_id"]): job
+            for job in repository.get_enabled_jobs()
             if job["python_module"] not in REQUEST_ONLY_JOBS.values()
         }
         internal_ids = {SYNC_JOB_ID, MANUAL_RUN_POLL_JOB_ID}

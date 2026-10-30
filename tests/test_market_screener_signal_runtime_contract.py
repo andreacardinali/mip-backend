@@ -380,9 +380,7 @@ def test_incremental_analysis_installer_matches_schema(scheduler_snapshot) -> No
     definitions = re.findall(pattern, installer, re.DOTALL)
     progress_definitions = [
         definition
-        for definition in re.findall(
-            pattern, scheduler_installer, re.DOTALL
-        )
+        for definition in re.findall(pattern, scheduler_installer, re.DOTALL)
         if definition[0] == "sp_market_screener_context_progress"
     ]
     assert len(progress_definitions) == 1
@@ -394,7 +392,8 @@ def test_incremental_analysis_installer_matches_schema(scheduler_snapshot) -> No
             lambda match: (
                 f"CREATE FUNCTION public.{name}({match.group(2)}) RETURNS "
                 f"{returns}AS {delimiter}{body}{delimiter};"
-                if match.group(1) == name else match.group(0)
+                if match.group(1) == name
+                else match.group(0)
             ),
             schema,
             flags=re.DOTALL,
@@ -432,7 +431,9 @@ def test_scheduler_progress_override_preserves_context_and_domain_fallback() -> 
     assert "r.payload->>'context_type' = p_context_type" in progress
     assert "r.payload->>'context_id' = p_context_id::text" in progress
     assert "v_request.request_id IS NULL" in progress
-    assert "v_run->>'job_run_id' IS DISTINCT FROM v_request.job_run_id::text" in progress
+    assert (
+        "v_run->>'job_run_id' IS DISTINCT FROM v_request.job_run_id::text" in progress
+    )
     assert "THEN RETURN v_run;" in progress
     assert "sp_scheduler_execution_status(v_request.job_run_id, p_user_id)" in progress
     assert "'screener_run_id', v_execution->'domain_run_id'" in progress
@@ -795,7 +796,9 @@ def test_screener_context_http_contract(
         if scenario in ("filter_missing", "analyze_missing"):
             raise database_error("P0002")
         if scenario.startswith("analyze") and scenario != "analyze_empty":
-            return [{"instrument_id": context_id}] * (1001 if scenario == "analyze_too_many" else 1)
+            return [{"instrument_id": context_id}] * (
+                1001 if scenario == "analyze_too_many" else 1
+            )
         return []
 
     def opportunities(**kwargs):
@@ -822,9 +825,15 @@ def test_screener_context_http_contract(
             "ScanConfig": SimpleNamespace(from_settings=lambda value: config)
         },
         "market_data.factory": {"market_data": provider},
-        "market_screener.service": {"analyze_screener_context": lambda *args, **kwargs: pytest.fail("API must not execute analysis")},
+        "market_screener.service": {
+            "analyze_screener_context": lambda *args, **kwargs: pytest.fail(
+                "API must not execute analysis"
+            )
+        },
         "scheduler_repository": {
-            "SchedulerRepository": lambda session: SimpleNamespace(request_run=request_run)
+            "SchedulerRepository": lambda session: SimpleNamespace(
+                request_run=request_run
+            )
         },
         "market_screener.coordination": {
             "hold_incremental_analysis_lock": lambda session, **kwargs: nullcontext(),
@@ -908,10 +917,7 @@ def test_gui_context_analysis_and_optional_refresh_contract() -> None:
     assert 'analysisPending || progressQuery.data?.status === "RUNNING"' in page
     assert "autoRefresh && !analysisRunning ? 60_000 : false" in page
     assert "refetchInterval: analysisRunning ? 2_000 : refreshInterval" in page
-    assert (
-        'query.state.data?.status === "QUEUED" ? 2_000 : 10_000'
-        in page
-    )
+    assert 'query.state.data?.status === "QUEUED" ? 2_000 : 10_000' in page
     assert (
         "/screener/contexts/${contextType}/${encodeURIComponent(contextId)}/progress"
         in service

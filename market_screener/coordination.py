@@ -19,8 +19,9 @@ _analysis_locked: ContextVar[bool] = ContextVar("analysis_locked", default=False
 @contextmanager
 def hold_incremental_analysis_lock(db, *, owner: str = "gui:screener"):
     original_bind = db.get_bind()
-    with original_bind.connect() as connection, lock_identity(
-        connection, analysis_lock_owner(owner), session_scoped=True
+    with (
+        original_bind.connect() as connection,
+        lock_identity(connection, analysis_lock_owner(owner), session_scoped=True),
     ):
         db.bind = connection
         repository = MarketScreenerRunRepository(db)
@@ -29,7 +30,8 @@ def hold_incremental_analysis_lock(db, *, owner: str = "gui:screener"):
             acquired = repository.session_analysis_lock()
             if not acquired:
                 log_lock_contention(
-                    connection, lock_name="market_screener_analysis",
+                    connection,
+                    lock_name="market_screener_analysis",
                     owner=analysis_lock_owner(owner),
                 )
                 raise ValueError("Analysis already running")

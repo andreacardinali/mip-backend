@@ -14,11 +14,13 @@ def test_analysis_lock_lifetime_and_nested_phases(scenario):
         node
         for node in tree.body
         if not isinstance(node, ast.ImportFrom)
-        or node.module not in {"db", "market_screener.run_repository", "job_runtime.lock_logging"}
+        or node.module
+        not in {"db", "market_screener.run_repository", "job_runtime.lock_logging"}
     ]
     events = []
     db = SimpleNamespace(
-        rollback=lambda: events.append("rollback"), close=lambda: events.append("close"),
+        rollback=lambda: events.append("rollback"),
+        close=lambda: events.append("close"),
         connection=lambda: "connection",
     )
     namespace = {
@@ -61,7 +63,8 @@ def test_incremental_lock_pins_connection_and_releases_after_commits(scenario):
         node
         for node in tree.body
         if not isinstance(node, ast.ImportFrom)
-        or node.module not in {"db", "market_screener.run_repository", "job_runtime.lock_logging"}
+        or node.module
+        not in {"db", "market_screener.run_repository", "job_runtime.lock_logging"}
     ]
     events = []
     connection = SimpleNamespace(invalidate=lambda: events.append("invalidate"))
@@ -84,7 +87,7 @@ def test_incremental_lock_pins_connection_and_releases_after_commits(scenario):
         "log_lock_contention": MagicMock(),
         "MarketScreenerRunRepository": lambda db: SimpleNamespace(
             session_analysis_lock=lock
-        )
+        ),
     }
     exec(compile(tree, "coordination.py", "exec"), namespace)
 
@@ -115,9 +118,13 @@ def test_lock_contention_logs_holder_identity_and_activity(caplog, scheduler):
 
     connection = MagicMock()
     holder = {
-        "pid": 123, "owner": "mip:run:running", "run_id": "running",
-        "job_id": "job", "module": "jobs.market_analysis_scan.worker",
-        "state": "idle in transaction", "wait_event": "ClientRead",
+        "pid": 123,
+        "owner": "mip:run:running",
+        "run_id": "running",
+        "job_id": "job",
+        "module": "jobs.market_analysis_scan.worker",
+        "state": "idle in transaction",
+        "wait_event": "ClientRead",
     }
     connection.execute.return_value.mappings.return_value.all.return_value = [holder]
     log_lock_contention(
@@ -128,7 +135,8 @@ def test_lock_contention_logs_holder_identity_and_activity(caplog, scheduler):
     assert "123" in caplog.text
     assert "requester" in caplog.text
     assert connection.execute.call_args.args[1] == {
-        "lock_name": "test_lock", "scheduler": scheduler,
+        "lock_name": "test_lock",
+        "scheduler": scheduler,
     }
     connection.rollback.assert_not_called()
 
@@ -153,7 +161,8 @@ def test_lock_identity_restores_session_label_before_pool_reuse(session_scoped):
     connection.execute.return_value.scalar_one.return_value = "original"
     with lock_identity(connection, "mip:gui:watchlist", session_scoped=session_scoped):
         assert connection.execute.call_args.args[1] == {
-            "owner": "mip:gui:watchlist", "local": not session_scoped,
+            "owner": "mip:gui:watchlist",
+            "local": not session_scoped,
         }
     if session_scoped:
         assert connection.execute.call_args.args[1] == {"owner": "original"}
@@ -171,7 +180,9 @@ def test_scheduler_contention_logs_actual_holder(monkeypatch, caplog):
         {"pid": 123, "job_id": "blocking-job", "run_id": "blocking-run"}
     ]
     monkeypatch.setattr(scheduler, "SessionLocal", MagicMock())
-    monkeypatch.setattr(scheduler, "engine", SimpleNamespace(connect=lambda: connection))
+    monkeypatch.setattr(
+        scheduler, "engine", SimpleNamespace(connect=lambda: connection)
+    )
     result = scheduler.execute_job(
         "00000000-0000-0000-0000-000000000001", "unused.module"
     )

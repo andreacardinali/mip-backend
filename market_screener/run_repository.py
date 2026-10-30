@@ -23,13 +23,21 @@ class MarketScreenerRunRepository:
 
     def start(self) -> UUID:
         return self.db.execute(
-            text("SELECT public.sp_market_screener_start_job_run(CAST(:job_run_id AS uuid))"),
-            {"job_run_id": str(current_job_run_id.get()) if current_job_run_id.get() else None},
+            text(
+                "SELECT public.sp_market_screener_start_job_run(CAST(:job_run_id AS uuid))"
+            ),
+            {
+                "job_run_id": (
+                    str(current_job_run_id.get()) if current_job_run_id.get() else None
+                )
+            },
         ).scalar_one()
 
     def fail_for_job(self, *, job_run_id: str, error_message: str) -> None:
         self.db.execute(
-            text("SELECT public.sp_market_screener_fail_job_run(CAST(:job_run_id AS uuid), :error)"),
+            text(
+                "SELECT public.sp_market_screener_fail_job_run(CAST(:job_run_id AS uuid), :error)"
+            ),
             {"job_run_id": job_run_id, "error": error_message[:1000]},
         )
 

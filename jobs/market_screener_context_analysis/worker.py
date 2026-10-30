@@ -33,7 +33,10 @@ def run() -> dict:
                 config=ScanConfig.from_settings(settings),
                 llm_enabled=str(
                     settings.get("MARKET_SCREENER_PIPELINE_LLM_ENABLED", True)
-                ).strip().lower() in {"1", "true", "yes", "on"},
+                )
+                .strip()
+                .lower()
+                in {"1", "true", "yes", "on"},
                 llm_settings=settings,
                 incremental=True,
             )
