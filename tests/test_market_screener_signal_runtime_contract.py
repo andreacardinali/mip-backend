@@ -298,6 +298,50 @@ def test_gui_snapshot_changes_open_only_current_opportunity() -> None:
     assert "<OpenInNewIcon" in columns
 
 
+def test_gui_screener_refreshes_only_selected_details() -> None:
+    page = Path("../mip-frontend/src/pages/ScreenerPage.tsx").read_text(
+        encoding="utf-8"
+    )
+    refresh = page.split("function refreshScreener()", 1)[1].split("return (", 1)[0]
+    for query in ("opportunitiesQuery", "changesQuery", "runsQuery", "snapshotsQuery"):
+        assert f"{query}.refetch()" in refresh
+    assert "selectedId ? [detailQuery.refetch()] : []" in refresh
+    assert "selectedId && selected ? [signalEventsQuery.refetch()] : []" in refresh
+    assert "selectedSnapshotId ? [snapshotItemsQuery.refetch()] : []" in refresh
+    assert "disabled={refreshing}" in page
+    assert "onClick={refreshScreener}" in page
+
+
+def test_gui_snapshot_history_distinguishes_failures_from_empty_results() -> None:
+    page = Path("../mip-frontend/src/pages/ScreenerPage.tsx").read_text(
+        encoding="utf-8"
+    )
+    history = page.split("<DialogTitle>Storico Screener</DialogTitle>", 1)[1]
+    assert "snapshotsQuery.isLoading" in history
+    assert "snapshotsQuery.isError" in history
+    assert "snapshotsQuery.isSuccess && !snapshotsQuery.data.length" in history
+    assert "selectedSnapshotId && snapshotItemsQuery.isError" in history
+    assert "snapshotsQuery.refetch()" in history
+    assert "snapshotItemsQuery.refetch()" in history
+    assert "loading={snapshotItemsQuery.isFetching}" in history
+
+
+def test_gui_historical_comparison_keeps_latest_entry_indicators_separate() -> None:
+    page = Path("../mip-frontend/src/pages/ScreenerPage.tsx").read_text(
+        encoding="utf-8"
+    )
+    assert 'queryKey: ["market-screener-changes", changesSnapshotId]' in page
+    assert "getScreenerSnapshotChanges(changesSnapshotId)" in page
+    assert "enabled: changesOpen && Boolean(changesSnapshotId)" in page
+    assert "changesSnapshotId ? historicalChangesQuery : changesQuery" in page
+    assert "const newEntries = new Set(changesQuery.data?.changes" in page
+    assert "setChangesSnapshotId(selectedSnapshotId)" in page
+    assert "setHistoryOpen(false)" in page
+    assert "!changeType || change.change_type === changeType" in page
+    assert "rows={comparisonRows}" in page
+    assert 'fileName: "mip-screener-variazioni"' in page
+
+
 def test_gui_exports_authorized_results_with_native_grid_csv() -> None:
     page = Path("../mip-frontend/src/pages/ScreenerPage.tsx").read_text(
         encoding="utf-8"

@@ -471,6 +471,19 @@ Its detail action opens the existing current opportunity and closes the variatio
 dialog first. Exited rows retain their historical comparison but cannot open a
 current opportunity through this action. The detail is live, not a frozen snapshot.
 
+The variations dialog also accepts a historical snapshot, selected directly or
+opened from the historical ranking. The comparison always uses the preceding
+complete successful snapshot; an incomplete selection has no comparison. Filter
+by new, changed or removed entries and export the displayed rows using the native
+grid CSV export. The new-entry indicators on the main grid always refer to the
+latest complete comparison, independent of the historical selection.
+
+Run history, historical ranking and signal events distinguish loading, empty and
+error states and provide retry actions. Refresh reloads the current results,
+latest comparison and history lists, plus selected detail, events, ranking and
+historical comparison only when applicable. It never requests details without
+an identifier.
+
 In account notification preferences, `SCREENER_SUMMARY` is disabled by default.
 Enable it explicitly with an enabled user-owned destination; the existing minimum
 severity preference still applies to this `LOW` event. Only enabled global
