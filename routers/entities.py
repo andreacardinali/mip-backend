@@ -1,3 +1,4 @@
+from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -33,6 +34,8 @@ def get_entity_overview(
 @router.get("")
 async def get_entities(
     current_user: CurrentUser = Depends(get_current_user),
+    scope: Literal["ALL", "PORTFOLIO", "WATCHLIST", "SIGNALS"] = "ALL",
+    query: str = "",
 ):
     db = SessionLocal()
 
@@ -41,11 +44,13 @@ async def get_entities(
             text(
                 """
                 SELECT *
-                FROM sp_get_entities(
-                    500
+                FROM public.sp_get_user_entities(
+                    CAST(:user_id AS uuid), CAST(:scope AS varchar),
+                    CAST(:query AS text), 500
                 )
                 """
-            )
+            ),
+            {"user_id": current_user["user_id"], "scope": scope, "query": query.strip()},
         )
 
         return [dict(row._mapping) for row in rows]

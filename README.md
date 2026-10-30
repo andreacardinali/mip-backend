@@ -13,6 +13,20 @@ using the backend virtual environment. Nothing in `oneshot/` runs automatically.
 The directory can be cleaned after development; also remove or update tests and
 documentation that reference the deleted migration files.
 
+## Entity List Filters
+
+`GET /api/entities` accepts `scope=ALL|PORTFOLIO|WATCHLIST|SIGNALS` and `query`.
+The authenticated user's portfolio/watchlist membership comes from
+`sp_get_user_entity_asset_match`; `SIGNALS` selects entities with active screener
+opportunities, not a price-movement ranking. Search and scope are applied by
+`sp_get_user_entities` before the 500-row limit. Each returned row includes
+`in_portfolio`, `in_watchlist` and `has_active_signals`.
+
+Before using this endpoint on the existing development database, manually apply
+`oneshot/install_entity_list_filters.sql` after the existing asset-match and
+screener routines are installed. The installer matches `mip_schema.sql`; it is
+not executed on startup. The legacy `sp_get_entities(integer)` is unchanged.
+
 ## Centralized HTTP Requests
 
 Provider HTTP calls must use `http_client.request_with_retry`; do not introduce

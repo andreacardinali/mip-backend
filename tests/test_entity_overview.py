@@ -1,9 +1,11 @@
+import asyncio
 from pathlib import Path
 from unittest.mock import Mock, patch
 from uuid import UUID
 
 import pytest
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
+from fastapi.testclient import TestClient
 from sqlalchemy.exc import DBAPIError
 
 ENTITY_ID = UUID("00000000-0000-0000-0000-000000000001")
@@ -129,6 +131,63 @@ def test_opportunities_forward_user_membership_filters(
     assert captured["watchlist_match"] is watchlist_match
     assert captured["limit"] == 1
     assert captured["closed"] is True
+
+
+@pytest.mark.parametrize("scope", ["ALL", "PORTFOLIO", "WATCHLIST", "SIGNALS"])
+def test_entity_list_filters_before_limit_for_authenticated_user(monkeypatch, routes, scope):
+    entities, _ = routes
+    captured = {}
+
+    class Session:
+        def execute(self, statement, params):
+            assert "sp_get_user_entities" in str(statement)
+            captured.update(params)
+            return [Mock(_mapping={"entity_id": str(ENTITY_ID)})]
+
+        def close(self):
+            captured["closed"] = True
+
+    monkeypatch.setattr(entities, "SessionLocal", Session)
+    assert asyncio.run(entities.get_entities(
+        current_user={"user_id": USER_ID}, scope=scope, query="  ABC  "
+    )) == [{"entity_id": str(ENTITY_ID)}]
+    assert captured == {
+        "user_id": USER_ID, "scope": scope, "query": "ABC", "closed": True,
+    }
+
+
+@pytest.mark.parametrize("scope", ["ALL", "PORTFOLIO", "WATCHLIST", "SIGNALS", "UNKNOWN"])
+def test_entity_list_http_scope_validation(monkeypatch, routes, scope):
+    entities, _ = routes
+    session = Mock()
+    session.execute.return_value = []
+    monkeypatch.setattr(entities, "SessionLocal", lambda: session)
+    app = FastAPI()
+    app.include_router(entities.router, prefix="/entities")
+    app.dependency_overrides[entities.get_current_user] = lambda: {"user_id": USER_ID}
+    with TestClient(app) as client:
+        response = client.get("/entities", params={"scope": scope})
+    assert response.status_code == (422 if scope == "UNKNOWN" else 200)
+    if scope == "UNKNOWN":
+        session.execute.assert_not_called()
+    else:
+        assert session.execute.call_args.args[1]["scope"] == scope
+        session.close.assert_called_once()
+
+
+def test_entity_list_installation_matches_authoritative_schema():
+    root = Path(__file__).resolve().parents[1]
+    schema = (root / "mip_schema.sql").read_text(encoding="utf-8")
+    installer = (root / "oneshot" / "install_entity_list_filters.sql").read_text(
+        encoding="utf-8"
+    )
+    signature = "FUNCTION public.sp_get_user_entities"
+    schema_body = schema.split(signature, 1)[1].split("$$;", 1)[0]
+    assert schema_body == installer.split(signature, 1)[1].split("$$;", 1)[0]
+    assert "sp_get_user_entity_asset_match(" in schema_body
+    assert "o.entity_id = e.entity_id AND o.active" in schema_body
+    assert schema_body.index("p_scope = 'PORTFOLIO'") < schema_body.index("LIMIT")
+    assert schema_body.index("strpos(lower(value)") < schema_body.index("LIMIT")
 
 
 def test_overview_installation_matches_authoritative_schema():
