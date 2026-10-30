@@ -36,7 +36,8 @@ def test_screener_analysis_timestamp_matches_schema_and_replaces_visible_rank() 
     assert 'type: "dateTime"' in columns
     assert "ranking_position: false" in page
     assert 'headerName: "#"' not in columns
-    assert 'value ? value.toLocaleString("it-IT") : "N/D"' in columns
+    assert 'import { formatTimestamp } from "../services/timestamps";' in page
+    assert "valueFormatter: (value: Date | null) => formatTimestamp(value)" in columns
 
 
 @pytest.mark.parametrize(
@@ -944,7 +945,13 @@ def test_gui_context_analysis_and_optional_refresh_contract() -> None:
         'export const screenerAnalysisMutationKey = ["screener-analysis"] as const'
         in service
     )
-    assert "if (analysisInProgress) throw new Error" in service
+    assert "if (analysisInProgress) {" in service
+    concurrency_guard = service.split("if (analysisInProgress) {", 1)[1].split(
+        "analysisInProgress = true;", 1
+    )[0]
+    assert "const error = new Error(" in concurrency_guard
+    assert "notifyOperationError(error, error.message);" in concurrency_guard
+    assert "throw error;" in concurrency_guard
     assert "analysisInProgress = true;" in service
     assert "finally {\n\t\tanalysisInProgress = false;" in service
     assert "/screener?query=" not in entities
