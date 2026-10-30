@@ -208,3 +208,18 @@ def test_overview_installation_matches_authoritative_schema():
     assert "sp_get_user_entity_asset_match(p_user_id, e.entity_id)" in schema_body
     assert "ne.entity_id = e.entity_id" in schema_body
     assert "o.entity_id = e.entity_id AND o.active" in schema_body
+    analysis_body = schema_body.split("'last_analysis_at', (", 1)[1].split(
+        "'observed_at'", 1
+    )[0]
+    assert "SELECT max(r.finished_at)" in analysis_body
+    assert "public.market_analysis_scan_runs r" in analysis_body
+    assert "r.status = 'COMPLETED'" in analysis_body
+    assert "i.entity_id = e.entity_id" in analysis_body
+    assert "(r.summary -> 'evaluated_instrument_ids') ? i.instrument_id::text" in analysis_body
+    assert "opportunities" not in analysis_body
+    frontend = root.parent / "mip-frontend" / "src"
+    page = (frontend / "pages" / "EntitiesPage.tsx").read_text(encoding="utf-8")
+    types = (frontend / "types" / "entity.ts").read_text(encoding="utf-8")
+    assert "last_analysis_at: string | null" in types
+    assert "Ultima analisi: {timestamp(overview.last_analysis_at ?? null)}" in page
+    assert page.index("Ultima analisi:") < page.index("overview.opportunities.length === 0")

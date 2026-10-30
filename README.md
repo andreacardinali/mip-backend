@@ -555,6 +555,15 @@ screener opportunities. Counts include all linked news and catalysts; detail
 lists contain the latest 50 of each. The entity list retains its API limit of
 500 rows. Raw overview data is available in the diagnostic panel.
 
+The active screener signals header shows `last_analysis_at`, the latest completed
+technical scan that actually evaluated at least one instrument of the entity,
+including evaluations with no signal. Partial scans count only instruments that
+were evaluated; failed scans and insufficient-history skips do not advance this
+timestamp. It is independent of the overview's `observed_at` and AI enrichment.
+Scan summaries now persist `evaluated_instrument_ids`; older summaries without
+these IDs cannot reliably establish recency and display `N/D` until a new scan.
+Reapply the overview installer below to expose the new field.
+
 Authenticated `GET /api/entities/{entity_id}/overview` delegates to
 `sp_get_user_entity_overview` with the authenticated user ID. Review and manually
 apply `oneshot/install_entity_overview.sql` after the existing entity asset-match

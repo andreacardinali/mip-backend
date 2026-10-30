@@ -89,3 +89,4 @@ def test_scan_isolates_provider_failure() -> None:
     assert result.processed == 2
     assert len(result.failures) == 1
     assert result.failures[0].symbol == "BAD"
+    assert result.to_dict()["evaluated_instrument_ids"] == ["i-GOOD"]

@@ -41,6 +41,7 @@ def test_insufficient_history_is_skipped_not_failed() -> None:
     assert result.to_dict()["failures"] == 0
     assert result.to_dict()["skipped_by_reason"]["INSUFFICIENT_HISTORY"] == 1
     assert result.evaluations == ()
+    assert result.to_dict()["evaluated_instrument_ids"] == []
 
 
 @pytest.mark.parametrize(
@@ -74,6 +75,7 @@ def test_successful_no_signal_scan_records_only_evaluated_scope(
     assert result.skipped[0].reason == ScanSkipReason.NO_TECHNICAL_SIGNAL
     assert len(result.evaluations) == 1
     assert result.evaluations[0].observed_at.timestamp() == 200000
+    assert result.to_dict()["evaluated_instrument_ids"] == [str(instrument_id)]
     captured = []
 
     class Repository:

@@ -4370,6 +4370,15 @@ CREATE FUNCTION public.sp_get_user_entity_overview(p_user_id uuid, p_entity_id u
             ORDER BY o.ranking_position, o.opportunity_id)
             FROM public.market_screener_opportunities o WHERE o.entity_id = e.entity_id AND o.active
         ), '[]'::jsonb),
+        'last_analysis_at', (
+            SELECT max(r.finished_at)
+            FROM public.market_analysis_scan_runs r
+            WHERE r.status = 'COMPLETED' AND EXISTS (
+                SELECT 1 FROM public.instruments i
+                WHERE i.entity_id = e.entity_id
+                  AND (r.summary -> 'evaluated_instrument_ids') ? i.instrument_id::text
+            )
+        ),
         'observed_at', statement_timestamp()
     ) FROM public.entities e WHERE e.entity_id = p_entity_id;
 $$;

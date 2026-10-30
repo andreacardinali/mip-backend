@@ -150,6 +150,9 @@ class ScanResult:
             "symbols": [x.member.symbol for x in self.candidates],
             "failed_symbols": [x.symbol for x in self.failures],
             "skipped_symbols": [x.symbol for x in self.skipped],
+            "evaluated_instrument_ids": sorted({
+                str(evaluation.instrument_id) for evaluation in self.evaluations
+            }),
         }
 
 
