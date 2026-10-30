@@ -5,9 +5,9 @@ from typing import Any
 
 from job_runtime.database import run_transactional
 from market_screener.config import ScreenerRankingConfig
+from market_screener.coordination import run_coordinated_analysis
 from market_screener.repository import MarketScreenerRepository
 from market_screener.service import build_market_screener_ranking
-from market_screener.coordination import run_coordinated_analysis
 
 logger = logging.getLogger(__name__)
 

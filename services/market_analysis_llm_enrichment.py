@@ -26,7 +26,9 @@ def run_configured_market_analysis_llm_enrichment(
 ) -> dict[str, Any]:
     prefix = "MARKET_ANALYSIS_ENRICHMENT"
     config = LLMConfig.from_settings(
-        settings, prefix=f"{prefix}_LLM", default_provider="ollama",
+        settings,
+        prefix=f"{prefix}_LLM",
+        default_provider="ollama",
         default_timeout_seconds=120.0,
     )
     max_tokens = int(settings.get(f"{prefix}_LLM_REQUEST_MAX_OUTPUT_TOKENS", 1200))
@@ -36,15 +38,26 @@ def run_configured_market_analysis_llm_enrichment(
         limit=int(settings.get(f"{prefix}_RUN_MAX_SIGNALS", 25)),
     )
     if not candidates:
-        return {"status": "SUCCESS", "selected": 0, "enriched": 0, "failed": 0,
-                "signal_ids": [], "enrichment_fingerprint": contract_fingerprint}
+        return {
+            "status": "SUCCESS",
+            "selected": 0,
+            "enriched": 0,
+            "failed": 0,
+            "signal_ids": [],
+            "enrichment_fingerprint": contract_fingerprint,
+        }
     return run_market_analysis_llm_enrichment(
-        provider=create_provider(config), candidates=candidates,
+        provider=create_provider(config),
+        candidates=candidates,
         persist_enrichment=lambda signal, enrichment, analysis, composite: persist_enrichment(
-            signal, enrichment, analysis, composite,
+            signal,
+            enrichment,
+            analysis,
+            composite,
             contract_fingerprint=contract_fingerprint,
         ),
-        enrichment_fingerprint=contract_fingerprint, max_tokens=max_tokens,
+        enrichment_fingerprint=contract_fingerprint,
+        max_tokens=max_tokens,
         call_batch_size=int(settings.get(f"{prefix}_LLM_REQUEST_MAX_SIGNALS", 1)),
     )
 

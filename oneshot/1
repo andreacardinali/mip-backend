@@ -1,0 +1,2 @@
+usage: apply_intelligence_fixes.py [-h] [--apply]
+apply_intelligence_fixes.py: error: unrecognized arguments: 2 ./apply_intelligence_fixes.sql

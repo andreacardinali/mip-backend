@@ -51,7 +51,11 @@ def analyze_screener(
             context_id=str(request.context_id),
             market_data_service=market_data,
             config=ScanConfig.from_settings(settings),
-            **({"llm_enabled": True, "llm_settings": settings} if request.llm_enabled else {}),
+            **(
+                {"llm_enabled": True, "llm_settings": settings}
+                if request.llm_enabled
+                else {}
+            ),
         )
         db.commit()
         return result

@@ -9,8 +9,10 @@ from market_analysis.llm_enrichment import SignalEnrichment
 from market_analysis.llm_enrichment_repository import (
     MarketAnalysisLLMEnrichmentRepository,
 )
-from services.market_analysis_llm_enrichment import run_configured_market_analysis_llm_enrichment
 from market_screener.coordination import run_coordinated_analysis
+from services.market_analysis_llm_enrichment import (
+    run_configured_market_analysis_llm_enrichment,
+)
 
 logger = logging.getLogger(__name__)
 PREFIX = "MARKET_ANALYSIS_ENRICHMENT"

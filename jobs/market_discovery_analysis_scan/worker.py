@@ -14,8 +14,8 @@ from market_screener.constants import (
     MARKET_ANALYSIS_QUANT_CANDIDATE_LIMIT,
     MARKET_ANALYSIS_QUANT_MIN_SCORE,
 )
-from services.market_discovery_analysis_scan import run_market_discovery_analysis_scan
 from market_screener.coordination import run_coordinated_analysis
+from services.market_discovery_analysis_scan import run_market_discovery_analysis_scan
 
 logger = logging.getLogger(__name__)
 

@@ -46,15 +46,21 @@ def analyze_screener_context(
     phases = {"context": context, "analysis_scan": scan}
     status = scan["status"]
     if llm_enabled:
-        from market_analysis.llm_enrichment_repository import MarketAnalysisLLMEnrichmentRepository
-        from services.market_analysis_llm_enrichment import run_configured_market_analysis_llm_enrichment
+        from market_analysis.llm_enrichment_repository import (
+            MarketAnalysisLLMEnrichmentRepository,
+        )
+        from services.market_analysis_llm_enrichment import (
+            run_configured_market_analysis_llm_enrichment,
+        )
 
         enrichment_repository = MarketAnalysisLLMEnrichmentRepository(db)
 
         def load_candidates(*, contract_fingerprint, limit):
             with db.begin_nested():
                 return enrichment_repository.list_pending_context(
-                    **context, enrichment_fingerprint=contract_fingerprint, limit=limit,
+                    **context,
+                    enrichment_fingerprint=contract_fingerprint,
+                    limit=limit,
                 )
 
         def persist(signal, enrichment, analysis, composite, *, contract_fingerprint):
@@ -62,17 +68,22 @@ def analyze_screener_context(
                 return enrichment_repository.apply(
                     signal_id=str(signal["signal_id"]),
                     enrichment_fingerprint=contract_fingerprint,
-                    llm_score=enrichment.llm_score, llm_analysis=analysis,
+                    llm_score=enrichment.llm_score,
+                    llm_analysis=analysis,
                     composite_score=composite,
                 )
 
         try:
             phases["llm_enrichment"] = run_configured_market_analysis_llm_enrichment(
-                settings=llm_settings, load_candidates=load_candidates,
+                settings=llm_settings,
+                load_candidates=load_candidates,
                 persist_enrichment=persist,
             )
         except Exception:
-            phases["llm_enrichment"] = {"status": "FAILED", "reason": "enrichment_unavailable"}
+            phases["llm_enrichment"] = {
+                "status": "FAILED",
+                "reason": "enrichment_unavailable",
+            }
         if phases["llm_enrichment"]["status"] != "SUCCESS" and status == "SUCCESS":
             status = "PARTIAL"
     ranking = build_market_screener_ranking(

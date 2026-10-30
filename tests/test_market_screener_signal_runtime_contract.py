@@ -184,7 +184,8 @@ def test_pipeline_summary_is_post_commit_and_cannot_fail_snapshot(scenario) -> N
     ]
     calls = []
     session = SimpleNamespace(
-        commit=lambda: calls.append("commit"), close=lambda: calls.append("close"),
+        commit=lambda: calls.append("commit"),
+        close=lambda: calls.append("close"),
         rollback=lambda: calls.append("unlock"),
     )
     repository = SimpleNamespace(
@@ -328,12 +329,18 @@ def test_context_installer_matches_schema_and_filters_before_limit() -> None:
         "sp_market_screener_try_analysis_lock",
     ):
         pattern = rf"FUNCTION public\.{name}\(.*?AS\s+\$\$(.*?)\$\$;"
-        bodies = [re.search(pattern, sql, re.DOTALL).group(1)
-                  for sql in (schema, installer)]
-        assert [re.sub(r"\s+", " ", body.replace("character varying", "varchar")).strip()
-                for body in bodies][0] == [
-                    re.sub(r"\s+", " ", body.replace("character varying", "varchar")).strip()
-                    for body in bodies][1]
+        bodies = [
+            re.search(pattern, sql, re.DOTALL).group(1) for sql in (schema, installer)
+        ]
+        assert [
+            re.sub(r"\s+", " ", body.replace("character varying", "varchar")).strip()
+            for body in bodies
+        ][0] == [
+            re.sub(r"\s+", " ", body.replace("character varying", "varchar")).strip()
+            for body in bodies
+        ][
+            1
+        ]
     assert "w.user_id = p_user_id" in installer
     assert "p.user_id = p_user_id" in installer
     assert "pos.quantity <> 0" in installer
@@ -350,8 +357,17 @@ def test_context_installer_matches_schema_and_filters_before_limit() -> None:
 
 
 @pytest.mark.parametrize(
-    "outcome", ["success", "partial", "empty", "too_many", "failure",
-                "ai_success", "ai_partial", "ai_failure"]
+    "outcome",
+    [
+        "success",
+        "partial",
+        "empty",
+        "too_many",
+        "failure",
+        "ai_success",
+        "ai_partial",
+        "ai_failure",
+    ],
 )
 def test_manual_context_scan_records_history_in_callers_transaction(
     monkeypatch, outcome
@@ -380,11 +396,17 @@ def test_manual_context_scan_records_history_in_callers_transaction(
         if outcome == "ai_failure"
         else {"status": "PARTIAL" if outcome == "ai_partial" else "SUCCESS"}
     )
-    expected_status = "PARTIAL" if outcome in ("ai_partial", "ai_failure") else scan["status"]
+    expected_status = (
+        "PARTIAL" if outcome in ("ai_partial", "ai_failure") else scan["status"]
+    )
     ai_phase = {"llm_enrichment": ai_result} if ai_enabled else {}
 
     def pending(**kwargs):
-        assert kwargs == {**context, "enrichment_fingerprint": "fingerprint", "limit": 7}
+        assert kwargs == {
+            **context,
+            "enrichment_fingerprint": "fingerprint",
+            "limit": 7,
+        }
         return [{"signal_id": "signal"}]
 
     def persist(**kwargs):
@@ -399,7 +421,10 @@ def test_manual_context_scan_records_history_in_callers_transaction(
             raise RuntimeError("private provider details")
         signal = load_candidates(contract_fingerprint="fingerprint", limit=7)[0]
         assert persist_enrichment(
-            signal, SimpleNamespace(llm_score=75), {"summary": "analysis"}, 80,
+            signal,
+            SimpleNamespace(llm_score=75),
+            {"summary": "analysis"},
+            80,
             contract_fingerprint="fingerprint",
         )
         return ai_result
@@ -407,7 +432,8 @@ def test_manual_context_scan_records_history_in_callers_transaction(
     for name, attributes in {
         "market_analysis.llm_enrichment_repository": {
             "MarketAnalysisLLMEnrichmentRepository": lambda session: SimpleNamespace(
-                list_pending_context=pending, apply=persist,
+                list_pending_context=pending,
+                apply=persist,
             ),
         },
         "services.market_analysis_llm_enrichment": {
