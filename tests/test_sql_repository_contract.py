@@ -33,6 +33,13 @@ def sql_literals(relative_path):
         yield " ".join(node.args[0].value.split())
 
 
+def normalized_function_header(routine):
+    header = routine.split("$$", 1)[0]
+    return " ".join(
+        re.sub(r"\btimestamptz\b", "timestamp with time zone", header).split()
+    )
+
+
 def test_scan_members_include_collections_without_duplicate_instruments():
     schema = (ROOT / "mip_schema.sql").read_text(encoding="utf-8")
     installer = (ROOT / "oneshot/install_screener_monitoring_extensions.sql").read_text(
@@ -63,11 +70,18 @@ def test_monitoring_extensions_installer_matches_schema(name):
         encoding="utf-8"
     )
     pattern = rf"FUNCTION public\.{name}\(.*?\$\$;"
-    snapshot = re.search(pattern, schema, re.DOTALL)
     installed = re.search(pattern, installer, re.DOTALL)
-    assert snapshot is not None
     assert installed is not None
-    assert " ".join(snapshot.group().split()) == " ".join(installed.group().split())
+    snapshots = [
+        routine
+        for routine in re.findall(pattern, schema, re.DOTALL)
+        if normalized_function_header(routine)
+        == normalized_function_header(installed.group())
+    ]
+    assert len(snapshots) == 1, f"Expected one matching signature for {name}"
+    snapshot_body = snapshots[0].split("$$", 1)[1]
+    installed_body = installed.group().split("$$", 1)[1]
+    assert " ".join(snapshot_body.split()) == " ".join(installed_body.split())
     if name == "sp_alert_session_reference":
         assert "ts >= p_opens_at AND ts <= p_closes_at" in installed.group()
         assert "AT TIME ZONE" not in installed.group()
