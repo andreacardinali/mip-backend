@@ -7094,6 +7094,12 @@ CREATE FUNCTION public.sp_market_screener_enrich_opportunity_payload(p_payload j
             'source_exchange', instrument.exchange,
             'source_currency_code', instrument.currency_code,
             'source_isin', NULL,
+                        'last_analysis_at', (
+                                SELECT max(r.finished_at)
+                                FROM public.market_analysis_scan_runs r
+                                WHERE r.status = 'COMPLETED'
+                                    AND (r.summary -> 'evaluated_instrument_ids') ? instrument.instrument_id::text
+                        ),
             'strategy_code', opportunity.strategy_code,
             'signal_type', opportunity.signal_type,
             'signal_timeframe', opportunity.signal_timeframe,

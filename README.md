@@ -564,6 +564,13 @@ Scan summaries now persist `evaluated_instrument_ids`; older summaries without
 these IDs cannot reliably establish recency and display `N/D` until a new scan.
 Reapply the overview installer below to expose the new field.
 
+The Screener results table displays the source instrument's `last_analysis_at`
+instead of its numeric ranking position, while preserving ranking order. Apply
+`oneshot/install_screener_analysis_timestamp.sql` manually to update the shared
+opportunity enrichment routine. The timestamp uses the same completed-evaluation
+criteria as the entity overview and displays `N/D` for legacy scans without
+evaluated instrument IDs.
+
 Authenticated `GET /api/entities/{entity_id}/overview` delegates to
 `sp_get_user_entity_overview` with the authenticated user ID. Review and manually
 apply `oneshot/install_entity_overview.sql` after the existing entity asset-match

@@ -10,6 +10,30 @@ from uuid import UUID
 import pytest
 
 
+def test_screener_analysis_timestamp_matches_schema_and_replaces_visible_rank() -> None:
+    schema = Path("mip_schema.sql").read_text(encoding="utf-8")
+    installer = Path("oneshot/install_screener_analysis_timestamp.sql").read_text(
+        encoding="utf-8"
+    )
+    signature = "FUNCTION public.sp_market_screener_enrich_opportunity_payload"
+    schema_body = schema.split(signature, 1)[1].split("$$;", 1)[0]
+    installer_body = installer.split(signature, 1)[1].split("$$;", 1)[0]
+    assert " ".join(schema_body.split()) == " ".join(installer_body.split())
+    timestamp_body = schema_body.split("'last_analysis_at', (", 1)[1].split(
+        "'strategy_code'", 1
+    )[0]
+    assert "max(r.finished_at)" in timestamp_body
+    assert "r.status = 'COMPLETED'" in timestamp_body
+    assert "(r.summary -> 'evaluated_instrument_ids') ? instrument.instrument_id::text" in timestamp_body
+    page = Path("../mip-frontend/src/pages/ScreenerPage.tsx").read_text(encoding="utf-8")
+    assert 'field: "last_analysis_at", headerName: "Ultima analisi"' in page
+    assert 'type: "dateTime"' in page
+    assert 'ranking_position: false' in page
+    columns = page.split("const columns:", 1)[1].split("const changeColumns:", 1)[0]
+    assert 'headerName: "#"' not in columns
+    assert 'value ? value.toLocaleString("it-IT") : "N/D"' in page
+
+
 @pytest.mark.parametrize(
     "name",
     [
