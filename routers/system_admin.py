@@ -22,7 +22,10 @@ def list_jobs(_: CurrentUser = Depends(require_admin)):
     db = SessionLocal()
     try:
         rows = db.execute(text("SELECT * FROM sp_list_scheduler_jobs()")).mappings()
-        return [dict(row) for row in rows]
+        return [
+            {**dict(row), "request_only": row["job_key"] in REQUEST_ONLY_JOBS}
+            for row in rows
+        ]
     finally:
         db.close()
 

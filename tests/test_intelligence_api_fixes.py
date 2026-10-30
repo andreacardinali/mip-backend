@@ -243,6 +243,27 @@ def test_entity_refresh_worker_uses_request_options(monkeypatch):
     db.close.assert_called_once()
 
 
+@pytest.mark.parametrize("job_key, request_only", [
+    ("market_screener_context_analysis", True),
+    ("market_price_refresh_request", True),
+    ("market_screener_pipeline", False),
+    ("market_screener_ranking", False),
+])
+def test_scheduler_job_list_exposes_contextual_execution(monkeypatch, job_key, request_only):
+    from routers import system_admin
+
+    db = MagicMock()
+    row = {"job_key": job_key, "enabled": False}
+    db.execute.return_value.mappings.return_value = [row]
+    monkeypatch.setattr(system_admin, "SessionLocal", lambda: db)
+
+    assert system_admin.list_jobs({"user_id": USER_ID}) == [
+        {**row, "request_only": request_only},
+    ]
+    assert "request_only" not in row
+    db.close.assert_called_once()
+
+
 @pytest.mark.parametrize("job_key", ["market_screener_context_analysis", "market_price_refresh_request"])
 @pytest.mark.parametrize("operation", ["enable", "run"])
 def test_contextual_job_rejects_payloadless_admin_execution(monkeypatch, operation, job_key):
