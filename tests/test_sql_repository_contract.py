@@ -115,6 +115,19 @@ def test_runtime_sp_calls_exist_in_schema():
                 )
 
 
+def test_scheduler_catalog_pruning_installer_matches_schema():
+    installer = (ROOT / "oneshot/install_scheduler_catalog_pruning.sql").read_text(
+        encoding="utf-8"
+    )
+    schema = (ROOT / "mip_schema.sql").read_text(encoding="utf-8")
+    pattern = r"FUNCTION public\.sp_scheduler_prune_undefined_jobs\(.*?\$function\$;"
+    installed = re.search(pattern, installer, re.DOTALL)
+    snapshots = re.findall(pattern, schema, re.DOTALL)
+    assert installed is not None
+    assert len(snapshots) == 1
+    assert " ".join(snapshots[0].split()) == " ".join(installed.group().split())
+
+
 def test_alert_rule_management_installer_matches_schema():
     installer = (ROOT / "oneshot/install_alert_rule_management.sql").read_text(
         encoding="utf-8"
