@@ -18,7 +18,7 @@ def expire_evaluated_signals(
 ) -> int:
     scopes = [
         {
-            "instrument_id": evaluation.instrument_id,
+            "instrument_id": str(evaluation.instrument_id),
             "strategy_code": strategy.upper(),
             "timeframe": evaluation.timeframe,
             "observed_at": evaluation.observed_at.isoformat(),

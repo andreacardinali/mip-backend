@@ -528,9 +528,14 @@ do not replace a TypeScript build or interactive UI validation.
 ### Contextual screener analysis
 
 Review and manually apply `oneshot/install_screener_contexts.sql` after the
-existing screener, ranking, consensus and snapshot installers. Its four routines
+existing screener, ranking, consensus and snapshot installers. Its routines
 are also present in the authoritative `mip_schema.sql`; no startup migration is
 performed. This installer has not been executed against the live database.
+
+If contextual analysis reports no matching constraint for `ON CONFLICT`,
+reapply the updated context installer manually. The context-universe upsert
+targets `upper(btrim(code::text))`, matching the existing normalized unique
+index; no additional unique constraint on the raw `code` column is needed.
 
 Authenticated `GET /api/screener/contexts` lists the user's watchlists and
 portfolios plus active universes, including instrument counts. Context filtering

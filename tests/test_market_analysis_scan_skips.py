@@ -1,3 +1,8 @@
+import json
+from uuid import UUID
+
+import pytest
+
 from market_analysis.scan import (
     ScanConfig,
     ScanMember,
@@ -38,7 +43,12 @@ def test_insufficient_history_is_skipped_not_failed() -> None:
     assert result.evaluations == ()
 
 
-def test_successful_no_signal_scan_records_only_evaluated_scope(monkeypatch):
+@pytest.mark.parametrize(
+    "instrument_id", ["good", UUID("d70a2059-938b-40e2-84a5-874743665e75")]
+)
+def test_successful_no_signal_scan_records_only_evaluated_scope(
+    monkeypatch, instrument_id
+):
     from market_analysis.lifecycle import expire_evaluated_signals
 
     class MarketData:
@@ -54,7 +64,10 @@ def test_successful_no_signal_scan_records_only_evaluated_scope(monkeypatch):
 
     monkeypatch.setattr("market_analysis.scan._evaluate", lambda *args: ())
     result = scan_members(
-        [ScanMember("u", "good", "e", "GOOD"), ScanMember("u", "bad", "e", "FAIL")],
+        [
+            ScanMember("u", instrument_id, "e", "GOOD"),
+            ScanMember("u", "bad", "e", "FAIL"),
+        ],
         market_data_service=MarketData(),
         config=ScanConfig(minimum_bars=2, enabled_strategies=("SUPERTREND",)),
     )
@@ -68,7 +81,7 @@ def test_successful_no_signal_scan_records_only_evaluated_scope(monkeypatch):
             pass
 
         def expire_evaluated(self, scopes, signal_ids, stability_minutes):
-            captured.extend(scopes)
+            captured.extend(json.loads(json.dumps(scopes)))
             return 1
 
     monkeypatch.setattr(
@@ -76,6 +89,6 @@ def test_successful_no_signal_scan_records_only_evaluated_scope(monkeypatch):
     )
     assert expire_evaluated_signals(object(), result, []) == 1
     assert len(captured) == 1
-    assert captured[0]["instrument_id"] == "good"
+    assert captured[0]["instrument_id"] == str(instrument_id)
     assert captured[0]["strategy_code"] == "SUPERTREND"
     assert captured[0]["timeframe"] == "1D"
