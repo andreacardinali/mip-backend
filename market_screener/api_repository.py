@@ -82,6 +82,16 @@ class MarketScreenerApiRepository:
             ).scalars()
         ]
 
+    def get_snapshot_changes(self, snapshot_id: str | None = None):
+        payload = self.db.execute(
+            text(
+                "SELECT public.sp_market_screener_snapshot_changes("
+                "CAST(:snapshot_id AS uuid))"
+            ),
+            {"snapshot_id": snapshot_id},
+        ).scalar_one_or_none()
+        return dict(payload) if payload is not None else None
+
     def list_snapshot_items(self, snapshot_id):
         return [
             dict(x)

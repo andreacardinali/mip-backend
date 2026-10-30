@@ -9,6 +9,24 @@ from uuid import UUID
 import pytest
 
 
+def test_snapshot_changes_installer_compares_successful_unfiltered_snapshots() -> None:
+    sql = Path("oneshot/install_screener_snapshot_changes.sql").read_text(
+        encoding="utf-8"
+    )
+    assert sql.count("r.status = 'SUCCESS'") == 2
+    assert sql.count("r.phase_results->'analysis_scan'->>'status' = 'SUCCESS'") == 2
+    assert sql.count("r.phase_results->'ranking'->>'status' = 'SUCCESS'") == 2
+    assert "FULL JOIN previous_items" in sql
+    assert "current.instrument_id = previous.instrument_id" in sql
+    assert "IS DISTINCT FROM" in sql
+    assert "'NEW'" in sql and "'CHANGED'" in sql and "'REMOVED'" in sql
+    comparison = sql.split("OR ROW(")[1].split("SELECT jsonb_build_object")[0]
+    assert "reference_price" not in comparison
+    assert "composite_score" not in comparison
+    assert "ranking_position" not in comparison
+    assert "previous_snapshot_id" in sql
+
+
 def test_performance_installer_preserves_asof_prices_and_direction_cycles() -> None:
     sql = Path("oneshot/install_signal_performance_history.sql").read_text(
         encoding="utf-8"

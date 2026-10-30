@@ -66,6 +66,20 @@ def list_screener_snapshots(
         db.close()
 
 
+@router.get("/changes")
+def get_screener_snapshot_changes(
+    snapshot_id: UUID | None = None,
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    db = SessionLocal()
+    try:
+        return MarketScreenerApiRepository(db).get_snapshot_changes(
+            str(snapshot_id) if snapshot_id else None
+        )
+    finally:
+        db.close()
+
+
 @router.get("/snapshots/{snapshot_id}/items")
 def list_screener_snapshot_items(
     snapshot_id: str, current_user: CurrentUser = Depends(get_current_user)
