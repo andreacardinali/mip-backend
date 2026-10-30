@@ -128,13 +128,17 @@ def test_scheduler_catalog_pruning_installer_matches_schema():
     assert " ".join(snapshots[0].split()) == " ".join(installed.group().split())
 
 
-@pytest.mark.parametrize("name", ["sp_register_scheduler_job", "sp_list_scheduler_jobs"])
+@pytest.mark.parametrize(
+    "name", ["sp_register_scheduler_job", "sp_list_scheduler_jobs"]
+)
 def test_scheduler_description_installer_matches_schema(name):
     installer = (ROOT / "oneshot/install_scheduler_job_descriptions.sql").read_text(
         encoding="utf-8"
     )
     schema = (ROOT / "mip_schema.sql").read_text(encoding="utf-8")
-    parameters = r"[^)]*p_description text" if name == "sp_register_scheduler_job" else ""
+    parameters = (
+        r"[^)]*p_description text" if name == "sp_register_scheduler_job" else ""
+    )
     pattern = rf"FUNCTION public\.{name}\({parameters}\) RETURNS TABLE.*?(?:\$function\$;|\$\$;)"
     installed = re.search(pattern, installer, re.DOTALL)
     snapshots = re.findall(pattern, schema, re.DOTALL)

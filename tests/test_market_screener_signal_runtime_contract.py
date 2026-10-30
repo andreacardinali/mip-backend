@@ -228,8 +228,14 @@ def test_watchlist_filter_installer_matches_schema_and_filters_before_limit() ->
 @pytest.mark.parametrize(
     "scenario",
     [
-        "success", "partial", "scan_disabled", "ranking_disabled", "queue_failure",
-        "ranking_only", "llm_disabled", "stop_on_error",
+        "success",
+        "partial",
+        "scan_disabled",
+        "ranking_disabled",
+        "queue_failure",
+        "ranking_only",
+        "llm_disabled",
+        "stop_on_error",
     ],
 )
 def test_pipeline_summary_is_post_commit_and_cannot_fail_snapshot(scenario) -> None:
@@ -310,7 +316,9 @@ def test_pipeline_summary_is_post_commit_and_cannot_fail_snapshot(scenario) -> N
         "run_discovery_refresh": lambda: {"status": "SUCCESS"},
         "run_candidate_resolver": lambda: {"status": "SUCCESS"},
         "run_analysis_scan": lambda: {
-            "status": "PARTIAL" if scenario in ("partial", "stop_on_error") else "SUCCESS"
+            "status": (
+                "PARTIAL" if scenario in ("partial", "stop_on_error") else "SUCCESS"
+            )
         },
         "run_llm_enrichment": lambda: {"status": "SUCCESS"},
         "run_ranking": lambda: {"status": "SUCCESS"},
@@ -340,8 +348,12 @@ def test_pipeline_summary_is_post_commit_and_cannot_fail_snapshot(scenario) -> N
     elif scenario == "stop_on_error":
         assert executed == ["discovery_refresh", "candidate_resolver", "analysis_scan"]
     if scenario in (
-        "partial", "scan_disabled", "ranking_disabled", "ranking_only",
-        "llm_disabled", "stop_on_error",
+        "partial",
+        "scan_disabled",
+        "ranking_disabled",
+        "ranking_only",
+        "llm_disabled",
+        "stop_on_error",
     ):
         assert result["notification_summary"]["status"] == "SKIPPED"
         assert "summary_transaction" not in calls
@@ -359,7 +371,9 @@ def test_pipeline_summary_is_post_commit_and_cannot_fail_snapshot(scenario) -> N
         )
 
 
-@pytest.mark.parametrize("payload", [{"phases": []}, {"phases": ["unknown"]}, {"typo": True}])
+@pytest.mark.parametrize(
+    "payload", [{"phases": []}, {"phases": ["unknown"]}, {"typo": True}]
+)
 def test_pipeline_request_rejects_invalid_parameters(payload) -> None:
     from pydantic import ValidationError
 

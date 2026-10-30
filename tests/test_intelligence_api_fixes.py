@@ -282,12 +282,21 @@ def test_entity_refresh_worker_uses_request_options(monkeypatch):
     "job_key, payload, expected",
     [
         ("market_screener_pipeline", None, {}),
-        ("market_screener_pipeline", {"phases": ["ranking"], "stop_on_error": True},
-         {"phases": ["ranking"], "stop_on_error": True}),
-        ("refresh_entities_missing", {"mode": "ALL", "full_refresh": True},
-         {"mode": "ALL", "full_refresh": True}),
-        ("refresh_entities_missing", {"mode": "SYMBOL", "symbol": "msft"},
-         {"mode": "SYMBOL", "symbol": "MSFT"}),
+        (
+            "market_screener_pipeline",
+            {"phases": ["ranking"], "stop_on_error": True},
+            {"phases": ["ranking"], "stop_on_error": True},
+        ),
+        (
+            "refresh_entities_missing",
+            {"mode": "ALL", "full_refresh": True},
+            {"mode": "ALL", "full_refresh": True},
+        ),
+        (
+            "refresh_entities_missing",
+            {"mode": "SYMBOL", "symbol": "msft"},
+            {"mode": "SYMBOL", "symbol": "MSFT"},
+        ),
         ("market_cache_cleanup", None, {}),
     ],
 )
@@ -302,9 +311,12 @@ def test_scheduler_admin_run_enqueues_validated_parameters(
     repository.request_run.return_value = ticket
     monkeypatch.setattr(system_admin, "SessionLocal", lambda: db)
     monkeypatch.setattr(system_admin, "SchedulerRepository", lambda session: repository)
-    assert system_admin.run_job_now(
-        job_key, current_user={"user_id": USER_ID}, payload=payload
-    ) == ticket
+    assert (
+        system_admin.run_job_now(
+            job_key, current_user={"user_id": USER_ID}, payload=payload
+        )
+        == ticket
+    )
     repository.request_run.assert_called_once_with(
         job_key=job_key, requested_by=USER_ID, payload=expected, source="ADMIN_UI"
     )
@@ -402,7 +414,9 @@ def test_contextual_job_rejects_payloadless_admin_execution(
         elif operation == "schedule":
             system_admin.update_job(
                 job_key,
-                system_admin.JobUpdate(trigger_type="cron", cron_expression="0 5 * * *"),
+                system_admin.JobUpdate(
+                    trigger_type="cron", cron_expression="0 5 * * *"
+                ),
                 current_user={"user_id": USER_ID},
             )
         else:
@@ -414,13 +428,25 @@ def test_contextual_job_rejects_payloadless_admin_execution(
 @pytest.mark.parametrize(
     "job_key, module",
     [
-        ("market_screener_context_analysis", "jobs.market_screener_context_analysis.worker"),
+        (
+            "market_screener_context_analysis",
+            "jobs.market_screener_context_analysis.worker",
+        ),
         ("market_price_refresh_request", "jobs.market_price_refresh.request"),
         ("market_discovery_refresh", "jobs.market_discovery_refresh.worker"),
-        ("market_discovery_candidate_resolver", "jobs.market_discovery_candidate_resolver.worker"),
-        ("market_discovery_analysis_scan", "jobs.market_discovery_analysis_scan.worker"),
+        (
+            "market_discovery_candidate_resolver",
+            "jobs.market_discovery_candidate_resolver.worker",
+        ),
+        (
+            "market_discovery_analysis_scan",
+            "jobs.market_discovery_analysis_scan.worker",
+        ),
         ("market_analysis_scan", "jobs.market_analysis_scan.worker"),
-        ("market_analysis_llm_enrichment", "jobs.market_analysis_llm_enrichment.worker"),
+        (
+            "market_analysis_llm_enrichment",
+            "jobs.market_analysis_llm_enrichment.worker",
+        ),
         ("market_screener_ranking", "jobs.market_screener_ranking.worker"),
         ("refresh_entities_full", "jobs.entities.refresh_entities_full"),
     ],

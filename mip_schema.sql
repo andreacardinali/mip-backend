@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict UqRGFC32TJkKBLz2Ia7JuawF0JB95D44lkMtv9VPGqhKhRNFMtam8EHe5UhDqyW
+\restrict 0Y4orhDRfV8ccbY8e8rAmpdo1oboqqyL9KGGgY01F4mBMPQe2toPCAFbeVIUB5B
 
 -- Dumped from database version 18.6 (Debian 18.6-1.pgdg13+2)
 -- Dumped by pg_dump version 18.6 (Debian 18.6-1.pgdg13+2)
@@ -9168,8 +9168,8 @@ $$;
 --
 
 CREATE FUNCTION public.sp_register_scheduler_job(p_job_key character varying, p_job_name character varying, p_python_module character varying, p_trigger_type character varying, p_cron_expression character varying, p_interval_minutes integer, p_enabled_by_default boolean, p_description text) RETURNS TABLE(job_id uuid, job_key character varying, action character varying)
-LANGUAGE plpgsql
-AS $function$
+    LANGUAGE plpgsql
+    AS $$
 DECLARE
     v_registration record;
 BEGIN
@@ -9195,7 +9195,8 @@ BEGIN
     RETURN QUERY
     SELECT v_registration.job_id, v_registration.job_key, v_registration.action;
 END;
-$function$;
+$$;
+
 
 --
 -- Name: sp_release_stale_llm_requests(integer); Type: FUNCTION; Schema: public; Owner: -
@@ -9664,15 +9665,45 @@ $$;
 
 
 --
+-- Name: sp_scheduler_get_run_logs(uuid, bigint, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_scheduler_get_run_logs(p_job_run_id uuid, p_after_log_id bigint DEFAULT 0, p_limit integer DEFAULT 500) RETURNS TABLE(log_id bigint, job_run_id uuid, logged_at timestamp with time zone, level character varying, logger_name character varying, message text)
+    LANGUAGE sql STABLE
+    AS $$
+    SELECT
+        log.log_id,
+        log.job_run_id,
+        log.logged_at,
+        log.level,
+        log.logger_name,
+        log.message
+    FROM public.scheduler_job_run_logs log
+    WHERE log.job_run_id = p_job_run_id
+      AND log.log_id > greatest(p_after_log_id, 0)
+    ORDER BY log.log_id
+    LIMIT least(greatest(p_limit, 1), 2000);
+$$;
+
+
+--
+-- Name: sp_scheduler_list_job_ids(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_scheduler_list_job_ids() RETURNS SETOF uuid
+    LANGUAGE sql STABLE
+    AS $$
+    SELECT job_id FROM public.scheduler_jobs;
+$$;
+
+
+--
 -- Name: sp_scheduler_prune_undefined_jobs(text[]); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.sp_scheduler_prune_undefined_jobs(
-    p_defined_job_keys text[]
-)
-RETURNS TABLE(job_id uuid, job_key varchar)
-LANGUAGE plpgsql
-AS $function$
+CREATE FUNCTION public.sp_scheduler_prune_undefined_jobs(p_defined_job_keys text[]) RETURNS TABLE(job_id uuid, job_key character varying)
+    LANGUAGE plpgsql
+    AS $$
 DECLARE
     v_removed_ids uuid[];
     v_job_id uuid;
@@ -9744,39 +9775,6 @@ BEGIN
     WHERE jobs.job_id = ANY(v_removed_ids)
     RETURNING jobs.job_id, jobs.job_key;
 END;
-$function$;
-
-
---
--- Name: sp_scheduler_get_run_logs(uuid, bigint, integer); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION public.sp_scheduler_get_run_logs(p_job_run_id uuid, p_after_log_id bigint DEFAULT 0, p_limit integer DEFAULT 500) RETURNS TABLE(log_id bigint, job_run_id uuid, logged_at timestamp with time zone, level character varying, logger_name character varying, message text)
-    LANGUAGE sql STABLE
-    AS $$
-    SELECT
-        log.log_id,
-        log.job_run_id,
-        log.logged_at,
-        log.level,
-        log.logger_name,
-        log.message
-    FROM public.scheduler_job_run_logs log
-    WHERE log.job_run_id = p_job_run_id
-      AND log.log_id > greatest(p_after_log_id, 0)
-    ORDER BY log.log_id
-    LIMIT least(greatest(p_limit, 1), 2000);
-$$;
-
-
---
--- Name: sp_scheduler_list_job_ids(); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION public.sp_scheduler_list_job_ids() RETURNS SETOF uuid
-    LANGUAGE sql STABLE
-    AS $$
-    SELECT job_id FROM public.scheduler_jobs;
 $$;
 
 
@@ -16700,5 +16698,5 @@ ALTER TABLE ONLY public.watchlists
 -- PostgreSQL database dump complete
 --
 
-\unrestrict UqRGFC32TJkKBLz2Ia7JuawF0JB95D44lkMtv9VPGqhKhRNFMtam8EHe5UhDqyW
+\unrestrict 0Y4orhDRfV8ccbY8e8rAmpdo1oboqqyL9KGGgY01F4mBMPQe2toPCAFbeVIUB5B
 

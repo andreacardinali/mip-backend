@@ -46,10 +46,14 @@ def discover_job_definitions(
                         directories.append(path)
                     elif path.match(JOB_DEFINITION_PATTERN):
                         if not stat.S_ISREG(mode):
-                            raise JobDefinitionError(f"Not a regular job definition: {path}")
+                            raise JobDefinitionError(
+                                f"Not a regular job definition: {path}"
+                            )
                         definitions.append(path)
     except OSError as exc:
-        raise JobDefinitionError(f"Unable to scan job definitions under {root}") from exc
+        raise JobDefinitionError(
+            f"Unable to scan job definitions under {root}"
+        ) from exc
     return sorted(definitions)
 
 

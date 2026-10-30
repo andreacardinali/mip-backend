@@ -86,20 +86,37 @@ def scheduler_catalog(monkeypatch):
     repository = MagicMock()
     repository.register_job.return_value = {"job_id": "defined", "action": "UNCHANGED"}
     monkeypatch.setattr(scheduler_bootstrap, "SessionLocal", lambda: db)
-    monkeypatch.setattr(scheduler_bootstrap, "SchedulerRepository", lambda session: repository)
-    monkeypatch.setattr(scheduler_bootstrap, "discover_job_definitions", lambda root: [Path("pipeline.job.json")])
-    monkeypatch.setattr(scheduler_bootstrap, "load_job_definition", lambda path, **kwargs: definition)
+    monkeypatch.setattr(
+        scheduler_bootstrap, "SchedulerRepository", lambda session: repository
+    )
+    monkeypatch.setattr(
+        scheduler_bootstrap,
+        "discover_job_definitions",
+        lambda root: [Path("pipeline.job.json")],
+    )
+    monkeypatch.setattr(
+        scheduler_bootstrap, "load_job_definition", lambda path, **kwargs: definition
+    )
     return scheduler_bootstrap, db, repository
 
 
-@pytest.mark.parametrize("removed_jobs", [[], [{"job_key": "removed_job", "job_id": UUID(int=2)}]])
-def test_scheduler_catalog_prunes_only_after_registration(scheduler_catalog, removed_jobs):
+@pytest.mark.parametrize(
+    "removed_jobs", [[], [{"job_key": "removed_job", "job_id": UUID(int=2)}]]
+)
+def test_scheduler_catalog_prunes_only_after_registration(
+    scheduler_catalog, removed_jobs
+):
     bootstrap, db, repository = scheduler_catalog
     repository.prune_undefined_jobs.return_value = removed_jobs
     bootstrap.bootstrap_scheduler_jobs(jobs_root=Path("jobs"), timezone="UTC")
-    repository.prune_undefined_jobs.assert_called_once_with(job_keys=["market_screener_pipeline"])
+    repository.prune_undefined_jobs.assert_called_once_with(
+        job_keys=["market_screener_pipeline"]
+    )
     repository.register_job.assert_called_once()
-    assert [call[0] for call in repository.mock_calls] == ["register_job", "prune_undefined_jobs"]
+    assert [call[0] for call in repository.mock_calls] == [
+        "register_job",
+        "prune_undefined_jobs",
+    ]
     db.commit.assert_called_once()
     db.rollback.assert_not_called()
     db.close.assert_called_once()
@@ -107,22 +124,34 @@ def test_scheduler_catalog_prunes_only_after_registration(scheduler_catalog, rem
 
 def test_scheduler_catalog_imports_description_on_each_bootstrap(scheduler_catalog):
     bootstrap, db, repository = scheduler_catalog
-    definition = bootstrap.load_job_definition(Path("pipeline.job.json"), timezone="UTC")
+    definition = bootstrap.load_job_definition(
+        Path("pipeline.job.json"), timezone="UTC"
+    )
     bootstrap.bootstrap_scheduler_jobs(jobs_root=Path("jobs"), timezone="UTC")
-    assert repository.register_job.call_args.kwargs["description"] == definition["description"]
+    assert (
+        repository.register_job.call_args.kwargs["description"]
+        == definition["description"]
+    )
     definition["description"] = "Updated screener description."
     bootstrap.bootstrap_scheduler_jobs(jobs_root=Path("jobs"), timezone="UTC")
-    assert repository.register_job.call_args.kwargs["description"] == definition["description"]
+    assert (
+        repository.register_job.call_args.kwargs["description"]
+        == definition["description"]
+    )
     assert db.commit.call_count == 2
 
 
 @pytest.mark.parametrize("description", [None, "", "   ", 123])
 def test_scheduler_catalog_rejects_invalid_description(scheduler_catalog, description):
     bootstrap, _, _ = scheduler_catalog
-    definition = dict(bootstrap.load_job_definition(Path("pipeline.job.json"), timezone="UTC"))
+    definition = dict(
+        bootstrap.load_job_definition(Path("pipeline.job.json"), timezone="UTC")
+    )
     definition["description"] = description
     with pytest.raises(bootstrap.JobDefinitionError, match="invalid description"):
-        bootstrap.validate_job_definition(definition, path=Path("pipeline.job.json"), timezone="UTC")
+        bootstrap.validate_job_definition(
+            definition, path=Path("pipeline.job.json"), timezone="UTC"
+        )
 
 
 def test_scheduler_repository_passes_description_to_registration():
@@ -132,11 +161,19 @@ def test_scheduler_repository_passes_description_to_registration():
     expected = {"job_id": "defined", "action": "UPDATED"}
     db.execute.return_value.mappings.return_value.one.return_value = expected
     repository = SchedulerRepository(db)
-    assert repository.register_job(
-        job_key="defined", job_name="Defined job", description="Updated description.",
-        python_module="jobs.worker", trigger_type="interval", cron_expression=None,
-        interval_minutes=15, enabled_by_default=True,
-    ) == expected
+    assert (
+        repository.register_job(
+            job_key="defined",
+            job_name="Defined job",
+            description="Updated description.",
+            python_module="jobs.worker",
+            trigger_type="interval",
+            cron_expression=None,
+            interval_minutes=15,
+            enabled_by_default=True,
+        )
+        == expected
+    )
     statement, parameters = db.execute.call_args.args
     assert ":description" in str(statement)
     assert parameters["description"] == "Updated description."
@@ -157,17 +194,25 @@ def test_scheduler_catalog_rolls_back_on_failure(scheduler_catalog, failure):
 
 
 @pytest.mark.parametrize("problem", ["empty", "invalid", "duplicate"])
-def test_scheduler_catalog_validates_before_database_access(scheduler_catalog, monkeypatch, problem):
+def test_scheduler_catalog_validates_before_database_access(
+    scheduler_catalog, monkeypatch, problem
+):
     bootstrap, db, repository = scheduler_catalog
     session_factory = MagicMock()
     monkeypatch.setattr(bootstrap, "SessionLocal", session_factory)
     if problem == "empty":
         monkeypatch.setattr(bootstrap, "discover_job_definitions", lambda root: [])
     elif problem == "invalid":
-        loader = MagicMock(side_effect=bootstrap.JobDefinitionError("invalid definition"))
+        loader = MagicMock(
+            side_effect=bootstrap.JobDefinitionError("invalid definition")
+        )
         monkeypatch.setattr(bootstrap, "load_job_definition", loader)
     else:
-        monkeypatch.setattr(bootstrap, "discover_job_definitions", lambda root: [Path("first.job.json"), Path("second.job.json")])
+        monkeypatch.setattr(
+            bootstrap,
+            "discover_job_definitions",
+            lambda root: [Path("first.job.json"), Path("second.job.json")],
+        )
     with pytest.raises(bootstrap.JobDefinitionError):
         bootstrap.bootstrap_scheduler_jobs(jobs_root=Path("jobs"), timezone="UTC")
     session_factory.assert_not_called()
@@ -186,14 +231,21 @@ def test_scheduler_catalog_repository_uses_atomic_pruning_routine():
 
     calls = db.execute.call_args_list
     assert len(calls) == 1
-    assert str(calls[0].args[0]) == "SELECT * FROM public.sp_scheduler_prune_undefined_jobs(CAST(:job_keys AS text[]))"
+    assert (
+        str(calls[0].args[0])
+        == "SELECT * FROM public.sp_scheduler_prune_undefined_jobs(CAST(:job_keys AS text[]))"
+    )
     assert calls[0].args[1] == {"job_keys": ["defined_job"]}
     db.commit.assert_not_called()
     db.rollback.assert_not_called()
 
 
-@pytest.mark.parametrize("problem", ["missing", "root_permission", "nested_permission", "unreadable"])
-def test_scheduler_catalog_access_failure_does_not_open_database(tmp_path, monkeypatch, problem):
+@pytest.mark.parametrize(
+    "problem", ["missing", "root_permission", "nested_permission", "unreadable"]
+)
+def test_scheduler_catalog_access_failure_does_not_open_database(
+    tmp_path, monkeypatch, problem
+):
     import scheduler_bootstrap
 
     session_factory = MagicMock()
@@ -215,7 +267,9 @@ def test_scheduler_catalog_access_failure_does_not_open_database(tmp_path, monke
 
         monkeypatch.setattr(scheduler_bootstrap.os, "scandir", scandir)
     elif problem == "unreadable":
-        monkeypatch.setattr(Path, "read_text", MagicMock(side_effect=PermissionError("denied")))
+        monkeypatch.setattr(
+            Path, "read_text", MagicMock(side_effect=PermissionError("denied"))
+        )
     with pytest.raises(scheduler_bootstrap.JobDefinitionError):
         scheduler_bootstrap.bootstrap_scheduler_jobs(jobs_root=root, timezone="UTC")
     session_factory.assert_not_called()
