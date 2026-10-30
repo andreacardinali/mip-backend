@@ -361,35 +361,80 @@ def test_performance_installer_preserves_asof_prices_and_direction_cycles() -> N
     assert "OFFSET GREATEST(p_offset, 0)" in sql
 
 
-def test_incremental_analysis_installer_matches_schema() -> None:
+@pytest.mark.parametrize("scheduler_snapshot", [False, True])
+def test_incremental_analysis_installer_matches_schema(scheduler_snapshot) -> None:
     import re
 
     schema = Path("mip_schema.sql").read_text(encoding="utf-8")
     installer = Path("oneshot/install_screener_incremental_analysis.sql").read_text(
         encoding="utf-8"
     )
+    scheduler_installer = Path(
+        "oneshot/install_scheduler_execution_requests.sql"
+    ).read_text(encoding="utf-8")
     pattern = (
-        r"CREATE(?: OR REPLACE)? FUNCTION public\.(\w+)\((.*?)\) RETURNS "
+        r"CREATE(?: OR REPLACE)? FUNCTION public\.(\w+)\((.*?)\)\s+RETURNS\s+"
         r"(.*?)AS\s+(\$[^$]*\$)(.*?)\4;"
     )
+    definitions = re.findall(pattern, installer, re.DOTALL)
+    progress_definitions = [
+        definition
+        for definition in re.findall(
+            pattern, scheduler_installer, re.DOTALL
+        )
+        if definition[0] == "sp_market_screener_context_progress"
+    ]
+    assert len(progress_definitions) == 1
+    name, _signature, returns, delimiter, body = progress_definitions[0]
+    scheduler_progress = [re.sub(r"\s+", " ", returns + body).strip()]
+    if scheduler_snapshot:
+        schema = re.sub(
+            pattern,
+            lambda match: (
+                f"CREATE FUNCTION public.{name}({match.group(2)}) RETURNS "
+                f"{returns}AS {delimiter}{body}{delimiter};"
+                if match.group(1) == name else match.group(0)
+            ),
+            schema,
+            flags=re.DOTALL,
+        )
     schema_definitions = {
         (name, signature): re.sub(r"\s+", " ", returns + body).strip()
         for name, signature, returns, _delimiter, body in re.findall(
             pattern, schema, re.DOTALL
         )
     }
-    definitions = re.findall(pattern, installer, re.DOTALL)
+    assert len(scheduler_progress) == 1
     assert len(definitions) == 6
     assert installer.startswith("BEGIN;")
     assert installer.rstrip().endswith("COMMIT;")
     for name, signature, returns, _delimiter, body in definitions:
-        assert (
-            re.sub(r"\s+", " ", returns + body).strip()
-            == schema_definitions[name, signature]
-        )
+        installed_definition = re.sub(r"\s+", " ", returns + body).strip()
+        accepted_definitions = [installed_definition]
+        if name == "sp_market_screener_context_progress":
+            accepted_definitions.extend(scheduler_progress)
+        assert schema_definitions[name, signature] in accepted_definitions
     assert "pg_try_advisory_lock(" in installer
     assert "pg_advisory_unlock(" in installer
     assert "pg_try_advisory_xact_lock(" not in installer
+
+
+def test_scheduler_progress_override_preserves_context_and_domain_fallback() -> None:
+    installer = Path("oneshot/install_scheduler_execution_requests.sql").read_text(
+        encoding="utf-8"
+    )
+    progress = installer.split(
+        "CREATE OR REPLACE FUNCTION public.sp_market_screener_context_progress(", 1
+    )[1].split("$$;", 1)[0]
+    assert "sp_market_screener_context_instruments(" in progress
+    assert "r.requested_by = p_user_id" in progress
+    assert "r.payload->>'context_type' = p_context_type" in progress
+    assert "r.payload->>'context_id' = p_context_id::text" in progress
+    assert "v_request.request_id IS NULL" in progress
+    assert "v_run->>'job_run_id' IS DISTINCT FROM v_request.job_run_id::text" in progress
+    assert "THEN RETURN v_run;" in progress
+    assert "sp_scheduler_execution_status(v_request.job_run_id, p_user_id)" in progress
+    assert "'screener_run_id', v_execution->'domain_run_id'" in progress
 
 
 def test_api_enriches_existing_opportunity_payloads() -> None:

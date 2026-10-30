@@ -19,7 +19,8 @@ execution status, result and error; another user's execution returns 404.
 | `POST /api/admin/system/scheduler/jobs/{job_key}/run` | Requested ordinary job | `ADMIN_UI` |
 
 Before using these APIs on an existing database, stop the backend and scheduler,
-manually apply `oneshot/install_scheduler_execution_requests.sql`, then restart
+manually apply `oneshot/install_scheduler_execution_requests.sql` after the
+Screener installers, then restart
 the updated processes. Scheduler bootstrap discovers the job manifests. No
 installation SQL runs automatically at application startup.
 
@@ -721,6 +722,12 @@ run on startup. A missing `sp_market_screener_session_analysis_lock(boolean)`
 indicates that this database upgrade has not been applied. Apply this installer
 last when reapplying the older context-AI installer, which replaces the legacy
 candidate-selection overload.
+If scheduler execution requests are installed, reapply
+`oneshot/install_scheduler_execution_requests.sql` after this installer: it
+replaces `sp_market_screener_context_progress` with the scheduler-aware version.
+Schema dumps taken before or after that replacement contain different progress
+definitions; the incremental installer intentionally retains its standalone
+definition without depending on the scheduler-request columns and routines.
 
 Scheduled and automatic jobs also preserve independently committed results:
 technical scans commit each instrument, FMP sync commits each catalyst or filing,
