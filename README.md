@@ -525,6 +525,36 @@ authentication and parameter validation when FastAPI/Pydantic and HTTPX are
 installed; otherwise those cases are skipped. Frontend source-contract checks
 do not replace a TypeScript build or interactive UI validation.
 
+### Contextual screener analysis
+
+Review and manually apply `oneshot/install_screener_contexts.sql` after the
+existing screener, ranking, consensus and snapshot installers. Its four routines
+are also present in the authoritative `mip_schema.sql`; no startup migration is
+performed. This installer has not been executed against the live database.
+
+Authenticated `GET /api/screener/contexts` lists the user's watchlists and
+portfolios plus active universes, including instrument counts. Context filtering
+uses `context_type` and `context_id` together; `strategy_code` and
+`consensus_direction` are applied in SQL before the result limit. Watchlists
+match entity instruments, portfolios match nonzero exact-instrument positions,
+and universes match current members. Foreign or missing collections return 404.
+
+`POST /api/screener/analyze` accepts a context type and UUID. It synchronously
+analyzes 1-1000 context instruments using the configured market-data provider
+and shared scan engine, then rebuilds the global ranking. The transaction also
+records a screener run and global ranking snapshot, returning `run_id` and
+`ranking_snapshot_id`. Partial scans remain in history but are excluded from
+complete snapshot comparisons. Exceptions roll back all writes; failed manual
+attempts do not leave a persisted run. Manual analyses do not enqueue summary
+notifications. A transaction advisory lock prevents overlapping manual analyses
+(409), but does not serialize them with the scheduled pipeline.
+
+Technical watchlist/portfolio universes are inactive and excluded from public
+context discovery. Empty or oversized contexts return 422. Offline service,
+HTTP and frontend contracts are in
+`tests/test_market_screener_signal_runtime_contract.py`; live SQL and interactive
+GUI verification remain separate checks.
+
 ### Multi-category discovery refresh
 
 The discovery refresh job now requests Reddit trending, gainers, losers and most

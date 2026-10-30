@@ -7,8 +7,39 @@ from sqlalchemy.orm import Session
 
 
 class MarketScreenerApiRepository:
+    def list_contexts(self, *, user_id: str) -> list[dict[str, Any]]:
+        rows = self.db.execute(
+            text("SELECT * FROM public.sp_market_screener_list_contexts(CAST(:user_id AS uuid))"),
+            {"user_id": user_id},
+        ).mappings()
+        return [dict(row) for row in rows]
+
+    def prepare_context_scan(
+        self, *, user_id: str, context_type: str, context_id: str
+    ) -> str:
+        return str(self.db.execute(
+            text(
+                "SELECT public.sp_market_screener_prepare_context_scan("
+                "CAST(:user_id AS uuid), CAST(:context_type AS varchar), CAST(:context_id AS uuid))"
+            ),
+            {"user_id": user_id, "context_type": context_type, "context_id": context_id},
+        ).scalar_one())
+
     def __init__(self, db: Session):
         self.db = db
+
+    def context_instruments(
+        self, *, user_id: str, context_type: str, context_id: str
+    ) -> list[dict[str, Any]]:
+        rows = self.db.execute(
+            text(
+                "SELECT * FROM public.sp_market_screener_context_instruments("
+                "CAST(:user_id AS uuid), CAST(:context_type AS varchar), "
+                "CAST(:context_id AS uuid))"
+            ),
+            {"user_id": user_id, "context_type": context_type, "context_id": context_id},
+        ).mappings()
+        return [dict(row) for row in rows]
 
     def list_opportunities(
         self,

@@ -4,11 +4,54 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from market_analysis.scan import ScanConfig, ScanMember
 from market_screener.api_repository import MarketScreenerApiRepository
 from market_screener.config import ScreenerRankingConfig
 from market_screener.ranking import rank_opportunities
 from market_screener.repository import MarketScreenerRepository
+from market_screener.run_repository import MarketScreenerRunRepository
 from notifications.queue import NotificationQueue
+from services.market_analysis_scan import run_member_analysis_scan
+
+
+def analyze_screener_context(
+    db: Session, *, user_id: str, context_type: str, context_id: str,
+    market_data_service, config: ScanConfig,
+) -> dict[str, Any]:
+    repository = MarketScreenerApiRepository(db)
+    context = dict(user_id=user_id, context_type=context_type, context_id=context_id)
+    instruments = repository.context_instruments(**context)
+    if not instruments:
+        raise ValueError("Il contesto non contiene strumenti da analizzare")
+    if len(instruments) > 1000:
+        raise ValueError("Il contesto supera il limite di 1000 strumenti")
+    universe_id = repository.prepare_context_scan(**context)
+    runs = MarketScreenerRunRepository(db)
+    run_id = runs.start()
+    scan = run_member_analysis_scan(
+        db, market_data_service=market_data_service, universe_id=universe_id,
+        universe_code=f"CONTEXT_{context_type}_{context_id}",
+        members=[ScanMember(universe_id=universe_id, **item) for item in instruments],
+        config=config,
+    )
+    ranking = build_market_screener_ranking(
+        MarketScreenerRepository(db), config=ScreenerRankingConfig()
+    )
+    snapshot_id = runs.create_snapshot(run_id=run_id)
+    runs.complete(
+        run_id=run_id,
+        status=scan["status"],
+        discovery_snapshot_id=None,
+        scan_run_id=scan["run_id"],
+        phase_results={"context": context, "analysis_scan": scan, "ranking": ranking},
+    )
+    return {
+        "status": scan["status"],
+        "run_id": str(run_id),
+        "ranking_snapshot_id": str(snapshot_id),
+        "scan": scan,
+        "ranking": ranking,
+    }
 
 
 def enqueue_snapshot_summary(

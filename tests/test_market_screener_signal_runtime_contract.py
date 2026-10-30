@@ -307,7 +307,7 @@ def test_context_installer_matches_schema_and_filters_before_limit() -> None:
 
     schema = Path("mip_schema.sql").read_text(encoding="utf-8")
     installer = Path("oneshot/install_screener_contexts.sql").read_text(encoding="utf-8")
-    for name in ("sp_market_screener_context_instruments", "sp_market_screener_list_filtered_opportunities"):
+    for name in ("sp_market_screener_context_instruments", "sp_market_screener_list_filtered_opportunities", "sp_market_screener_list_contexts", "sp_market_screener_prepare_context_scan"):
         pattern = rf"FUNCTION public\.{name}\(.*?\$\$;"
         assert re.search(pattern, schema, re.DOTALL).group() == re.search(pattern, installer, re.DOTALL).group()
     assert "w.user_id = p_user_id" in installer
@@ -315,6 +315,250 @@ def test_context_installer_matches_schema_and_filters_before_limit() -> None:
     assert "pos.quantity <> 0" in installer
     assert "mum.valid_to IS NULL" in installer
     assert installer.index("o.consensus_direction = p_consensus_direction") < installer.index("LIMIT least")
+
+
+@pytest.mark.parametrize("outcome", ["success", "partial", "empty", "too_many", "failure"])
+def test_manual_context_scan_records_history_in_callers_transaction(monkeypatch, outcome):
+    calls = []
+    context = {"user_id": "owner", "context_type": "WATCHLIST", "context_id": "list"}
+    member = {"instrument_id": "instrument", "entity_id": "entity", "symbol": "ABC",
+              "exchange": "X", "currency_code": "USD"}
+    count = 0 if outcome == "empty" else 1001 if outcome == "too_many" else 1
+    db = object()
+    run_id = UUID("00000000-0000-0000-0000-000000000001")
+    snapshot_id = UUID("00000000-0000-0000-0000-000000000002")
+    scan = {"status": "PARTIAL" if outcome == "partial" else "SUCCESS", "run_id": "scan"}
+
+    def context_instruments(**kwargs):
+        assert kwargs == context
+        calls.append("members")
+        return [member] * count
+
+    def prepare_context_scan(**kwargs):
+        assert kwargs == context
+        calls.append("lock")
+        return "universe"
+
+    def start():
+        calls.append("start")
+        return run_id
+
+    def scan_members(session, **kwargs):
+        assert session is db
+        assert kwargs["members"] == [{"universe_id": "universe", **member}]
+        calls.append("scan")
+        if outcome == "failure":
+            raise RuntimeError("provider unavailable")
+        return scan
+
+    def snapshot(**kwargs):
+        assert kwargs == {"run_id": run_id}
+        calls.append("snapshot")
+        return snapshot_id
+
+    def complete(**kwargs):
+        assert kwargs == {
+            "run_id": run_id, "status": scan["status"],
+            "discovery_snapshot_id": None, "scan_run_id": "scan",
+            "phase_results": {"context": context, "analysis_scan": scan,
+                              "ranking": {"status": "SUCCESS"}},
+        }
+        calls.append("complete")
+
+    modules = {
+        "market_analysis.scan": {"ScanConfig": object, "ScanMember": lambda **kw: kw},
+        "market_screener.api_repository": {"MarketScreenerApiRepository": lambda session: SimpleNamespace(
+            context_instruments=context_instruments, prepare_context_scan=prepare_context_scan)},
+        "market_screener.config": {"ScreenerRankingConfig": object},
+        "market_screener.ranking": {"rank_opportunities": lambda *args, **kw: None},
+        "market_screener.repository": {"MarketScreenerRepository": lambda session: session},
+        "market_screener.run_repository": {"MarketScreenerRunRepository": lambda session: SimpleNamespace(
+            start=start, create_snapshot=snapshot, complete=complete)},
+        "notifications.queue": {"NotificationQueue": object},
+        "services.market_analysis_scan": {"run_member_analysis_scan": scan_members},
+    }
+    with monkeypatch.context() as patch:
+        for name, attributes in modules.items():
+            module = ModuleType(name)
+            module.__dict__.update(attributes)
+            patch.setitem(sys.modules, name, module)
+        namespace = runpy.run_path("market_screener/service.py")
+    def ranking(*args, **kwargs):
+        calls.append("ranking")
+        return {"status": "SUCCESS"}
+    namespace["analyze_screener_context"].__globals__["build_market_screener_ranking"] = ranking
+    analyze = namespace["analyze_screener_context"]
+    kwargs = {**context, "market_data_service": object(), "config": object()}
+    if outcome in ("empty", "too_many"):
+        with pytest.raises(ValueError):
+            analyze(db, **kwargs)
+        assert calls == ["members"]
+    elif outcome == "failure":
+        with pytest.raises(RuntimeError, match="provider unavailable"):
+            analyze(db, **kwargs)
+        assert calls == ["members", "lock", "start", "scan"]
+    else:
+        result = analyze(db, **kwargs)
+        assert result == {"status": scan["status"], "run_id": str(run_id),
+                          "ranking_snapshot_id": str(snapshot_id), "scan": scan,
+                          "ranking": {"status": "SUCCESS"}}
+        assert calls == ["members", "lock", "start", "scan", "ranking", "snapshot", "complete"]
+
+
+@pytest.mark.parametrize(
+    "scenario, expected_status",
+    [
+        ("analyze_success", 200), ("analyze_partial", 200),
+        ("analyze_missing", 404), ("analyze_busy", 409),
+        ("analyze_empty", 422), ("analyze_failure", 500),
+        ("analyze_commit_failure", 500), ("analyze_unauthenticated", 401),
+        ("analyze_invalid_type", 422), ("analyze_invalid_id", 422),
+        ("contexts_success", 200), ("contexts_unauthenticated", 401),
+        ("filter_success", 200), ("filter_missing", 404),
+        ("filter_without_type", 422), ("filter_without_id", 422),
+    ],
+)
+def test_screener_context_http_contract(monkeypatch, scenario, expected_status):
+    fastapi = pytest.importorskip("fastapi")
+    pytest.importorskip("httpx")
+    from fastapi.testclient import TestClient
+    from sqlalchemy.exc import DBAPIError
+
+    calls = []
+    context_id = "00000000-0000-0000-0000-000000000001"
+    context = {"user_id": "owner", "context_type": "WATCHLIST", "context_id": context_id}
+    settings = object()
+    provider = object()
+    config = object()
+    result = {"status": "PARTIAL" if scenario == "analyze_partial" else "SUCCESS"}
+
+    def current_user():
+        if scenario.endswith("unauthenticated"):
+            raise fastapi.HTTPException(401, "Authentication required")
+        return {"user_id": "owner"}
+
+    def database_error(code):
+        original = RuntimeError("database rejected context")
+        original.pgcode = code
+        return DBAPIError(None, None, original)
+
+    def commit():
+        calls.append("commit")
+        if scenario == "analyze_commit_failure":
+            raise RuntimeError("commit failed")
+
+    db = SimpleNamespace(commit=commit, rollback=lambda: calls.append("rollback"),
+                         close=lambda: calls.append("close"))
+
+    def session_factory():
+        calls.append("session")
+        return db
+
+    def analyze(session, **kwargs):
+        assert session is db
+        assert kwargs == {**context, "market_data_service": provider, "config": config}
+        calls.append("analyze")
+        if scenario == "analyze_missing":
+            raise database_error("P0002")
+        if scenario == "analyze_busy":
+            raise database_error("55P03")
+        if scenario == "analyze_empty":
+            raise ValueError("empty context")
+        if scenario == "analyze_failure":
+            raise RuntimeError("provider unavailable")
+        return result
+
+    def list_contexts(**kwargs):
+        assert kwargs == {"user_id": "owner"}
+        calls.append("contexts")
+        return [{"context_type": "WATCHLIST", "context_id": context_id,
+                 "name": "My list", "instrument_count": 1}]
+
+    def members(**kwargs):
+        assert kwargs == context
+        calls.append("members")
+        if scenario == "filter_missing":
+            raise database_error("P0002")
+        return []
+
+    def opportunities(**kwargs):
+        assert {key: kwargs[key] for key in context} == context
+        assert kwargs["strategy_code"] == "BREAKOUT"
+        assert kwargs["consensus_direction"] == "LONG"
+        assert kwargs["limit"] == 20
+        calls.append("opportunities")
+        return []
+
+    modules = {
+        "auth.security": {"CurrentUser": dict, "get_current_user": current_user},
+        "db": {"SessionLocal": session_factory},
+        "market_screener.api_repository": {"MarketScreenerApiRepository": lambda session: SimpleNamespace(
+            list_contexts=list_contexts, context_instruments=members, list_opportunities=opportunities)},
+        "market_analysis.lifecycle_repository": {"SignalLifecycleRepository": object},
+        "config.settings": {"settings": settings},
+        "market_analysis.scan": {"ScanConfig": SimpleNamespace(from_settings=lambda value: config)},
+        "market_data.factory": {"market_data": provider},
+        "market_screener.service": {"analyze_screener_context": analyze},
+    }
+    with monkeypatch.context() as patch:
+        for name, attributes in modules.items():
+            module = ModuleType(name)
+            module.__dict__.update(attributes)
+            patch.setitem(sys.modules, name, module)
+        router = runpy.run_path("routers/market_screener.py")["router"]
+        app = fastapi.FastAPI()
+        app.include_router(router, prefix="/api/screener")
+        with TestClient(app, raise_server_exceptions=False) as client:
+            if scenario.startswith("analyze"):
+                body = {"context_type": "WATCHLIST", "context_id": context_id}
+                if scenario == "analyze_invalid_type":
+                    body["context_type"] = "ALL"
+                if scenario == "analyze_invalid_id":
+                    body["context_id"] = "invalid"
+                response = client.post("/api/screener/analyze", json=body)
+            elif scenario.startswith("contexts"):
+                response = client.get("/api/screener/contexts")
+            else:
+                params = {"context_type": "WATCHLIST", "context_id": context_id,
+                          "strategy_code": " breakout ", "consensus_direction": "LONG", "limit": 20}
+                if scenario == "filter_without_type":
+                    del params["context_type"]
+                if scenario == "filter_without_id":
+                    del params["context_id"]
+                response = client.get("/api/screener", params=params)
+    assert response.status_code == expected_status
+    if scenario in ("analyze_success", "analyze_partial"):
+        assert response.json() == result
+        assert calls == ["session", "analyze", "commit", "close"]
+    elif scenario == "filter_success":
+        assert response.json() == []
+        assert calls == ["session", "members", "opportunities", "close"]
+    elif scenario == "contexts_success":
+        assert response.json()[0]["context_id"] == context_id
+        assert calls == ["session", "contexts", "close"]
+    elif scenario.endswith(("unauthenticated", "invalid_type", "invalid_id", "without_type", "without_id")):
+        assert calls == []
+    elif scenario.startswith("analyze"):
+        assert calls[-2:] == ["rollback", "close"]
+        assert ("commit" in calls) == (scenario == "analyze_commit_failure")
+    else:
+        assert calls == ["session", "members", "close"]
+
+
+def test_gui_context_analysis_and_optional_refresh_contract() -> None:
+    page = Path("../mip-frontend/src/pages/ScreenerPage.tsx").read_text(encoding="utf-8")
+    service = Path("../mip-frontend/src/services/marketScreener.ts").read_text(encoding="utf-8")
+    assert 'api.get<ScreenerContext[]>("/screener/contexts")' in service
+    assert 'api.post<ScreenerAnalysisResult>("/screener/analyze", context)' in service
+    assert "mutationFn: analyzeScreenerContext" in page
+    assert "await refreshScreener()" in page
+    assert "context_type: selectedContext?.context_type" in page
+    assert "context_id: selectedContext?.context_id" in page
+    assert "strategy_code: strategy.trim().toUpperCase() || undefined" in page
+    assert "useState(false)" in page.split("const [autoRefresh", 1)[1].split(";", 1)[0]
+    assert "autoRefresh && !analysis.isPending ? 60_000 : false" in page
+    assert 'analysis.error.response?.status === 409' in page
+    assert "contextsQuery.refetch()" in page
 
 
 def test_gui_handles_missing_signal_arrays() -> None:

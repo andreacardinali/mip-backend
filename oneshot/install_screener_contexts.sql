@@ -72,10 +72,58 @@ AS $$
            OR o.supporting_strategies ? p_strategy_code OR o.opposing_strategies ? p_strategy_code)
       AND (p_context_type IS NULL OR EXISTS (
           SELECT 1 FROM context c WHERE c.instrument_id = o.instrument_id
-             OR (p_context_type <> 'UNIVERSE' AND c.entity_id = coalesce(o.entity_id, i.entity_id))
+             OR (p_context_type = 'WATCHLIST' AND c.entity_id = coalesce(o.entity_id, i.entity_id))
       ))
     ORDER BY o.ranking_position NULLS LAST, o.composite_score DESC, o.opportunity_id
     LIMIT least(greatest(coalesce(p_limit, 100), 1), 1000);
+$$;
+
+CREATE OR REPLACE FUNCTION public.sp_market_screener_list_contexts(p_user_id uuid)
+RETURNS TABLE(context_type varchar, context_id uuid, name varchar, instrument_count bigint)
+LANGUAGE sql STABLE
+AS $$
+    WITH contexts AS (
+        SELECT 'WATCHLIST'::varchar AS context_type, w.watchlist_id AS context_id, w.name
+        FROM public.watchlists w WHERE w.user_id = p_user_id
+        UNION ALL
+        SELECT 'PORTFOLIO'::varchar, p.portfolio_id, p.name
+        FROM public.portfolios p WHERE p.user_id = p_user_id
+        UNION ALL
+        SELECT 'UNIVERSE'::varchar, u.universe_id, u.name
+        FROM public.market_universes u WHERE u.active
+    )
+    SELECT c.context_type, c.context_id, c.name, (
+        SELECT count(*) FROM public.sp_market_screener_context_instruments(
+            p_user_id, c.context_type, c.context_id
+        )
+    ) FROM contexts c ORDER BY c.context_type, c.name, c.context_id;
+$$;
+
+CREATE OR REPLACE FUNCTION public.sp_market_screener_prepare_context_scan(
+    p_user_id uuid, p_context_type varchar, p_context_id uuid
+) RETURNS uuid
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_universe_id uuid;
+BEGIN
+    PERFORM * FROM public.sp_market_screener_context_instruments(
+        p_user_id, p_context_type, p_context_id
+    );
+    IF NOT pg_try_advisory_xact_lock(hashtext('market_screener_manual_scan')) THEN
+        RAISE EXCEPTION 'Analysis already running' USING ERRCODE = '55P03';
+    END IF;
+    IF p_context_type = 'UNIVERSE' THEN
+        RETURN p_context_id;
+    END IF;
+    INSERT INTO public.market_universes(code, name, universe_type, active, config)
+    VALUES ('CONTEXT_' || p_context_type || '_' || p_context_id::text,
+        'Context ' || p_context_id::text, 'USER_CONTEXT', false,
+        jsonb_build_object('context_type', p_context_type, 'context_id', p_context_id))
+    ON CONFLICT (code) DO UPDATE SET updated_at = now()
+    RETURNING universe_id INTO v_universe_id;
+    RETURN v_universe_id;
+END;
 $$;
 
 COMMIT;
