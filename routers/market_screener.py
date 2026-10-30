@@ -14,16 +14,18 @@ from market_screener.api_repository import MarketScreenerApiRepository
 
 router = APIRouter()
 
+ScreenerContextType = Literal["WATCHLIST", "PORTFOLIO", "UNIVERSE", "ENTITY", "INSTRUMENT"]
+
 
 class ScreenerAnalysisRequest(BaseModel):
-    context_type: Literal["WATCHLIST", "PORTFOLIO", "UNIVERSE"]
+    context_type: ScreenerContextType
     context_id: UUID
     llm_enabled: bool = False
 
 
 @router.get("/contexts/{context_type}/{context_id}/instruments")
 def list_context_instruments(
-    context_type: Literal["WATCHLIST", "PORTFOLIO", "UNIVERSE"],
+    context_type: ScreenerContextType,
     context_id: UUID,
     current_user: CurrentUser = Depends(get_current_user),
 ):
@@ -107,7 +109,7 @@ def list_screener_opportunities(
     watchlist_match: bool | None = None,
     consensus_direction: str | None = None,
     strategy_code: str | None = Query(None, min_length=1, max_length=100),
-    context_type: Literal["WATCHLIST", "PORTFOLIO", "UNIVERSE"] | None = None,
+    context_type: ScreenerContextType | None = None,
     context_id: UUID | None = None,
     minimum_score: float = Query(0.0, ge=0, le=100),
     query: str | None = None,

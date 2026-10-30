@@ -586,6 +586,21 @@ uses `context_type` and `context_id` together; `strategy_code` and
 match entity instruments, portfolios match nonzero exact-instrument positions,
 and universes match current members. Foreign or missing collections return 404.
 
+The same authenticated endpoints accept `ENTITY` and `INSTRUMENT` scopes.
+Entities resolve all linked instruments; instruments resolve only the exact
+instrument ID, without requiring membership in a watchlist, portfolio or
+universe. Missing entities or instruments return 404. Results use identity-based
+membership filtering, not name searches. Reapply the updated
+`oneshot/install_screener_contexts.sql` manually to enable these scopes.
+
+The entity overview offers `Analizza entita` and an `Analizza` action on each
+instrument row. These open `/screener?context=ENTITY:<uuid>` or
+`/screener?context=INSTRUMENT:<uuid>` with the scope already selected; the user
+starts the scan and can optionally enable AI. The optional `context_name` URL
+parameter is a display label only. The general Screener retains the group
+selector, labelled `Ambito di analisi`. Notification scopes are unchanged;
+direct entity/instrument views do not expose group notification settings.
+
 `POST /api/screener/analyze` accepts a context type and UUID. It synchronously
 analyzes 1-1000 context instruments using the configured market-data provider
 and shared scan engine, then rebuilds the global ranking. The transaction also
@@ -596,7 +611,7 @@ attempts do not leave a persisted run. Manual analyses do not enqueue summary
 notifications. A transaction advisory lock prevents overlapping manual analyses
 (409), but does not serialize them with the scheduled pipeline.
 
-Technical watchlist/portfolio universes are inactive and excluded from public
+Technical watchlist/portfolio/entity/instrument universes are inactive and excluded from public
 context discovery. Empty or oversized contexts return 422. Offline service,
 HTTP and frontend contracts are in
 `tests/test_market_screener_signal_runtime_contract.py`; live SQL and interactive

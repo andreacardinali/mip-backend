@@ -21,6 +21,16 @@ BEGIN
             WHERE u.universe_id = p_context_id AND u.active) THEN
             RAISE EXCEPTION 'Context not found' USING ERRCODE = 'P0002';
         END IF;
+    ELSIF p_context_type = 'ENTITY' THEN
+        IF p_user_id IS NULL OR NOT EXISTS (SELECT 1 FROM public.entities e
+            WHERE e.entity_id = p_context_id) THEN
+            RAISE EXCEPTION 'Context not found' USING ERRCODE = 'P0002';
+        END IF;
+    ELSIF p_context_type = 'INSTRUMENT' THEN
+        IF p_user_id IS NULL OR NOT EXISTS (SELECT 1 FROM public.instruments target
+            WHERE target.instrument_id = p_context_id) THEN
+            RAISE EXCEPTION 'Context not found' USING ERRCODE = 'P0002';
+        END IF;
     ELSE
         RAISE EXCEPTION 'Invalid context type' USING ERRCODE = '22023';
     END IF;
@@ -39,6 +49,8 @@ BEGIN
         WHERE mum.universe_id = p_context_id AND mum.instrument_id = i.instrument_id
           AND mum.valid_to IS NULL
     ))
+            OR (p_context_type = 'ENTITY' AND i.entity_id = p_context_id)
+            OR (p_context_type = 'INSTRUMENT' AND i.instrument_id = p_context_id)
     ORDER BY i.symbol, i.exchange NULLS LAST, i.instrument_id;
 END;
 $$;

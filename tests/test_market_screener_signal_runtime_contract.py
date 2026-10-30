@@ -370,6 +370,9 @@ def test_context_installer_matches_schema_and_filters_before_limit() -> None:
     assert "p.user_id = p_user_id" in installer
     assert "pos.quantity <> 0" in installer
     assert "mum.valid_to IS NULL" in installer
+    assert "p_context_type = 'ENTITY' AND i.entity_id = p_context_id" in installer
+    assert "p_context_type = 'INSTRUMENT' AND i.instrument_id = p_context_id" in installer
+    assert "p_user_id IS NULL OR NOT EXISTS" in installer
     assert (
         "CREATE UNIQUE INDEX uq_market_universes_code ON public.market_universes "
         "USING btree (upper(btrim((code)::text)));"
@@ -601,7 +604,10 @@ def test_manual_context_scan_records_history_in_callers_transaction(
         ("filter_without_id", 422),
     ],
 )
-def test_screener_context_http_contract(monkeypatch, scenario, expected_status):
+@pytest.mark.parametrize("context_type", ["WATCHLIST", "ENTITY", "INSTRUMENT"])
+def test_screener_context_http_contract(
+    monkeypatch, scenario, expected_status, context_type
+):
     fastapi = pytest.importorskip("fastapi")
     pytest.importorskip("httpx")
     from fastapi.testclient import TestClient
@@ -611,7 +617,7 @@ def test_screener_context_http_contract(monkeypatch, scenario, expected_status):
     context_id = "00000000-0000-0000-0000-000000000001"
     context = {
         "user_id": "owner",
-        "context_type": "WATCHLIST",
+        "context_type": context_type,
         "context_id": context_id,
     }
     settings = object()
@@ -713,7 +719,7 @@ def test_screener_context_http_contract(monkeypatch, scenario, expected_status):
         app.include_router(router, prefix="/api/screener")
         with TestClient(app, raise_server_exceptions=False) as client:
             if scenario.startswith("analyze"):
-                body = {"context_type": "WATCHLIST", "context_id": context_id}
+                body = {"context_type": context_type, "context_id": context_id}
                 if scenario == "analyze_invalid_type":
                     body["context_type"] = "ALL"
                 if scenario == "analyze_invalid_id":
@@ -723,7 +729,7 @@ def test_screener_context_http_contract(monkeypatch, scenario, expected_status):
                 response = client.get("/api/screener/contexts")
             else:
                 params = {
-                    "context_type": "WATCHLIST",
+                    "context_type": context_type,
                     "context_id": context_id,
                     "strategy_code": " breakout ",
                     "consensus_direction": "LONG",
@@ -779,6 +785,21 @@ def test_gui_context_analysis_and_optional_refresh_contract() -> None:
     assert "Un'altra analisi e' gia' in corso. Riprova al termine." in api
     assert "notifyOperationError(error, `${label}: ${message}`)" in api
     assert "contextsQuery.refetch()" in page
+    entities = Path("../mip-frontend/src/pages/EntitiesPage.tsx").read_text(
+        encoding="utf-8"
+    )
+    assert "context=ENTITY:${overview.entity.entity_id}" in entities
+    assert "context=INSTRUMENT:${row.instrument_id}" in entities
+    assert "/screener?query=" not in entities
+    assert "Analizza entita" in entities
+    assert 'directContextType === "ENTITY" || directContextType === "INSTRUMENT"' in page
+    assert "getScreenerContextInstruments(directScope!, directContextId)" in page
+    assert "instrument_count: directContextQuery.data.length" in page
+    assert "const selectedContext = directScope ? directContext" in page
+    assert 'label="Ambito di analisi"' in page
+    assert 'selectedContext.context_type === "WATCHLIST" || selectedContext.context_type === "PORTFOLIO"' in page
+    assert "directContextQuery.refetch()" in page
+    assert "/screener/contexts/${contextType}/${encodeURIComponent(contextId)}/instruments" in service
 
 
 def test_gui_handles_missing_signal_arrays() -> None:
