@@ -3,13 +3,10 @@ from fastapi import APIRouter, Depends, HTTPException
 from auth.security import CurrentUser, get_current_user
 from db import SessionLocal
 from market_data.factory import market_data
+from scheduler_repository import SchedulerRepository
 from services.currencies import get_currency_catalog
-from services.market_price_refresh import (
-    enqueue_user_price_refreshes,
-)
 
 router = APIRouter()
-LIVE_PRICE_MAX_AGE_SECONDS = 30
 
 
 @router.get("/capabilities")
@@ -34,20 +31,16 @@ def refresh_user_prices(
 ):
     db = SessionLocal()
     try:
-        enqueue_result = enqueue_user_price_refreshes(
-            db,
-            user_id=current_user["user_id"],
-            max_age_seconds=LIVE_PRICE_MAX_AGE_SECONDS,
+        result = SchedulerRepository(db).request_run(
+            job_key="market_price_refresh_request",
+            requested_by=current_user["user_id"],
+            payload={},
+            source="PRICE_REFRESH_UI",
         )
         db.commit()
+        return result
     except Exception:
         db.rollback()
         raise
     finally:
         db.close()
-
-    return {
-        "status": "QUEUED",
-        "max_age_seconds": LIVE_PRICE_MAX_AGE_SECONDS,
-        **enqueue_result,
-    }

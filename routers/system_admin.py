@@ -4,6 +4,8 @@ from sqlalchemy import text
 
 from auth.security import CurrentUser, require_admin
 from db import SessionLocal
+from job_runtime.requests import REQUEST_ONLY_JOBS
+from scheduler_repository import SchedulerRepository
 
 router = APIRouter()
 
@@ -31,6 +33,8 @@ def update_job(
     payload: JobUpdate,
     current_user: CurrentUser = Depends(require_admin),
 ):
+    if job_key in REQUEST_ONLY_JOBS and payload.enabled:
+        raise HTTPException(status_code=422, detail="This job only accepts contextual execution requests")
     if payload.enabled is None and payload.trigger_type is None:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -104,26 +108,15 @@ def run_job_now(
     job_key: str,
     current_user: CurrentUser = Depends(require_admin),
 ):
+    if job_key in REQUEST_ONLY_JOBS:
+        raise HTTPException(status_code=422, detail="Start this job from its contextual API")
     db = SessionLocal()
     try:
-        request = (
-            db.execute(
-                text(
-                    """
-                    SELECT *
-                    FROM public.sp_scheduler_request_job_run(
-                        :job_key,
-                        CAST(:requested_by AS uuid)
-                    )
-                    """
-                ),
-                {
-                    "job_key": job_key,
-                    "requested_by": current_user["user_id"],
-                },
-            )
-            .mappings()
-            .one()
+        request = SchedulerRepository(db).request_run(
+            job_key=job_key,
+            requested_by=current_user["user_id"],
+            payload={},
+            source="ADMIN_UI",
         )
         db.commit()
         return dict(request)

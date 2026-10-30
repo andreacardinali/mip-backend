@@ -52,6 +52,9 @@ def analyze_screener_context(
         )
         db.commit()
 
+    if incremental:
+        progress(0, len(instruments), None)
+
     scan = run_member_analysis_scan(
         db,
         market_data_service=market_data_service,

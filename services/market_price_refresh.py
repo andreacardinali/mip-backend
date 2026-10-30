@@ -11,6 +11,7 @@ from market_data.models import InstrumentReference
 
 logger = logging.getLogger(__name__)
 
+LIVE_PRICE_MAX_AGE_SECONDS = 30
 BATCH_SIZE = 20
 STALE_PROCESSING_MINUTES = 10
 RETRY_DELAYS_SECONDS = (60, 300, 900, 3600, 21600, 86400)

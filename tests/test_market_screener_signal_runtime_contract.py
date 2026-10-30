@@ -651,11 +651,12 @@ def test_manual_context_scan_records_history_in_callers_transaction(
 @pytest.mark.parametrize(
     "scenario, expected_status",
     [
-        ("analyze_success", 200),
-        ("analyze_partial", 200),
+        ("analyze_success", 202),
+        ("analyze_partial", 202),
         ("analyze_missing", 404),
         ("analyze_busy", 409),
         ("analyze_empty", 422),
+        ("analyze_too_many", 422),
         ("analyze_failure", 500),
         ("analyze_commit_failure", 500),
         ("analyze_unauthenticated", 401),
@@ -689,7 +690,7 @@ def test_screener_context_http_contract(
     settings = {"MARKET_SCREENER_PIPELINE_LLM_ENABLED": str(llm_enabled).lower()}
     provider = object()
     config = object()
-    result = {"status": "PARTIAL" if scenario == "analyze_partial" else "SUCCESS"}
+    result = {"status": "QUEUED", "request_id": context_id, "job_run_id": context_id}
 
     def current_user():
         if scenario.endswith("unauthenticated"):
@@ -716,25 +717,18 @@ def test_screener_context_http_contract(
         calls.append("session")
         return db
 
-    def analyze(session, **kwargs):
-        assert session is db
+    def request_run(**kwargs):
         assert kwargs == {
-            **context,
-            "market_data_service": provider,
-            "config": config,
-            "llm_enabled": llm_enabled,
-            "llm_settings": settings,
-            "incremental": True,
+            "job_key": "market_screener_context_analysis",
+            "requested_by": "owner",
+            "payload": {"context_type": context_type, "context_id": context_id},
+            "source": "SCREENER_UI",
         }
-        calls.append("analyze")
-        if scenario == "analyze_missing":
-            raise database_error("P0002")
+        calls.append("enqueue")
         if scenario == "analyze_busy":
             raise database_error("55P03")
-        if scenario == "analyze_empty":
-            raise ValueError("empty context")
         if scenario == "analyze_failure":
-            raise RuntimeError("provider unavailable")
+            raise RuntimeError("queue unavailable")
         return result
 
     def list_contexts(**kwargs):
@@ -752,8 +746,10 @@ def test_screener_context_http_contract(
     def members(**kwargs):
         assert kwargs == context
         calls.append("members")
-        if scenario == "filter_missing":
+        if scenario in ("filter_missing", "analyze_missing"):
             raise database_error("P0002")
+        if scenario.startswith("analyze") and scenario != "analyze_empty":
+            return [{"instrument_id": context_id}] * (1001 if scenario == "analyze_too_many" else 1)
         return []
 
     def opportunities(**kwargs):
@@ -780,7 +776,10 @@ def test_screener_context_http_contract(
             "ScanConfig": SimpleNamespace(from_settings=lambda value: config)
         },
         "market_data.factory": {"market_data": provider},
-        "market_screener.service": {"analyze_screener_context": analyze},
+        "market_screener.service": {"analyze_screener_context": lambda *args, **kwargs: pytest.fail("API must not execute analysis")},
+        "scheduler_repository": {
+            "SchedulerRepository": lambda session: SimpleNamespace(request_run=request_run)
+        },
         "market_screener.coordination": {
             "hold_incremental_analysis_lock": lambda session, **kwargs: nullcontext(),
         },
@@ -823,7 +822,7 @@ def test_screener_context_http_contract(
     assert response.status_code == expected_status
     if scenario in ("analyze_success", "analyze_partial"):
         assert response.json() == result
-        assert calls == ["session", "analyze", "commit", "close"]
+        assert calls == ["session", "members", "enqueue", "commit", "close"]
     elif scenario == "filter_success":
         assert response.json() == []
         assert calls == ["session", "members", "opportunities", "close"]
@@ -837,6 +836,8 @@ def test_screener_context_http_contract(
     elif scenario.startswith("analyze"):
         assert calls[-2:] == ["rollback", "close"]
         assert ("commit" in calls) == (scenario == "analyze_commit_failure")
+        if scenario in ("analyze_missing", "analyze_empty", "analyze_too_many"):
+            assert "enqueue" not in calls
     else:
         assert calls == ["session", "members", "close"]
 
@@ -850,7 +851,8 @@ def test_gui_context_analysis_and_optional_refresh_contract() -> None:
     )
     api = Path("../mip-frontend/src/api/api.ts").read_text(encoding="utf-8")
     assert 'api.get<ScreenerContext[]>("/screener/contexts")' in service
-    assert 'api.post<ScreenerAnalysisResult>("/screener/analyze", context)' in service
+    assert 'api.post<ExecutionRequest>("/screener/analyze", context)' in service
+    assert "waitForJobRun<ScreenerAnalysisResult>(data.job_run_id)" in service
     assert "mutationFn: analyzeScreenerContext" in page
     assert "await refreshScreener()" in page
     assert "context_type: selectedContext?.context_type" in page
@@ -861,7 +863,7 @@ def test_gui_context_analysis_and_optional_refresh_contract() -> None:
     assert "autoRefresh && !analysisRunning ? 60_000 : false" in page
     assert "refetchInterval: analysisRunning ? 2_000 : refreshInterval" in page
     assert (
-        'analysisPending || query.state.data?.status === "RUNNING" ? 2_000 : 10_000'
+        'query.state.data?.status === "QUEUED" ? 2_000 : 10_000'
         in page
     )
     assert (

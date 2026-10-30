@@ -17,10 +17,36 @@ class SchedulerRepository:
 
     def claim_manual_runs(self, limit: int = 5) -> list[dict[str, Any]]:
         rows = self.db.execute(
-            text("SELECT * FROM public.sp_scheduler_claim_job_runs(:limit)"),
+            text("SELECT * FROM public.sp_scheduler_claim_execution_requests(:limit)"),
             {"limit": limit},
         )
         return [dict(row) for row in rows.mappings().all()]
+
+    def request_run(
+        self, *, job_key: str, requested_by: str, payload: dict[str, Any], source: str
+    ) -> dict[str, Any]:
+        row = self.db.execute(
+            text(
+                "SELECT * FROM public.sp_scheduler_request_execution("
+                ":job_key, CAST(:requested_by AS uuid), CAST(:payload AS jsonb), :source)"
+            ),
+            {
+                "job_key": job_key,
+                "requested_by": requested_by,
+                "payload": json.dumps(payload),
+                "source": source,
+            },
+        ).mappings().one()
+        return dict(row)
+
+    def request_status(self, *, job_run_id: str, user_id: str):
+        return self.db.execute(
+            text(
+                "SELECT public.sp_scheduler_execution_status("
+                "CAST(:job_run_id AS uuid), CAST(:user_id AS uuid))"
+            ),
+            {"job_run_id": job_run_id, "user_id": user_id},
+        ).scalar_one_or_none()
 
     def complete_manual_request(self, job_run_id: UUID) -> None:
         self.db.execute(

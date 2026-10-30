@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "job_key": "market_price_refresh_request",
+  "job_name": "User Price Refresh Request",
+  "python_module": "jobs.market_price_refresh.request",
+  "trigger": {"type": "interval", "interval_minutes": 1},
+  "enabled_by_default": false
+}

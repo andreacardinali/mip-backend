@@ -7,6 +7,8 @@ from uuid import UUID
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from job_runtime.run_logging import current_job_run_id
+
 
 class MarketScreenerRunRepository:
     def __init__(self, db: Session) -> None:
@@ -21,8 +23,15 @@ class MarketScreenerRunRepository:
 
     def start(self) -> UUID:
         return self.db.execute(
-            text("SELECT public.sp_market_screener_start_run()")
+            text("SELECT public.sp_market_screener_start_job_run(CAST(:job_run_id AS uuid))"),
+            {"job_run_id": str(current_job_run_id.get()) if current_job_run_id.get() else None},
         ).scalar_one()
+
+    def fail_for_job(self, *, job_run_id: str, error_message: str) -> None:
+        self.db.execute(
+            text("SELECT public.sp_market_screener_fail_job_run(CAST(:job_run_id AS uuid), :error)"),
+            {"job_run_id": job_run_id, "error": error_message[:1000]},
+        )
 
     def session_analysis_lock(self, *, release: bool = False) -> bool:
         return bool(

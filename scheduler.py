@@ -14,6 +14,7 @@ from sqlalchemy import text
 from config.settings import settings
 from db import SessionLocal, engine
 from job_runtime.lock_logging import lock_identity, log_lock_contention
+from job_runtime.requests import REQUEST_ONLY_JOBS, current_job_request
 from job_runtime.run_logging import (
     current_job_run_id,
     install_scheduler_run_log_handler,
@@ -57,6 +58,7 @@ def execute_job(
     python_module: str,
     requested_job_run_id: str | None = None,
     manual_request: bool = False,
+    execution_request: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     db = SessionLocal()
     repository = SchedulerRepository(db)
@@ -66,6 +68,7 @@ def execute_job(
     run_started = False
     lock_connection = None
     log_token = current_job_run_id.set(job_run_id)
+    request_token = current_job_request.set(execution_request)
 
     try:
         lock_connection = engine.connect()
@@ -131,7 +134,10 @@ def execute_job(
             completed_at=datetime.now(UTC),
         )
         if manual_request:
-            repository.complete_manual_request(job_run_id)
+            if result.get("reason") == "analysis_already_running" and execution_request:
+                repository.defer_manual_request(job_run_id)
+            else:
+                repository.complete_manual_request(job_run_id)
         db.commit()
 
         logger.info(
@@ -170,6 +176,7 @@ def execute_job(
         )
         raise
     finally:
+        current_job_request.reset(request_token)
         current_job_run_id.reset(log_token)
         try:
             db.close()
@@ -196,6 +203,11 @@ def poll_manual_runs() -> None:
                         str(request["python_module"]),
                         str(request["job_run_id"]),
                         True,
+                        {
+                            "payload": request.get("payload") or {},
+                            "requested_by": str(request["requested_by"]) if request["requested_by"] else None,
+                            "source": request["source"],
+                        },
                     ],
                     id=f"manual-{request['request_id']}",
                     name=f"Manual - {request['job_name']}",
@@ -352,6 +364,7 @@ def sync_jobs() -> None:
     try:
         desired_jobs = {
             str(job["job_id"]): job for job in repository.get_enabled_jobs()
+            if job["python_module"] not in REQUEST_ONLY_JOBS.values()
         }
         internal_ids = {SYNC_JOB_ID, MANUAL_RUN_POLL_JOB_ID}
         current_jobs = {

@@ -2,6 +2,43 @@
 
 Adds explicit logs immediately before and after each provider call, including call number, mode, signal count, signal IDs, output-token limit and elapsed time. Content-validation failures log split sizes and error details before recursive retry.
 
+## Scheduler Execution Requests
+
+Explicit execution APIs authenticate, authorize and validate the request, then
+enqueue work and return HTTP 202 with `request_id`, `job_run_id` and `QUEUED`.
+They do not execute provider calls, analyses or cleanup in the HTTP process.
+`GET /api/jobs/runs/{job_run_id}` exposes the authenticated request owner's
+execution status, result and error; another user's execution returns 404.
+
+| API | Scheduler job | Request source |
+| --- | --- | --- |
+| `POST /api/screener/analyze` | `market_screener_context_analysis` | `SCREENER_UI` |
+| `POST /api/admin/entities/refresh` | `refresh_entities` | `ENTITIES_UI` |
+| `POST /api/admin/cache/cleanup` | `market_cache_cleanup` | `CACHE_UI` |
+| `POST /api/market-data/prices/refresh` | `market_price_refresh_request` | `PRICE_REFRESH_UI` |
+| `POST /api/admin/system/scheduler/jobs/{job_key}/run` | Requested ordinary job | `ADMIN_UI` |
+
+Before using these APIs on an existing database, stop the backend and scheduler,
+manually apply `oneshot/install_scheduler_execution_requests.sql`, then restart
+the updated processes. Scheduler bootstrap discovers the job manifests. No
+installation SQL runs automatically at application startup.
+
+Screener context analysis and user price-refresh requests cannot be enabled as
+recurring jobs or launched from the generic admin run endpoint. Their workers
+need contextual request metadata. Other jobs retain their existing schedules;
+entity refresh without a request retains its `MISSING` defaults. Pending requests
+are deduplicated for the same job, user and validated payload.
+
+Screener retains its advisory locks, incremental commits and domain runs,
+correlated through `job_run_id`. A busy analysis is deferred with the same ticket;
+lock diagnostics identify the blocking job and run without changing lock policy.
+Cache cleanup still uses `sp_cleanup_market_cache(30)`. The price-request worker
+only populates the existing specialist queue for the authenticated user with a
+30-second freshness threshold. Its successful result means enqueueing completed,
+not that all prices are updated: the existing dispatcher performs acquisition,
+and the frontend continues price polling after awaiting the scheduler result.
+Data-write endpoints may still populate internal queues as part of their writes.
+
 ## Automatic Screener AI
 
 Screener and entity analyses enable AI automatically on the server. Set
@@ -760,9 +797,11 @@ inside PL/pgSQL without psycopg interpreting them as driver placeholders. A fail
 upgrade rolls back its transaction; rerun the corrected runner after a failure.
 
 Apply the migration before starting the updated backend. Restart the scheduler
-with the price-refresh dispatcher enabled: `/api/market-data/prices/refresh` now
-returns HTTP 202 after enqueueing work, rather than processing the global queue
-inside the request. The frontend must be upgraded with the backend. Job locks use
+with the price-refresh dispatcher enabled. Also apply
+`oneshot/install_scheduler_execution_requests.sql` as described above:
+`/api/market-data/prices/refresh` returns HTTP 202 with a scheduler ticket, and its
+request worker subsequently populates the specialist price queue. The frontend
+must be upgraded with the backend. Job locks use
 a dedicated database connection throughout each execution; size the connection
 pool accordingly and ensure server idle-in-transaction timeouts allow job runs.
 

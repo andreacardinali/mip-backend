@@ -4,25 +4,20 @@ from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
 from sqlalchemy.exc import DBAPIError
 
 from auth.security import CurrentUser, get_current_user
 from db import SessionLocal
 from market_analysis.lifecycle_repository import SignalLifecycleRepository
+from market_screener.analysis_request import (
+    ScreenerAnalysisRequest,
+    ScreenerContextType,
+)
 from market_screener.api_repository import MarketScreenerApiRepository
 from market_screener.run_repository import MarketScreenerRunRepository
+from scheduler_repository import SchedulerRepository
 
 router = APIRouter()
-
-ScreenerContextType = Literal[
-    "WATCHLIST", "PORTFOLIO", "UNIVERSE", "ENTITY", "INSTRUMENT"
-]
-
-
-class ScreenerAnalysisRequest(BaseModel):
-    context_type: ScreenerContextType
-    context_id: UUID
 
 
 @router.get("/contexts/{context_type}/{context_id}/instruments")
@@ -80,44 +75,32 @@ def context_analysis_progress(
         db.close()
 
 
-@router.post("/analyze")
+@router.post("/analyze", status_code=202)
 def analyze_screener(
     request: ScreenerAnalysisRequest,
     current_user: CurrentUser = Depends(get_current_user),
 ):
-    from config.settings import settings
-    from market_analysis.scan import ScanConfig
-    from market_data.factory import market_data
-    from market_screener.coordination import hold_incremental_analysis_lock
-    from market_screener.service import analyze_screener_context
-
     db = SessionLocal()
     try:
-        with hold_incremental_analysis_lock(
-            db, owner=f"gui:{request.context_type}:{request.context_id}"
-        ):
-            result = analyze_screener_context(
-                db,
-                user_id=current_user["user_id"],
-                context_type=request.context_type,
-                context_id=str(request.context_id),
-                market_data_service=market_data,
-                config=ScanConfig.from_settings(settings),
-                llm_enabled=str(
-                    settings.get("MARKET_SCREENER_PIPELINE_LLM_ENABLED", True)
-                )
-                .strip()
-                .lower()
-                in {"1", "true", "yes", "on"},
-                llm_settings=settings,
-                incremental=True,
-            )
-            db.commit()
+        instruments = MarketScreenerApiRepository(db).context_instruments(
+            user_id=current_user["user_id"],
+            context_type=request.context_type,
+            context_id=str(request.context_id),
+        )
+        if not instruments:
+            raise ValueError("Il contesto non contiene strumenti da analizzare")
+        if len(instruments) > 1000:
+            raise ValueError("Il contesto supera il limite di 1000 strumenti")
+        result = SchedulerRepository(db).request_run(
+            job_key="market_screener_context_analysis",
+            requested_by=current_user["user_id"],
+            payload=request.model_dump(mode="json"),
+            source="SCREENER_UI",
+        )
+        db.commit()
         return result
     except ValueError as error:
         db.rollback()
-        if str(error) == "Analysis already running":
-            raise HTTPException(409, str(error)) from error
         raise HTTPException(422, str(error)) from error
     except DBAPIError as error:
         db.rollback()
