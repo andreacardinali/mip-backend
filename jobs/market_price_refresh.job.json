@@ -2,6 +2,7 @@
   "schema_version": 1,
   "job_key": "market_price_refresh_dispatcher",
   "job_name": "Market Price Refresh Dispatcher",
+  "description": "Elabora la coda delle richieste di aggiornamento prezzi, recuperando le quotazioni dai provider e aggiornando i dati di mercato.",
   "python_module": "jobs.market_price_refresh.worker",
   "trigger": {
     "type": "interval",

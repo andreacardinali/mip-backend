@@ -2,6 +2,7 @@
   "schema_version": 1,
   "job_key": "market_screener_pipeline",
   "job_name": "Market Screener Pipeline",
+  "description": "Coordina le fasi selezionate dello screener MIP: discovery, risoluzione dei candidati, analisi, arricchimento LLM e ranking, salvando uno snapshot dei risultati.",
   "python_module": "jobs.market_screener_pipeline.worker",
   "trigger": {
     "type": "interval",

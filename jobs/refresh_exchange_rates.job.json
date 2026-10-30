@@ -2,6 +2,7 @@
   "schema_version": 1,
   "job_key": "refresh_exchange_rates",
   "job_name": "Refresh Exchange Rates",
+  "description": "Aggiorna i tassi di cambio valutari utilizzati da MIP per convertire prezzi e valori nelle diverse valute.",
   "python_module": "jobs.exchange_rates.refresh_exchange_rates",
   "trigger": {
     "type": "cron",

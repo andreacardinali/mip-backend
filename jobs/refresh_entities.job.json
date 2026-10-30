@@ -2,6 +2,7 @@
   "schema_version": 1,
   "job_key": "refresh_entities_missing",
   "job_name": "Refresh Missing Entities",
+  "description": "Completa i dati mancanti delle entita; su richiesta puo limitare l'operazione a un simbolo, creare entita mancanti o eseguire un aggiornamento completo.",
   "python_module": "jobs.entities.refresh_entities",
   "trigger": {
     "type": "cron",

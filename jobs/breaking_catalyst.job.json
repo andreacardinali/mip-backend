@@ -2,6 +2,7 @@
   "schema_version": 1,
   "job_key": "portfolio_intelligence_breaking",
   "job_name": "Portfolio Intelligence - Breaking Catalysts",
+  "description": "Analizza notizie ed eventi recenti rilevanti per le entita monitorate, identifica nuovi catalizzatori e genera notifiche in base alla loro rilevanza.",
   "python_module": "jobs.portfolio_intelligence.branches.breaking_catalyst",
   "trigger": {
     "type": "cron",

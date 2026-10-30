@@ -2,6 +2,7 @@
   "schema_version": 1,
   "job_key": "eulerpool_exchange_sync",
   "job_name": "Eulerpool Exchange Sync",
+  "description": "Sincronizza i dati delle borse forniti da Eulerpool con il catalogo dei mercati di MIP.",
   "python_module": "jobs.eulerpool_exchange_sync",
   "trigger": {
     "type": "cron",

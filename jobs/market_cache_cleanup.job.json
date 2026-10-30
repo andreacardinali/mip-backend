@@ -2,6 +2,7 @@
   "schema_version": 1,
   "job_key": "market_cache_cleanup",
   "job_name": "Market Cache Cleanup",
+  "description": "Elimina i dati obsoleti dalla cache di mercato applicando la finestra di conservazione di 30 giorni.",
   "python_module": "jobs.market_cache_cleanup",
   "trigger": {"type": "interval", "interval_minutes": 1440},
   "enabled_by_default": false

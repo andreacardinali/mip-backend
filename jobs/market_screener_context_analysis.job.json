@@ -2,6 +2,7 @@
   "schema_version": 1,
   "job_key": "market_screener_context_analysis",
   "job_name": "Market Screener Context Analysis",
+  "description": "Su richiesta dell'utente, esegue l'analisi incrementale degli strumenti del portafoglio o della watchlist selezionata, con arricchimento LLM quando abilitato.",
   "python_module": "jobs.market_screener_context_analysis.worker",
   "trigger": {"type": "interval", "interval_minutes": 60},
   "enabled_by_default": false

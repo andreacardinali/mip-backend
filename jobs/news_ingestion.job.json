@@ -2,6 +2,7 @@
   "schema_version": 1,
   "job_key": "news_ingestion",
   "job_name": "News Ingestion",
+  "description": "Raccoglie le notizie dai provider di mercato configurati e le registra nel database per le successive analisi.",
   "python_module": "jobs.news_ingestion.worker",
   "trigger": {"type": "cron", "cron_expression": "5 * * * *"},
   "enabled_by_default": true

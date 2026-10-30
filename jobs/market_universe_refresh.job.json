@@ -2,6 +2,7 @@
   "schema_version": 1,
   "job_key": "market_universe_refresh",
   "job_name": "Market Universe Refresh",
+  "description": "Aggiorna in modo incrementale gli universi di mercato e i relativi strumenti tramite i provider configurati.",
   "python_module": "jobs.market_universe_refresh.worker",
   "trigger": {"type": "cron", "cron_expression": "30 * * * *"},
   "enabled_by_default": true

@@ -2,6 +2,7 @@
   "schema_version": 1,
   "job_key": "fmp_daily_sync",
   "job_name": "FMP Daily Sync",
+  "description": "Importa da Financial Modeling Prep calendari di utili, dividendi e frazionamenti, oltre ai documenti societari, aggiornando eventi e filing nel database.",
   "python_module": "jobs.fmp.fmp_daily_sync",
   "trigger": {
     "type": "cron",

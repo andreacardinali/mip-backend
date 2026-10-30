@@ -2,6 +2,7 @@
   "schema_version": 1,
   "job_key": "news_enrichment",
   "job_name": "News Entity Scoring",
+  "description": "Arricchisce le notizie raccolte valutandone la rilevanza rispetto alle entita associate e aggiornando i relativi punteggi.",
   "python_module": "jobs.news_enrichment.worker",
   "trigger": {
     "type": "cron",
