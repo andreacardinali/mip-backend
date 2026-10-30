@@ -663,6 +663,17 @@ committed. Manual analyses do not enqueue summary notifications. A dedicated
 session advisory lock protects the incremental manual scan across its commits;
 overlapping analyses are rejected with 409.
 
+Existing databases must also install the incremental-analysis routines. After
+backup, review and manually apply
+`oneshot/install_screener_incremental_analysis.sql` using PostgreSQL tooling
+with `ON_ERROR_STOP=1`, after the context and context-AI installers. It installs
+the session lock, progress routines and configurable AI freshness overloads,
+matching `mip_schema.sql`. It is transactional and safe to reapply; it does not
+run on startup. A missing `sp_market_screener_session_analysis_lock(boolean)`
+indicates that this database upgrade has not been applied. Apply this installer
+last when reapplying the older context-AI installer, which replaces the legacy
+candidate-selection overload.
+
 Scheduled and automatic jobs also preserve independently committed results:
 technical scans commit each instrument, FMP sync commits each catalyst or filing,
 news ingestion commits each article, news enrichment commits each entity score,

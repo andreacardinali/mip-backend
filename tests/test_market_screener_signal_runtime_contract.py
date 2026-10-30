@@ -356,6 +356,36 @@ def test_performance_installer_preserves_asof_prices_and_direction_cycles() -> N
     assert "OFFSET GREATEST(p_offset, 0)" in sql
 
 
+def test_incremental_analysis_installer_matches_schema() -> None:
+    import re
+
+    schema = Path("mip_schema.sql").read_text(encoding="utf-8")
+    installer = Path("oneshot/install_screener_incremental_analysis.sql").read_text(
+        encoding="utf-8"
+    )
+    pattern = (
+        r"CREATE(?: OR REPLACE)? FUNCTION public\.(\w+)\((.*?)\) RETURNS "
+        r"(.*?)AS\s+(\$[^$]*\$)(.*?)\4;"
+    )
+    schema_definitions = {
+        (name, signature): re.sub(r"\s+", " ", returns + body).strip()
+        for name, signature, returns, delimiter, body in re.findall(
+            pattern, schema, re.DOTALL
+        )
+    }
+    definitions = re.findall(pattern, installer, re.DOTALL)
+    assert len(definitions) == 6
+    assert installer.startswith("BEGIN;")
+    assert installer.rstrip().endswith("COMMIT;")
+    for name, signature, returns, delimiter, body in definitions:
+        assert re.sub(r"\s+", " ", returns + body).strip() == schema_definitions[
+            name, signature
+        ]
+    assert "pg_try_advisory_lock(" in installer
+    assert "pg_advisory_unlock(" in installer
+    assert "pg_try_advisory_xact_lock(" not in installer
+
+
 def test_api_enriches_existing_opportunity_payloads() -> None:
     repository = Path("market_screener/api_repository.py").read_text(encoding="utf-8")
     assert repository.count("sp_market_screener_enrich_opportunity_payload") == 1
