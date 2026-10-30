@@ -762,6 +762,7 @@ def test_gui_context_analysis_and_optional_refresh_contract() -> None:
     service = Path("../mip-frontend/src/services/marketScreener.ts").read_text(
         encoding="utf-8"
     )
+    api = Path("../mip-frontend/src/api/api.ts").read_text(encoding="utf-8")
     assert 'api.get<ScreenerContext[]>("/screener/contexts")' in service
     assert 'api.post<ScreenerAnalysisResult>("/screener/analyze", context)' in service
     assert "mutationFn: analyzeScreenerContext" in page
@@ -771,7 +772,12 @@ def test_gui_context_analysis_and_optional_refresh_contract() -> None:
     assert "strategy_code: strategy.trim().toUpperCase() || undefined" in page
     assert "useState(false)" in page.split("const [autoRefresh", 1)[1].split(";", 1)[0]
     assert "autoRefresh && !analysis.isPending ? 60_000 : false" in page
-    assert "analysis.error.response?.status === 409" in page
+    assert (
+        'error.config.url === "/screener/analyze" && error.response?.status === 409'
+        in api
+    )
+    assert "Un'altra analisi e' gia' in corso. Riprova al termine." in api
+    assert "notifyOperationError(error, `${label}: ${message}`)" in api
     assert "contextsQuery.refetch()" in page
 
 
