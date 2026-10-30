@@ -93,7 +93,9 @@ def analyze_screener(
 
     db = SessionLocal()
     try:
-        with hold_incremental_analysis_lock(db):
+        with hold_incremental_analysis_lock(
+            db, owner=f"gui:{request.context_type}:{request.context_id}"
+        ):
             result = analyze_screener_context(
                 db,
                 user_id=current_user["user_id"],

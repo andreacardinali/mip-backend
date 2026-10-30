@@ -13,6 +13,7 @@ from sqlalchemy import text
 
 from config.settings import settings
 from db import SessionLocal, engine
+from job_runtime.lock_logging import lock_identity, log_lock_contention
 from job_runtime.run_logging import (
     current_job_run_id,
     install_scheduler_run_log_handler,
@@ -69,6 +70,10 @@ def execute_job(
     try:
         lock_connection = engine.connect()
         if not _try_job_lock(lock_connection, job_id):
+            log_lock_contention(
+                lock_connection, lock_name=f"mip.scheduler.{job_uuid}",
+                owner=f"mip:run:{job_run_id}", scheduler=True,
+            )
             if manual_request:
                 repository.defer_manual_request(job_run_id)
                 db.commit()
@@ -99,7 +104,8 @@ def execute_job(
                 f"Module {python_module} does not expose a callable run()"
             )
 
-        result = normalize_result(run_function())
+        with lock_identity(lock_connection, f"mip:run:{job_run_id}"):
+            result = normalize_result(run_function())
         result_status = str(result.get("status", "SUCCESS")).upper()
         supported_statuses = {
             "SUCCESS",

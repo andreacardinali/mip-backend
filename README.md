@@ -663,6 +663,17 @@ committed. Manual analyses do not enqueue summary notifications. A dedicated
 session advisory lock protects the incremental manual scan across its commits;
 overlapping analyses are rejected with 409.
 
+Lock contention is logged by `job_runtime/lock_logging.py` for scheduler job
+locks and the shared analysis lock. `Lock contention` entries include the
+requester and blocking PostgreSQL connections: PID, scheduler job ID, run ID,
+job name/module, connection state and wait event. Manual analyses identify their
+GUI context instead of a scheduler job. Connection labels use `application_name`
+and are restored before pooled session connections are reused. Existing workers
+without these labels still appear by PID/application name. If the holder exits
+before inspection, the log reports `released_or_not_visible`; diagnostic errors
+report `unavailable` without changing the lock decision. No database installation
+is required; activity visibility depends on the database user's permissions.
+
 Existing databases must also install the incremental-analysis routines. After
 backup, review and manually apply
 `oneshot/install_screener_incremental_analysis.sql` using PostgreSQL tooling

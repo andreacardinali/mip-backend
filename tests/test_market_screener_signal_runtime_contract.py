@@ -782,7 +782,7 @@ def test_screener_context_http_contract(
         "market_data.factory": {"market_data": provider},
         "market_screener.service": {"analyze_screener_context": analyze},
         "market_screener.coordination": {
-            "hold_incremental_analysis_lock": lambda session: nullcontext(),
+            "hold_incremental_analysis_lock": lambda session, **kwargs: nullcontext(),
         },
     }
     with monkeypatch.context() as patch:
