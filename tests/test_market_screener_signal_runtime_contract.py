@@ -284,6 +284,20 @@ def test_gui_handles_missing_signal_arrays() -> None:
     assert "selected.signal_reasons ?? []" in page
 
 
+def test_gui_snapshot_changes_open_only_current_opportunity() -> None:
+    page = Path("../mip-frontend/src/pages/ScreenerPage.tsx").read_text(
+        encoding="utf-8"
+    )
+    columns = page.split("const changeColumns:", 1)[1].split("const rows =", 1)[0]
+    assert "disabled={!row.current}" in columns
+    assert "if (!row.current) return;" in columns
+    assert "setSelectedId(row.current.opportunity_id)" in columns
+    assert "row.previous.opportunity_id" not in columns
+    assert columns.index("setChangesOpen(false)") < columns.index("setSelectedId(")
+    assert "disableExport: true" in columns
+    assert "<OpenInNewIcon" in columns
+
+
 def test_gui_exports_authorized_results_with_native_grid_csv() -> None:
     page = Path("../mip-frontend/src/pages/ScreenerPage.tsx").read_text(
         encoding="utf-8"

@@ -457,6 +457,36 @@ Offline coverage lives in `tests/test_market_analysis_scan.py`,
 and `tests/test_wikipedia_provider.py`. No database migration or job activation
 is needed for this separation.
 
+### Screener snapshot changes and opt-in summary
+
+For an existing database, review and manually apply
+`oneshot/install_screener_snapshot_changes.sql`, then
+`oneshot/install_screener_summary_notifications.sql`. The authoritative
+`mip_schema.sql` already contains these routines. There is no automatic startup
+installation. Validate SQL installation on a test database before activation.
+
+The Screener variations view compares complete successful snapshots, independent
+of the current grid filters, and identifies new entries, signal changes and exits.
+Its detail action opens the existing current opportunity and closes the variations
+dialog first. Exited rows retain their historical comparison but cannot open a
+current opportunity through this action. The detail is live, not a frozen snapshot.
+
+In account notification preferences, `SCREENER_SUMMARY` is disabled by default.
+Enable it explicitly with an enabled user-owned destination; the existing minimum
+severity preference still applies to this `LOW` event. Only enabled global
+subscriptions are recipients. `NOTIFICATIONS_ENABLED` must also be enabled, and
+delivery uses the existing notification queue and dispatcher.
+
+The pipeline enqueues after committing a successful run whose analysis scan and
+ranking both succeeded. Initial snapshots, unchanged comparisons and incomplete
+runs do not enqueue summaries. Messages contain only new, changed and removed
+counts, not detailed opportunity rows. The key is unique per user and snapshot;
+an enqueue failure is reported without failing the already persisted snapshot.
+
+Offline contracts are in `tests/test_market_screener_signal_runtime_contract.py`
+and `tests/test_sql_repository_contract.py`. They do not replace database or
+interactive GUI verification.
+
 ### Screener signal history
 
 The Screener opportunity detail now includes signal lifecycle history for its
