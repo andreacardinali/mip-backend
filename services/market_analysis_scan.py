@@ -40,8 +40,34 @@ def run_market_analysis_scan(
     if not members:
         raise ValueError(f"Active universe has no members: {universe_code}")
 
-    run_id = repository.start_scan_run(
+    return run_member_analysis_scan(
+        db,
+        market_data_service=market_data_service,
         universe_id=universe["universe_id"],
+        universe_code=universe_code,
+        members=members,
+        config=effective_config,
+        quant_config=quant_config,
+    )
+
+
+def run_member_analysis_scan(
+    db,
+    *,
+    market_data_service,
+    universe_id: str,
+    universe_code: str,
+    members: list[ScanMember],
+    config: ScanConfig | None = None,
+    quant_config: QuantPrefilterConfig | None = None,
+) -> dict[str, Any]:
+    if not members:
+        raise ValueError("Scan has no members")
+    effective_config = config or ScanConfig()
+    quant_config = quant_config or QuantPrefilterConfig()
+    repository = MarketAnalysisRepository(db)
+    run_id = repository.start_scan_run(
+        universe_id=universe_id,
         config={**asdict(effective_config), "quant": asdict(quant_config)},
     )
 
