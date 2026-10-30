@@ -18,6 +18,20 @@ execution status, result and error; another user's execution returns 404.
 | `POST /api/market-data/prices/refresh` | `market_price_refresh_request` | `PRICE_REFRESH_UI` |
 | `POST /api/admin/system/scheduler/jobs/{job_key}/run` | Requested ordinary job | `ADMIN_UI` |
 
+Each started job logs its caller (`MANUAL`, `SCHEDULE`, or `JOB` for a nested
+execution), request source, requesting user and parent run ID when present.
+These entries are included in the existing persisted run logs. Lock acquisition
+and contention handling are unchanged.
+
+Administrators can preview a five-field cron with
+`POST /api/admin/system/scheduler/cron-preview` (`cron_expression` in the JSON
+body). The endpoint uses the same trigger builder and `SCHEDULER_TIMEZONE` as
+the scheduler, returning `next_run_at` and `timezone`; invalid expressions return
+422 without opening a database session. Schedule updates use the existing PATCH
+endpoint and stored routine. The running scheduler synchronizes changes within
+its existing 30-second polling interval. No additional schema installation is
+needed for caller logs or cron preview.
+
 Before using these APIs on an existing database, stop the backend and scheduler,
 manually apply `oneshot/install_scheduler_execution_requests.sql` after the
 Screener installers, then restart

@@ -7,11 +7,8 @@ from uuid import UUID, uuid4
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.base import BaseTrigger
-from apscheduler.triggers.cron import CronTrigger
-from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy import text
 
-from config.settings import settings
 from db import SessionLocal, engine
 from job_runtime.lock_logging import lock_identity, log_lock_contention
 from job_runtime.requests import REQUEST_ONLY_JOBS, current_job_request
@@ -21,6 +18,7 @@ from job_runtime.run_logging import (
 )
 from scheduler_bootstrap import bootstrap_scheduler_jobs
 from scheduler_repository import SchedulerRepository
+from scheduler_triggers import SCHEDULER_TIMEZONE, build_trigger
 
 logging.basicConfig(
     level=logging.INFO,
@@ -31,7 +29,6 @@ logging.getLogger("apscheduler.executors.default").setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
 
-SCHEDULER_TIMEZONE = settings.get("SCHEDULER_TIMEZONE", "Europe/Rome")
 scheduler = BlockingScheduler(timezone=SCHEDULER_TIMEZONE)
 JOBS_ROOT = Path(__file__).resolve().parent / "jobs"
 SYNC_JOB_ID = "__scheduler_configuration_sync__"
@@ -67,6 +64,10 @@ def execute_job(
     started_at = datetime.now(UTC)
     run_started = False
     lock_connection = None
+    parent_job_run_id = current_job_run_id.get()
+    caller = "JOB" if parent_job_run_id else "MANUAL" if manual_request else "SCHEDULE"
+    request_source = (execution_request or {}).get("source")
+    requested_by = (execution_request or {}).get("requested_by")
     log_token = current_job_run_id.set(job_run_id)
     request_token = current_job_request.set(execution_request)
 
@@ -93,11 +94,14 @@ def execute_job(
         run_started = True
 
         logger.info(
-            "Job execution started job_id=%s run_id=%s module=%s manual=%s",
+            "Job execution started job_id=%s run_id=%s module=%s caller=%s source=%s requested_by=%s parent_run_id=%s",
             job_id,
             job_run_id,
             python_module,
-            manual_request,
+            caller,
+            request_source or caller,
+            requested_by or "-",
+            parent_job_run_id or "-",
         )
 
         module = importlib.import_module(python_module)
@@ -235,28 +239,7 @@ def poll_manual_runs() -> None:
 
 
 def _build_trigger(job: dict[str, Any]) -> BaseTrigger:
-    job_name = str(job["job_name"])
-    trigger_type = str(job["trigger_type"]).strip().lower()
-
-    if trigger_type == "interval":
-        interval_minutes = job.get("interval_minutes")
-        if interval_minutes is None or int(interval_minutes) <= 0:
-            raise ValueError(f"Invalid interval_minutes for job {job_name}")
-        return IntervalTrigger(
-            minutes=int(interval_minutes),
-            timezone=SCHEDULER_TIMEZONE,
-        )
-
-    if trigger_type == "cron":
-        cron_expression = job.get("cron_expression")
-        if not cron_expression:
-            raise ValueError(f"Missing cron_expression for job {job_name}")
-        return CronTrigger.from_crontab(
-            str(cron_expression),
-            timezone=SCHEDULER_TIMEZONE,
-        )
-
-    raise ValueError(f"Unsupported trigger type for job {job_name}: {trigger_type}")
+    return build_trigger(job)
 
 
 def _job_requires_update(

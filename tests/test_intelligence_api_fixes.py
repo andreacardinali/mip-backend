@@ -411,6 +411,45 @@ def test_inaccessible_watchlist_item_returns_404_and_rolls_back(monkeypatch):
     db.close.assert_called_once()
 
 
+@pytest.mark.parametrize("expression", ["bad", "60 * * * *", "* * * *", ""])
+def test_scheduler_invalid_cron_does_not_open_database(monkeypatch, expression):
+    from routers import system_admin
+
+    session_factory = MagicMock()
+    monkeypatch.setattr(system_admin, "SessionLocal", session_factory)
+    with pytest.raises(HTTPException) as raised:
+        system_admin.update_job("job", system_admin.JobUpdate(
+            trigger_type="cron", cron_expression=expression,
+        ), current_user={"user_id": USER_ID})
+    assert raised.value.status_code == 422
+    session_factory.assert_not_called()
+
+
+def test_scheduler_cron_preview_matches_runtime_trigger():
+    from datetime import datetime
+
+    from routers import system_admin
+    from scheduler_triggers import build_trigger
+
+    expression = "*/15 * * * *"
+    preview = system_admin.preview_cron(system_admin.CronPreview(cron_expression=expression))
+    next_run = datetime.fromisoformat(preview["next_run_at"])
+    trigger = build_trigger({"trigger_type": "cron", "cron_expression": expression})
+    assert next_run.minute % 15 == 0
+    assert next_run.second == 0
+    assert trigger.get_next_fire_time(None, next_run) == next_run
+    assert preview["timezone"] == system_admin.SCHEDULER_TIMEZONE
+
+
+@pytest.mark.parametrize("expression", ["bad", "60 * * * *"])
+def test_scheduler_cron_preview_rejects_invalid_expression(expression):
+    from routers import system_admin
+
+    with pytest.raises(HTTPException) as raised:
+        system_admin.preview_cron(system_admin.CronPreview(cron_expression=expression))
+    assert raised.value.status_code == 422
+
+
 def test_scheduler_contended_manual_run_is_deferred_and_releases_connection(
     monkeypatch,
 ):
@@ -435,14 +474,20 @@ def test_scheduler_contended_manual_run_is_deferred_and_releases_connection(
 
 
 @pytest.mark.parametrize("fails", [False, True])
-def test_scheduler_request_context_is_available_and_reset(monkeypatch, fails):
+@pytest.mark.parametrize("caller", ["MANUAL", "SCHEDULE", "JOB"])
+def test_scheduler_request_context_is_available_and_reset(monkeypatch, fails, caller):
     import scheduler
     from job_runtime.requests import current_job_request
 
     db = MagicMock()
     repository = MagicMock()
     connection = MagicMock()
-    request = {"payload": {"context_id": JOB_ID}, "requested_by": USER_ID}
+    manual_request = caller == "MANUAL"
+    request = {"payload": {"context_id": JOB_ID}, "requested_by": USER_ID, "source": "SCREENER_UI"} if manual_request else None
+    parent_run_id = UUID(USER_ID) if caller == "JOB" else None
+    parent_token = scheduler.current_job_run_id.set(parent_run_id)
+    logger = MagicMock()
+    monkeypatch.setattr(scheduler, "logger", logger)
     monkeypatch.setattr(scheduler, "SessionLocal", lambda: db)
     monkeypatch.setattr(scheduler, "SchedulerRepository", lambda session: repository)
     monkeypatch.setattr(scheduler, "engine", SimpleNamespace(connect=lambda: connection))
@@ -457,15 +502,26 @@ def test_scheduler_request_context_is_available_and_reset(monkeypatch, fails):
     monkeypatch.setattr(
         scheduler.importlib, "import_module", lambda name: SimpleNamespace(run=worker)
     )
-    if fails:
-        with pytest.raises(RuntimeError, match="worker failed"):
-            scheduler.execute_job(JOB_ID, "worker", RUN_ID, True, request)
-    else:
-        assert scheduler.execute_job(JOB_ID, "worker", RUN_ID, True, request) == {
-            "status": "SUCCESS"
-        }
-    assert current_job_request.get() is None
-    assert scheduler.current_job_run_id.get() is None
+    try:
+        if fails:
+            with pytest.raises(RuntimeError, match="worker failed"):
+                scheduler.execute_job(JOB_ID, "worker", RUN_ID, manual_request, request)
+        else:
+            assert scheduler.execute_job(JOB_ID, "worker", RUN_ID, manual_request, request) == {
+                "status": "SUCCESS"
+            }
+        assert current_job_request.get() is None
+        assert scheduler.current_job_run_id.get() == parent_run_id
+        start_log = logger.info.call_args_list[0].args
+        assert "caller=%s" in start_log[0]
+        assert start_log[4:] == (
+            caller,
+            "SCREENER_UI" if manual_request else caller,
+            USER_ID if manual_request else "-",
+            parent_run_id or "-",
+        )
+    finally:
+        scheduler.current_job_run_id.reset(parent_token)
 
 
 @pytest.mark.parametrize("manual_request", [False, True])
