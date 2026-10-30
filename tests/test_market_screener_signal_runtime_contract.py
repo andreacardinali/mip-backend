@@ -338,6 +338,12 @@ def test_context_installer_matches_schema_and_filters_before_limit() -> None:
     assert "p.user_id = p_user_id" in installer
     assert "pos.quantity <> 0" in installer
     assert "mum.valid_to IS NULL" in installer
+    assert (
+        "CREATE UNIQUE INDEX uq_market_universes_code ON public.market_universes "
+        "USING btree (upper(btrim((code)::text)));"
+    ) in schema
+    assert "ON CONFLICT (upper(btrim(code::text))) DO UPDATE" in installer
+    assert "ON CONFLICT (code)" not in installer
     assert installer.index(
         "o.consensus_direction = p_consensus_direction"
     ) < installer.index("LIMIT least")

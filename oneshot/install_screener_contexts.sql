@@ -126,7 +126,7 @@ BEGIN
     VALUES ('CONTEXT_' || p_context_type || '_' || p_context_id::text,
         'Context ' || p_context_id::text, 'USER_CONTEXT', false,
         jsonb_build_object('context_type', p_context_type, 'context_id', p_context_id))
-    ON CONFLICT (code) DO UPDATE SET updated_at = now()
+    ON CONFLICT (upper(btrim(code::text))) DO UPDATE SET updated_at = now()
     RETURNING universe_id INTO v_universe_id;
     RETURN v_universe_id;
 END;
