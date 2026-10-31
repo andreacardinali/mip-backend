@@ -870,6 +870,34 @@ before the trigger is restored and the transaction commits. Any error prevents c
 rollback restores the old data, constraints and trigger state. The final result reports
 original, migrated and unresolved row counts. This migrates existing lake events only,
 not historical domain tables, and does not install the new stored writer or cutover.
+
+For historical domain data, review `oneshot/backfill_event_lake.sql` separately.
+Back up the database, stop all writers and run the entire file in a clean session
+after the entity-scoped lake installer. It accepts physical legacy tables in
+`event_legacy` (after cutover) or `public` (before cutover), never compatibility
+views. All eight source tables must exist, even if empty. The one-use transaction
+locks the lake and source tables, copies original rows into the retained
+`event_lake_backfill.source_rows` audit table, registers historical payload version
+2, imports through `sp_save_event` and records entity-scoped mappings in
+`event_lake_backfill.event_map`. Articles fan out over associations and impacts;
+unresolved subjects stay unresolved. Parent links connect clusters, articles,
+associations, impacts and catalyst history. No entities or instruments are created.
+Original nullable fields and non-object raw JSON remain in the audit snapshot and
+import provenance without relaxing the version 1 runtime contract. Operational
+timestamps remain DB-trigger managed; legacy dates remain in the snapshot.
+Existing identity chains are reused at their latest revision, not overwritten with
+older payloads; in that case historical differences are retained in the audit
+snapshot and mapping envelope, not inserted as a new lake revision. Ambiguous
+identity matches, orphan references, inconsistent subjects or incomplete mappings
+abort the transaction. The final report counts imported and reused entity branches.
+On error, issue `ROLLBACK` before retrying; a successful run ends in `COMMIT`.
+Do not rerun a successful backfill or remove its audit schema. This script does not
+install the compatibility cutover or drop legacy tables. Remove physical legacy
+tables only after reviewing the audit mappings, report and API behavior; retain
+the audit schema for historical fields not represented by the current projections.
+Local contract tests do not execute PostgreSQL: validate the SQL on a disposable
+database restored from a current dump before manually running it on development.
+
 The lake has a nullable UUID `entity_id` foreign key to `entities`, indexed with
 event type, stage and occurrence time. The stored writer splits multi-entity
 subjects into one row per distinct entity, retaining the same logical event key
