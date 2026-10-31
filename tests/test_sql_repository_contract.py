@@ -40,6 +40,47 @@ def normalized_function_header(routine):
     )
 
 
+def normalized_scheduler_function(routine):
+    header, delimiter, body = re.split(
+        r"(\$(?:[A-Za-z_][A-Za-z_0-9]*)?\$)", routine, maxsplit=1
+    )
+    assert body.endswith(f"{delimiter};")
+    header = re.sub(r"\bvarchar\b", "character varying", header)
+    header = re.sub(r"\s*([(),])\s*", r"\1", " ".join(header.split()))
+    return header, " ".join(body[: -len(f"{delimiter};")].split())
+
+
+@pytest.mark.parametrize("delimiter", ["$$", "$function$", "$body$"])
+def test_scheduler_function_normalization_accepts_dump_formatting(delimiter):
+    installer = (
+        "FUNCTION public.example( p_key varchar ) RETURNS TABLE(job_key varchar) "
+        "LANGUAGE sql AS $function$ SELECT p_key; $function$;"
+    )
+    snapshot = (
+        "FUNCTION public.example(p_key character varying) "
+        "RETURNS TABLE(job_key character varying) "
+        f"LANGUAGE sql AS {delimiter}\nSELECT p_key;\n{delimiter};"
+    )
+    assert normalized_scheduler_function(installer) == normalized_scheduler_function(
+        snapshot
+    )
+
+
+@pytest.mark.parametrize(
+    "original, replacement", [("SELECT p_key", "SELECT NULL"), ("varchar", "text")]
+)
+def test_scheduler_function_normalization_preserves_contract_changes(
+    original, replacement
+):
+    routine = (
+        "FUNCTION public.example(p_key varchar) RETURNS TABLE(job_key varchar) "
+        "LANGUAGE sql AS $$ SELECT p_key; $$;"
+    )
+    assert normalized_scheduler_function(routine) != normalized_scheduler_function(
+        routine.replace(original, replacement)
+    )
+
+
 def test_scan_members_include_collections_without_duplicate_instruments():
     schema = (ROOT / "mip_schema.sql").read_text(encoding="utf-8")
     installer = (ROOT / "oneshot/install_screener_monitoring_extensions.sql").read_text(
@@ -120,12 +161,14 @@ def test_scheduler_catalog_pruning_installer_matches_schema():
         encoding="utf-8"
     )
     schema = (ROOT / "mip_schema.sql").read_text(encoding="utf-8")
-    pattern = r"FUNCTION public\.sp_scheduler_prune_undefined_jobs\(.*?\$function\$;"
+    pattern = r"FUNCTION public\.sp_scheduler_prune_undefined_jobs\(.*?(?:\$function\$;|\$\$;)"
     installed = re.search(pattern, installer, re.DOTALL)
     snapshots = re.findall(pattern, schema, re.DOTALL)
     assert installed is not None
     assert len(snapshots) == 1
-    assert " ".join(snapshots[0].split()) == " ".join(installed.group().split())
+    assert normalized_scheduler_function(snapshots[0]) == normalized_scheduler_function(
+        installed.group()
+    )
 
 
 @pytest.mark.parametrize(
@@ -144,7 +187,9 @@ def test_scheduler_description_installer_matches_schema(name):
     snapshots = re.findall(pattern, schema, re.DOTALL)
     assert installed is not None
     assert len(snapshots) == 1
-    assert " ".join(snapshots[0].split()) == " ".join(installed.group().split())
+    assert normalized_scheduler_function(snapshots[0]) == normalized_scheduler_function(
+        installed.group()
+    )
     if name == "sp_register_scheduler_job":
         assert "sj.description IS DISTINCT FROM p_description" in installed.group()
         assert "v_registration.action := 'UPDATED'" in installed.group()
