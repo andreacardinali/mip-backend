@@ -502,6 +502,46 @@ def test_scheduler_progress_override_preserves_context_and_domain_fallback() -> 
     assert "'screener_run_id', v_execution->'domain_run_id'" in progress
 
 
+def test_screener_diagnostics_recovery_preserves_lock_and_run_identity() -> None:
+    installer = Path("oneshot/install_screener_run_diagnostics.sql").read_text(
+        encoding="utf-8"
+    )
+    schema = Path("mip_schema.sql").read_text(encoding="utf-8")
+    recovery = schema.split(
+        "CREATE FUNCTION public.sp_scheduler_recover_job_runs(", 1
+    )[1].split("$$;", 1)[0]
+    anchor = "GET DIAGNOSTICS v_recovered = ROW_COUNT;"
+    assert recovery.index("sp_scheduler_try_job_lock(p_job_id)") < recovery.index(
+        anchor
+    )
+    assert "pg_get_functiondef(" in installer
+    assert "EXECUTE replace(definition, anchor, anchor || synchronization)" in installer
+    assert "Unexpected scheduler recovery definition" in installer
+    assert "position('UPDATE public.market_screener_runs screener'" in installer
+    assert "screener.job_run_id = job_run.job_run_id" in installer
+    assert "job_run.job_id = p_job_id AND screener.status = 'RUNNING'" in installer
+    assert installer.startswith("BEGIN;")
+    assert installer.rstrip().endswith("COMMIT;")
+
+
+def test_screener_diagnostics_reader_handles_only_interrupted_linked_runs() -> None:
+    installer = Path("oneshot/install_screener_run_diagnostics.sql").read_text(
+        encoding="utf-8"
+    )
+    reader = installer.split(
+        "CREATE OR REPLACE FUNCTION public.sp_market_screener_list_runs(", 1
+    )[1]
+    assert "'job_run_id', run.job_run_id" in reader
+    assert "'job_key', job.job_key" in reader
+    assert "job_run.job_run_id = run.job_run_id" in reader
+    assert "job.job_id = job_run.job_id" in reader
+    assert reader.count("CASE WHEN run.status = 'RUNNING'") == 3
+    assert reader.count("job_run.status IN ('FAILED', 'SUCCESS', 'PARTIAL')") == 3
+    assert "THEN 'FAILED' ELSE run.status END" in reader
+    assert "THEN job_run.completed_at ELSE run.completed_at END" in reader
+    assert "ELSE run.error_message END" in reader
+
+
 def test_api_enriches_existing_opportunity_payloads() -> None:
     repository = Path("market_screener/api_repository.py").read_text(encoding="utf-8")
     assert repository.count("sp_market_screener_enrich_opportunity_payload") == 1

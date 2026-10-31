@@ -42,6 +42,18 @@ Screener installers, then restart
 the updated processes. Scheduler bootstrap discovers the job manifests. No
 installation SQL runs automatically at application startup.
 
+For overview analysis diagnostics, review and manually apply
+`oneshot/install_screener_run_diagnostics.sql` after the execution-request
+installer. It preserves the existing scheduler recovery lock and synchronizes
+interrupted domain runs when recovery next runs. The diagnostics reader also
+reports a still-open domain run as failed when its linked scheduler execution
+has already ended, without changing completed domain outcomes. It exposes the
+exact job key and execution ID for the overview's administrator-only run and
+live-log actions. Runs without a historical execution ID cannot provide these
+actions. Generic execution uses the job defaults, not the original request
+payload, and is unavailable for contextual `request_only` jobs. The installer
+is transactional and is never run automatically.
+
 Screener context analysis and user price-refresh requests cannot be enabled as
 recurring jobs or launched from the generic admin run endpoint. Their workers
 need contextual request metadata. Independent jobs retain their existing schedules;
