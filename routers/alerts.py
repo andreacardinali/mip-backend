@@ -8,6 +8,7 @@ from alerts.repository import AlertRepository
 from alerts.rule_configuration import validate_rule_payload
 from auth.security import CurrentUser, get_current_user
 from db import SessionLocal
+from notifications.repository import get_source_config
 
 router = APIRouter()
 
@@ -50,6 +51,11 @@ def _save_rule(payload: dict, user_id: str, rule_id: UUID | None):
         raise HTTPException(status_code=422, detail=str(error)) from error
     database = SessionLocal()
     try:
+        source_id = validated["conditions"].get("source_id")
+        if source_id:
+            source = get_source_config(database, user_id, source_id)
+            if source is None or not (source["config"] or {}).get("enabled", True):
+                raise HTTPException(status_code=422, detail="Invalid notification destination")
         saved_id = AlertRepository(database).save_user_rule(
             user_id, str(rule_id) if rule_id else None, validated
         )

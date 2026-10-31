@@ -65,11 +65,20 @@ def validate_rule_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "crossing_only",
         "once_per_session",
         "notification_mode",
+        "source_id",
         "event_types",
         "instrument_overrides",
     }:
         raise ValueError("Invalid alert conditions")
     normalized: dict[str, Any] = {}
+    source_id = conditions.get("source_id")
+    if source_id is not None:
+        if not isinstance(source_id, str):
+            raise ValueError("Invalid notification destination")
+        try:
+            normalized["source_id"] = str(UUID(source_id))
+        except ValueError as error:
+            raise ValueError("Invalid notification destination") from error
     scope = conditions.get("scope", "SCREENER")
     if scope not in ("SCREENER", "WATCHLIST", "PORTFOLIO", "ALL"):
         raise ValueError("Invalid monitoring scope")

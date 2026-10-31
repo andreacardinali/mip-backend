@@ -34,6 +34,7 @@ class NotificationQueue:
         message: str,
         context: dict[str, Any],
         channel: str | None = None,
+        source_id: str | None = None,
     ) -> EnqueueResult:
         if not self.enabled:
             return EnqueueResult(EnqueueStatus.DISABLED)
@@ -58,7 +59,10 @@ class NotificationQueue:
                 notification_type=notification_type,
                 severity=severity,
                 fallback_channel=fallback_channel,
+                **({"source_id": source_id} if source_id is not None else {}),
             )
+            if target.resolution_status == "PAUSED":
+                return EnqueueResult(EnqueueStatus.DISABLED)
             if target.resolution_status == "PREFERENCE_DISABLED":
                 return EnqueueResult(EnqueueStatus.PREFERENCE_DISABLED)
             if not target.source_id or not target.channel:

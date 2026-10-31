@@ -961,6 +961,23 @@ manually install, then restart and verify news, facets, entity overview, catalys
 and news enrichment. Local contract tests and read-only inspection do not execute
 the installation or verify the post-installation API behavior.
 
+If an already-installed reader cutover raises `column reference "source" is
+ambiguous` from `sp_news_get_user_news`, or an ambiguous `entity_id` from
+`sp_news_list_pending_entity_scores`, review and manually install
+`oneshot/repair_event_lake_reader_qualification.sql` with the backend and scheduler
+stopped. It replaces only exact copies of the installed, entity-scoped latest-event
+projection with fully qualified columns, preserving column order, revision selection,
+routine signatures and surrounding authorization/filtering. The retained
+`event_lake_latest` view is required; the eight removed compatibility views are not.
+Unexpected projections or news/enrichment-reader definitions abort the transaction.
+Both readers must contain the qualified projection after repair. Reruns
+report zero repaired readers. No event data, backfill history or global PL/pgSQL
+name-resolution settings are changed. Test on a restored database first, then
+restart and verify news, facets, catalysts, entity overview and news enrichment.
+Do not rerun the original reader cutover to repair an already-expanded reader.
+Local contract tests do not execute this repair or establish PostgreSQL runtime
+correctness.
+
 The lake has a nullable UUID `entity_id` foreign key to `entities`, indexed with
 event type, stage and occurrence time. The stored writer splits multi-entity
 subjects into one row per distinct entity, retaining the same logical event key

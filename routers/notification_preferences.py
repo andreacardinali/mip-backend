@@ -2,13 +2,14 @@ from typing import Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, StrictBool
 from sqlalchemy import text
 
 from auth.security import CurrentUser, get_current_user
 from db import SessionLocal
 from notifications.credentials import encrypt_credential
 from notifications.models import NotificationDelivery
+from notifications.repository import get_source_config as _get_source_config
 from notifications.providers.telegram import TelegramProvider
 
 router = APIRouter()
@@ -29,28 +30,17 @@ def _serialize_row(row) -> dict:
     }
 
 
-def _get_source_config(db, user_id: str, source_id: str):
-    return (
-        db.execute(
-            text(
-                """
-                SELECT *
-                FROM public.sp_get_user_notification_source_config(
-                    CAST(:user_id AS uuid), CAST(:source_id AS uuid)
-                )
-                """
-            ),
-            {"user_id": user_id, "source_id": source_id},
-        )
-        .mappings()
-        .first()
-    )
-
-
 class CollectionIntelligencePayload(BaseModel):
     enabled_categories: list[
         Literal["DAILY_MOVER", "UPCOMING_CATALYST", "BREAKING_CATALYST", "NEWS"]
     ]
+
+
+class DeliveryPreferencesPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    paused: StrictBool
+    default_source_id: UUID | None
 
 
 @router.get("/collections")
@@ -122,7 +112,12 @@ def get_notification_preferences(
             ),
             {"user_id": current_user["user_id"]},
         ).all()
+        delivery = db.execute(
+            text("SELECT * FROM public.sp_get_user_notification_delivery(CAST(:user_id AS uuid))"),
+            {"user_id": current_user["user_id"]},
+        ).one()
         return {
+            "delivery": _serialize_row(delivery),
             "preferences": [_serialize_row(row) for row in preferences],
             "sources": [_serialize_row(row) for row in sources],
             "supported_channels": SUPPORTED_CHANNELS,
@@ -169,6 +164,34 @@ def update_notification_preferences(
     except Exception as error:
         db.rollback()
         raise HTTPException(status_code=422, detail=str(error)) from error
+    finally:
+        db.close()
+    return get_notification_preferences(current_user)
+
+
+@router.put("/delivery")
+def update_notification_delivery(
+    payload: DeliveryPreferencesPayload,
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    db = SessionLocal()
+    try:
+        db.execute(
+            text("""
+                SELECT public.sp_save_user_notification_delivery(
+                    CAST(:user_id AS uuid), :paused, CAST(:source_id AS uuid)
+                )
+            """),
+            {
+                "user_id": current_user["user_id"],
+                "paused": payload.paused,
+                "source_id": str(payload.default_source_id) if payload.default_source_id else None,
+            },
+        ).scalar_one()
+        db.commit()
+    except Exception as error:
+        db.rollback()
+        raise HTTPException(status_code=422, detail="Invalid notification destination") from error
     finally:
         db.close()
     return get_notification_preferences(current_user)

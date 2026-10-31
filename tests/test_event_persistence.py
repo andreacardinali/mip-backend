@@ -369,6 +369,40 @@ def test_reader_cutover_inlines_live_projections_and_removes_views_atomically():
         assert f"'{name}'" in sql
 
 
+def test_reader_qualification_repair_is_guarded_and_preserves_latest_semantics():
+    sql = (
+        Path(__file__).parents[1] / "oneshot" / "repair_event_lake_reader_qualification.sql"
+    ).read_text()
+    assert sql.strip().startswith("BEGIN;")
+    assert sql.strip().endswith("COMMIT;")
+    assert "SET LOCAL search_path = pg_catalog;" in sql
+    assert "pg_get_viewdef('public.event_lake_latest'::regclass, true)" in sql
+    assert "projection_columns IS DISTINCT FROM expected_columns" in sql
+    assert "Unexpected latest-event projection" in sql
+    assert "News reader does not contain the expected inlined projection" in sql
+    assert "to_regprocedure('public.sp_news_list_pending_entity_scores(integer)')" in sql
+    assert "Missing enrichment reader" in sql
+    assert "Enrichment reader does not contain the expected inlined projection" in sql
+    assert sql.count("WHERE procedure.oid = enrichment_reader") == 2
+    assert "pg_get_functiondef(routine.oid), original_projection, qualified_projection" in sql
+    assert "strpos(procedure.prosrc, original_projection) > 0" in sql
+    assert "strpos(procedure.prosrc, qualified_projection) > 0" in sql
+    assert "format('lake.%I', column_name)" in sql
+    assert "ORDER BY position" in sql
+    assert "DISTINCT ON (lake.event_type, lake.stage, lake.source, lake.event_key, lake.entity_id)" in sql
+    assert "FROM public.event_lake AS lake" in sql
+    assert "ORDER BY lake.event_type, lake.stage, lake.source, lake.event_key, lake.entity_id, lake.revision DESC" in sql
+    assert sql.index("News reader does not contain") < sql.index("EXECUTE definition;")
+    assert sql.index("Enrichment reader does not contain") < sql.index("EXECUTE definition;")
+    assert sql.index("EXECUTE definition;") < sql.index("Reader qualification verification failed")
+    assert sql.index("EXECUTE definition;") < sql.index("Enrichment reader qualification verification failed")
+    assert "zero means already repaired" in sql
+    assert "variable_conflict" not in sql
+    assert "DROP " not in sql
+    assert "UPDATE public.event_lake" not in sql
+    assert "CREATE VIEW" not in sql
+
+
 def test_event_api_readers_use_stored_routines_not_legacy_relations():
     root = Path(__file__).parents[1]
     for relative_path, routine in (
