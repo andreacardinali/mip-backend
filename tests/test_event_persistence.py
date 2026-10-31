@@ -1,4 +1,5 @@
 import json
+import re
 from datetime import UTC, date, datetime
 from pathlib import Path
 from unittest.mock import Mock
@@ -176,7 +177,7 @@ def test_lake_entity_scope_applies_to_fanout_revisions_and_lookups():
     assert "AND score.entity_id = association.entity_id" in cutover
     assert "SELECT DISTINCT ON ((payload->>'news_id')::uuid)" in cutover
     article_writer = cutover.split("v_article_event_id :=", 1)[1].split(
-        "SELECT news_entity_id", 1
+        "v_association_inserted :=", 1
     )[0]
     assert "jsonb_build_object('entity_id', p_entity_id)" in article_writer
     assert "'subjects', '[]'::jsonb" not in article_writer
@@ -211,6 +212,180 @@ def test_cutover_projects_all_legacy_archives_and_registers_their_types():
     ):
         assert f"('{event_type}', 1," in installer
     assert "AND root.revision = 1" in cutover
+
+
+def test_cutover_requires_locked_unchanged_backfill_before_replacing_tables():
+    sql = (
+        Path(__file__).resolve().parents[1] / "oneshot" / "install_event_lake_cutover.sql"
+    ).read_text()
+    preflight = sql.split("CREATE VIEW public.event_lake_latest AS", 1)[0]
+    assert "SET LOCAL lock_timeout = '10s'" in preflight
+    assert "LOCK TABLE public.event_lake IN ACCESS EXCLUSIVE MODE" in preflight
+    assert "snapshot.row_data = current_rows.row_data" in preflight
+    assert "JOIN public.event_lake lake ON lake.event_id = mapping.event_id" in preflight
+    assert "Legacy data changed or backfill incomplete" in preflight
+    assert "Cutover already installed" in preflight
+
+
+def test_cutover_replaces_all_legacy_archive_writers():
+    sql = (Path(__file__).parents[1] / "oneshot" / "install_event_lake_cutover.sql").read_text()
+    contracts = {
+        "sp_upsert_catalyst": "RETURNS uuid",
+        "sp_upsert_filing": "RETURNS uuid",
+        "sp_save_intelligence_event": "RETURNS void",
+    }
+    for name, result in contracts.items():
+        body = sql.split(f"CREATE OR REPLACE FUNCTION public.{name}(", 1)[1].split("$$;", 1)[0]
+        assert result in body
+        assert "public.sp_save_event(" in body
+        assert "'parent_event_ids', '[]'::jsonb" in body
+        assert "'evidence'," in body
+        assert "'provenance'," in body
+        assert "INSERT INTO public.catalysts" not in body
+        assert "INSERT INTO public.filings" not in body
+        assert "INSERT INTO public.collection_intelligence_events" not in body
+
+
+@pytest.mark.parametrize("name", [
+    "sp_news_upsert_article", "sp_news_update_entity_scores",
+    "sp_upsert_catalyst", "sp_upsert_filing", "sp_save_intelligence_event",
+])
+def test_specific_writers_delegate_without_legacy_projection_dependencies(name):
+    sql = (Path(__file__).parents[1] / "oneshot" / "install_event_lake_cutover.sql").read_text()
+    body = sql.split(f"CREATE OR REPLACE FUNCTION public.{name}(", 1)[1].split("$$;", 1)[0]
+    assert "public.sp_save_event(" in body
+    assert not re.search(
+        r"\b(?:FROM|JOIN|UPDATE|INTO)\s+(?:public\.)?"
+        r"(?:news|news_entities|news_clusters|news_impacts|catalysts|"
+        r"catalyst_history|filings|collection_intelligence_events)\b",
+        body, re.IGNORECASE,
+    )
+    assert not re.search(
+        r"\b(?:UPDATE|INSERT INTO|DELETE FROM)\s+(?:public\.)?event_lake\b",
+        body, re.IGNORECASE,
+    )
+
+
+def test_writer_revision_is_guarded_repeatable_and_matches_cutover_lookup():
+    root = Path(__file__).parents[1] / "oneshot"
+    revision = (root / "revise_event_lake_writers.sql").read_text()
+    cutover = (root / "install_event_lake_cutover.sql").read_text()
+    lookup = revision.split("lake_lookup text := $lake$", 1)[1].split("$lake$;", 1)[0]
+    assert " ".join(lookup.split()) in " ".join(cutover.split())
+    assert "AND association.entity_id = p_entity_id" in lookup
+    assert "association.event_type = 'NEWS_ASSOCIATION'" in lookup
+    assert revision.strip().startswith("BEGIN;")
+    assert revision.strip().endswith("COMMIT;")
+    assert "EXECUTE replace(definition, legacy_lookup, lake_lookup)" in revision
+    assert "chr(13) || chr(10), chr(10)" in revision
+    assert "ELSIF strpos(definition, lake_lookup) = 0" in revision
+    assert "Unexpected news association lookup; no revision applied" in revision
+    assert "does not delegate to sp_save_event" in revision
+    assert "still references legacy projections" in revision
+    assert "bypasses sp_save_event" in revision
+    for name in (
+        "sp_news_upsert_article", "sp_news_update_entity_scores", "sp_upsert_catalyst",
+        "sp_upsert_filing", "sp_save_intelligence_event",
+    ):
+        assert f"'public.{name}(" in revision
+    assert "DROP " not in revision
+
+
+@pytest.mark.parametrize("line_ending", ["\n", "\r\n"])
+def test_writer_revision_normalizes_lookup_literals_before_matching(line_ending):
+    revision = (
+        Path(__file__).parents[1] / "oneshot" / "revise_event_lake_writers.sql"
+    ).read_text()
+    match_position = revision.index("IF strpos(definition, legacy_lookup) > 0 THEN")
+    for variable, delimiter in (("legacy_lookup", "legacy"), ("lake_lookup", "lake")):
+        normalization = f"{variable} := replace({variable}, chr(13) || chr(10), chr(10));"
+        assert revision.index(normalization) < match_position
+        lookup = revision.split(f"{variable} text := ${delimiter}$", 1)[1].split(
+            f"${delimiter}$;", 1
+        )[0]
+        windows_lookup = lookup.replace("\n", line_ending)
+        assert windows_lookup.replace("\r\n", "\n") == lookup
+
+
+def test_cutover_consolidation_preserves_immutable_entity_references():
+    sql = (Path(__file__).parents[1] / "oneshot" / "install_event_lake_cutover.sql").read_text()
+    body = sql.split("DO $consolidation$", 1)[1].split("$consolidation$;", 1)[0]
+    assert "public.sp_consolidate_entity(uuid,uuid,boolean)" in body
+    assert "definition := replace(definition, legacy_block, '')" in body
+    assert "Missing entity consolidation guard location" in body
+    assert "SELECT FROM public.event_lake" in body
+    assert "WHERE entity_id = p_source_entity_id" in body
+    assert "an entity redirect policy is required" in body
+    assert "Entity consolidation still writes legacy archives" in body
+    assert "UPDATE public.event_lake" not in body
+    assert "DELETE FROM public.event_lake" not in body
+
+
+def test_cutover_refuses_remaining_archive_writers_and_view_dependencies():
+    sql = (Path(__file__).parents[1] / "oneshot" / "install_event_lake_cutover.sql").read_text()
+    body = sql.split("DO $verification$", 1)[1].split("$verification$;", 1)[0]
+    assert "legacy_block := regexp_substr(definition, block_pattern);" in sql
+    assert "Legacy archive writers remain" in body
+    assert "Views still depend on physical legacy archives" in body
+    assert "dependency.refclassid = 'pg_class'::regclass" in body
+    assert "dependency.classid = 'pg_rewrite'::regclass" in body
+
+
+def test_archive_removal_requires_cutover_and_audit_without_cascade():
+    sql = (Path(__file__).parents[1] / "oneshot" / "remove_event_legacy_tables.sql").read_text()
+    assert sql.strip().startswith("BEGIN;")
+    assert sql.strip().endswith("COMMIT;")
+    assert sql.index("SET LOCAL TIME ZONE 'UTC';") < sql.index("DO $preflight$")
+    assert "CASCADE" not in sql
+    assert "snapshot.row_data = to_jsonb(original)" in sql
+    assert "JOIN public.event_lake lake ON lake.event_id = mapping.event_id" in sql
+    assert "relkind = 'v'" in sql
+    assert "IN ACCESS EXCLUSIVE MODE" in sql
+    assert "DROP TABLE event_legacy.news" in sql
+    assert "DROP SCHEMA event_lake_backfill" not in sql
+    assert "DROP TABLE public." not in sql
+
+
+def test_reader_cutover_inlines_live_projections_and_removes_views_atomically():
+    sql = (
+        Path(__file__).parents[1] / "oneshot" / "revise_event_lake_readers.sql"
+    ).read_text()
+    assert sql.strip().startswith("BEGIN;")
+    assert sql.strip().endswith("COMMIT;")
+    assert "SET LOCAL search_path = pg_catalog;" in sql
+    assert "pg_get_viewdef(view_oid, true)" in sql
+    assert "pg_get_functiondef(routine.oid)" in sql
+    assert "AS event_lake_latest" in sql
+    assert "reference[2]" in sql and "reference[4]" in sql
+    assert sql.index("EXECUTE definition;") < sql.index("DROP VIEW public.%I RESTRICT")
+    assert "Stored routines still reference legacy event relations" in sql
+    assert "CASCADE" not in sql
+    assert "DROP TABLE" not in sql
+    assert "DROP VIEW public.event_lake_latest" not in sql
+    for name in (
+        "news", "news_entities", "news_clusters", "news_impacts",
+        "catalysts", "catalyst_history", "filings", "collection_intelligence_events",
+    ):
+        assert f"'{name}'" in sql
+
+
+def test_event_api_readers_use_stored_routines_not_legacy_relations():
+    root = Path(__file__).parents[1]
+    for relative_path, routine in (
+        ("routers/news.py", "sp_news_get_user_news"),
+        ("routers/catalysts.py", "sp_get_user_catalysts"),
+        ("routers/entities.py", "sp_get_user_entity_overview"),
+        ("services/news_enrichment.py", "sp_news_list_pending_entity_scores"),
+        ("jobs/portfolio_intelligence/repositories/catalysts.py", "sp_get_recent_intelligence_catalysts"),
+    ):
+        source = (root / relative_path).read_text()
+        assert f"public.{routine}(" in source
+        assert not re.search(
+            r"\b(?:FROM|JOIN)\s+(?:public\.)?(?:news|news_entities|news_clusters|"
+            r"news_impacts|catalysts|catalyst_history|filings|collection_intelligence_events)\b",
+            source,
+            re.IGNORECASE,
+        )
 
 
 def test_common_sql_writer_resolves_issuer_without_creating_incomplete_instruments():
@@ -351,3 +526,86 @@ def test_intelligence_writes_only_to_lake():
     )
     db.execute.assert_called_once()
     assert "public.sp_save_event" in str(db.execute.call_args.args[0])
+
+
+def test_lake_cleanup_defaults_to_preview_and_validates_runtime_threshold():
+    sql = (
+        Path(__file__).resolve().parents[1] / "oneshot" / "install_event_lake_cleanup.sql"
+    ).read_text()
+    assert "p_threshold_days integer DEFAULT 30" in sql
+    assert "p_dry_run boolean DEFAULT true" in sql
+    assert "p_threshold_days IS NULL OR p_threshold_days <= 0" in sql
+    assert "IF p_dry_run IS NULL THEN" in sql
+    assert "make_interval(days => p_threshold_days)" in sql
+    assert "IF NOT p_dry_run THEN" in sql
+    assert sql.index("IF NOT p_dry_run THEN") < sql.index("DELETE FROM public.event_lake")
+    assert "GET DIAGNOSTICS deleted_rows = ROW_COUNT" in sql
+    assert sql.startswith("BEGIN;")
+    assert sql.rstrip().endswith("COMMIT;")
+
+
+def test_lake_cleanup_protects_active_chains_future_events_and_incoming_references():
+    sql = (
+        Path(__file__).resolve().parents[1] / "oneshot" / "install_event_lake_cleanup.sql"
+    ).read_text()
+    assert "LOCK TABLE public.event_lake IN SHARE ROW EXCLUSIVE MODE" in sql
+    assert "HAVING max(last_seen_at) >= cutoff_at" in sql
+    assert "max(event_day) >= (statement_timestamp() AT TIME ZONE 'UTC')::date" in sql
+    assert "max(occurred_at) >= statement_timestamp()" in sql
+    assert "lake.entity_id IS NOT DISTINCT FROM retained.entity_id" in sql
+    assert "constraint_row.confrelid = 'public.event_lake'::regclass" in sql
+    assert "LOCK TABLE %I.%I IN SHARE MODE" in sql
+    assert "unnest(reference.conkey, reference.confkey)" in sql
+    assert "WITH RECURSIVE edges AS" in sql
+    assert "unnest(parent_event_ids)" in sql
+    assert "SELECT supersedes_event_id, event_id" in sql
+    assert "JOIN edges ON edges.event_id = retained.event_id" in sql
+    assert "ON CONFLICT DO NOTHING" in sql
+    assert "CASCADE" not in sql
+
+
+def test_lake_cleanup_exception_preserves_immutability_and_transaction_ownership():
+    sql = (
+        Path(__file__).resolve().parents[1] / "oneshot" / "install_event_lake_cleanup.sql"
+    ).read_text()
+    assert "pg_get_functiondef('public.event_lake_timestamps()'::regprocedure)" in sql
+    assert "Unexpected event lake deletion guard" in sql
+    assert "current_setting('mip.event_lake_cleanup', true) IS DISTINCT FROM 'on'" in sql
+    assert "WHERE candidate.event_id = OLD.event_id" in sql
+    assert "RETURN OLD;" in sql
+    assert "DISABLE TRIGGER" not in sql
+    assert "SECURITY DEFINER" not in sql
+    body = sql.split("AS $cleanup$", 1)[1].split("$cleanup$;", 1)[0]
+    assert "COMMIT" not in body.replace("ON COMMIT DROP", "")
+    assert "coalesce(previous_cleanup_setting, '')" in body
+    assert "DROP TABLE pg_temp.event_lake_cleanup_candidates" in body
+
+
+def test_lake_indexes_cover_incoming_foreign_keys_and_latest_ordering():
+    root = Path(__file__).resolve().parents[1]
+    sql = (root / "oneshot" / "install_event_lake_indexes.sql").read_text()
+    view = (root / "oneshot" / "install_event_lake_cutover.sql").read_text()
+    assert "ON public.event_lake USING btree (supersedes_event_id)" in sql
+    assert "ON event_lake_backfill.event_map USING btree (event_id)" in sql
+    ordering = "event_type, stage, source, event_key, entity_id, revision DESC"
+    assert f"({ordering});" in sql
+    assert f"ORDER BY {ordering};" in view
+    assert "INCLUDE" not in sql
+    assert "DROP INDEX" not in sql
+    assert "ALTER TABLE" not in sql
+
+
+def test_lake_index_installation_is_concurrent_and_validates_existing_definitions():
+    sql = (
+        Path(__file__).resolve().parents[1] / "oneshot" / "install_event_lake_indexes.sql"
+    ).read_text()
+    assert sql.count("CREATE INDEX CONCURRENTLY IF NOT EXISTS") == 3
+    assert not re.search(r"^\s*(?:BEGIN|COMMIT);", sql, re.MULTILINE)
+    assert "to_regclass('event_lake_backfill.event_map')" in sql
+    assert "index_row.indisvalid, index_row.indisready" in sql
+    assert "actual.columns <> expected.columns" in sql
+    assert "actual.indrelid <> to_regclass(expected.table_name)" in sql
+    assert "expected.descending_revision AND option.position = 6 THEN 3" in sql
+    assert "index_row.indpred IS NULL AND index_row.indexprs IS NULL" in sql
+    assert "Invalid or incompatible event lake index" in sql
+    assert sql.rstrip().endswith("RESET lock_timeout;")

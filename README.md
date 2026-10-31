@@ -898,6 +898,57 @@ the audit schema for historical fields not represented by the current projection
 Local contract tests do not execute PostgreSQL: validate the SQL on a disposable
 database restored from a current dump before manually running it on development.
 
+After a completed historical import, stop writers and review
+`oneshot/install_event_lake_cutover.sql`. Its transaction replaces all eight public
+archives with lake-backed read-only compatibility views and replaces the six
+legacy-writing stored routines. API and frontend response contracts remain unchanged.
+The preflight requires unchanged historical snapshots and valid lake mappings;
+remaining stored archive writers or views bound to physical archives abort the
+cutover. Entity consolidation no longer modifies legacy events and explicitly
+refuses a source entity referenced by immutable lake events, even with `p_force`;
+supporting those merges requires a separately agreed entity redirect policy.
+
+For an already installed cutover, review `oneshot/revise_event_lake_writers.sql`.
+It removes the news writer's association lookup through the compatibility view,
+using entity-scoped `NEWS_ASSOCIATION` events from `event_lake_latest` instead.
+The five specific event writers keep their signatures and return contracts and
+delegate lake persistence to `sp_save_event`; issuer resolution and news source
+registration remain domain normalization. The transaction rejects unexpected
+news function bodies, references to the eight legacy projections, or direct lake
+writes in those wrappers. It can be rerun after success and does not remove views
+or change the reading routines. Read-only inspection does not install this revision;
+validate it on a disposable restored database before manually applying it.
+
+After manually validating API reads and writes against the installed cutover,
+review `oneshot/remove_event_legacy_tables.sql` to remove the physical archives.
+It locks and rechecks the retained snapshots and mappings, drops only the eight
+`event_legacy` tables and their schema, and never uses `CASCADE`. Any remaining
+database dependency prevents the transaction from committing. Keep both the lake
+and the backfill audit schema. Snapshot comparisons run in UTC, as in the backfill,
+so the session time zone cannot change the JSON representation of timestamps.
+Do not rerun historical installers that recreate
+legacy tables or writers after cutover. These scripts are manual operations, not
+application startup migrations; neither local tests nor read-only SQL inspection
+execute them on the development database.
+
+After writer revision and archive removal, stop the backend and scheduler and
+review `oneshot/revise_event_lake_readers.sql`. It expands the installed compatibility
+projections directly into every stored reader that references the eight views,
+preserving logical IDs, entity-scoped latest revisions, enriched news scores,
+return signatures and existing authorization/filtering. The currently affected
+routines are `sp_get_recent_catalysts`, `sp_get_recent_intelligence_catalysts`,
+`sp_get_user_catalysts`, `sp_get_user_entity_overview`, `sp_news_get_user_news`
+and `sp_news_list_pending_entity_scores`; facet routines delegate to these readers.
+API routes already call these routines and need no response or frontend changes.
+The same transaction drops all eight compatibility views with `RESTRICT`; any
+remaining database dependency rolls back the entire cutover. The internal
+`event_lake_latest` view remains for writers, but the revised readers inline its
+query and read `event_lake` directly. Keep the backfill audit schema. Do not rerun
+old installers that recreate legacy readers or views. Test on a restored database,
+manually install, then restart and verify news, facets, entity overview, catalysts
+and news enrichment. Local contract tests and read-only inspection do not execute
+the installation or verify the post-installation API behavior.
+
 The lake has a nullable UUID `entity_id` foreign key to `entities`, indexed with
 event type, stage and occurrence time. The stored writer splits multi-entity
 subjects into one row per distinct entity, retaining the same logical event key
@@ -905,7 +956,7 @@ but separate UUIDs and revision chains. Entity-free subjects are retained on eac
 row; events with no resolved entity retain `entity_id = NULL`. Catalyst and filing
 subjects are resolved by the shared stored routines before this split. News
 articles are stored for each associated entity with a shared logical `news_id`;
-the compatibility news view exposes one article per `news_id`.
+the news reader projection exposes one article per `news_id`.
 The singular `sp_save_event` return remains a row UUID: for multi-entity envelopes
 it returns the row for the lowest entity UUID, not all association row IDs. Use
 the logical identity plus `entity_id` to look up another entity's revision.
@@ -931,9 +982,96 @@ explicitly recorded when neither exists. Date fallback deduplicates repeated
 scans but cannot reliably reconcile a rescheduled earnings event. `created_at`,
 `updated_at`, `ingested_at` and `last_seen_at` are managed by DB triggers, never
 assigned by Python. Only observation metadata can be updated; content updates and
-deletes are rejected. The SP does not commit; projection failure rolls back the
+ordinary deletes are rejected. The SP does not commit; projection failure rolls back the
 lake write as part of the same unit. Replay and recipient-dependent severity
 remain separate, deferred work.
+
+### Event Lake Indexes and Maintenance
+
+Manually install `oneshot/install_event_lake_indexes.sql` with autocommit enabled,
+executing statements sequentially and stopping on the first error. Do not wrap it
+in BEGIN/COMMIT or use a client's single-transaction mode: CREATE INDEX CONCURRENTLY
+cannot run inside a transaction block. The retained backfill mapping and latest
+view must exist. Nothing is installed automatically on application startup.
+
+The script creates three B-tree indexes concurrently:
+
+- `ix_event_lake_supersedes_event_id` supports incoming revision FK checks.
+- `event_lake_backfill.ix_event_lake_backfill_event_id` supports audit FK checks.
+- `ix_event_lake_latest` matches the full latest identity ordering, ending in
+	`revision DESC`, including the view's default NULL ordering for nullable entities.
+
+The latest index can remove sorting for DISTINCT ON and filtered latest readers;
+it does not skip historical revisions or avoid fetching selected JSON payloads.
+The planner may still prefer a sequential scan and sort for small tables or broad
+reads. Keep the existing ascending unique revision constraint: it enforces identity
+uniqueness and is not replaced by this nonunique read index. Payloads are not
+included, avoiding a wide duplicate JSON index and its write/storage overhead.
+
+Allow disk headroom for index builds and temporary sorting. Concurrent builds
+permit ordinary writes but consume I/O and can wait for old transactions; run off
+peak and inspect `pg_stat_progress_create_index` if needed. This installer is not
+atomic: completed indexes remain if a later statement fails. Its final validation
+rejects invalid, unready or conflicting named indexes. IF NOT EXISTS alone cannot
+repair an interrupted build; inspect it and manually arrange recovery before
+retrying. The script sets a session lock timeout and resets it on success; use a
+dedicated connection and close it after an error.
+
+Thirty days is not a capacity estimate: size depends on daily event identities,
+revisions, payload size and audit-protected history. Measure these and monitor
+relation/index sizes, dead tuples, vacuum/analyze cadence and cleanup duration.
+Keep autovacuum/autoanalyze enabled. After substantial deletion, consider VACUUM
+(ANALYZE) outside a transaction; ordinary vacuum makes space reusable, rather than
+necessarily shrinking files. Do not schedule VACUUM FULL or REINDEX without measured
+need. Validate representative reader plans with EXPLAIN (ANALYZE, BUFFERS) after
+installation at realistic retained volumes; local contract tests do not certify
+query latency or PostgreSQL concurrent builds.
+
+A read-only stress check on 2026-10-31 used 300,000 synthetic revisions (100,000
+identities, three revisions each), spread over 30 days with approximately 1 KiB
+JSON payloads and nullable entities. The full latest ordering spilled about
+322 MiB to disk; the query took 4.6 seconds including fixture generation and CTE
+materialization. This demonstrates wide-sort pressure, not expected production
+latency or a measured index speedup. The live latest read was about 10 ms on
+3,021 rows using an incremental sort. No new indexes were installed during these
+checks; an indexed before/after comparison remains a manual installation check.
+
+### Event Lake Retention
+
+Review and manually install `oneshot/install_event_lake_cleanup.sql` on a restored
+database first. It installs `public.sp_cleanup_event_lake(p_threshold_days integer
+DEFAULT 30, p_dry_run boolean DEFAULT true)` and extends the installed timestamp
+trigger only to permit rows selected by this cleanup. Existing insert/update
+guards are preserved. No cleanup runs during installation or application startup.
+
+```sql
+SELECT * FROM public.sp_cleanup_event_lake();          -- Preview, 30 days.
+SELECT * FROM public.sp_cleanup_event_lake(60);        -- Preview, 60 days.
+SELECT * FROM public.sp_cleanup_event_lake(30, false); -- Delete, caller commits.
+```
+
+The threshold must be positive and neither argument can be NULL. The result
+contains `cutoff_at`, `eligible_rows`, `protected_rows` (old observations retained
+for safety), and `deleted_rows` (zero in preview). A chain is eligible only when
+all revisions were last seen strictly before the cutoff, no revision is dated
+today or later in UTC or has a future occurrence, and no retained event depends
+on it. Revision links are protected in both directions; parent links are followed
+recursively, including cycles. Incoming foreign keys are discovered dynamically:
+the retained backfill mapping protects its referenced events without changing or
+removing historical snapshots. Therefore this is an inactivity retention policy,
+not a strict maximum event age; the backfill audit can protect many old rows.
+
+The invoker needs temporary-table privileges, lake DELETE privileges and sufficient
+privileges to read and lock referencing tables. The function is not SECURITY DEFINER;
+its transaction-local trigger context is a correctness guard, not a separate
+authorization boundary. Both preview and deletion lock the lake against writes
+and incoming FK tables against changes, with a 10-second lock timeout. Use a short
+dedicated transaction off peak and commit/rollback promptly; readers remain usable.
+Errors roll back the selection, deletion and trigger context. The function does
+not commit and does not disable triggers. Deleting an entire identity removes its
+deduplication history: a later provider observation can create it again as revision
+1. A scheduled runtime job is not installed by this script. Preview/install/delete
+must be validated separately; local contract tests do not execute database writes.
 
 Offline writer/contract checks: `.venv\Scripts\python.exe -m pytest
 tests/test_event_persistence.py tests/test_news_ingestion.py
