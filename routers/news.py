@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime
 from typing import Annotated
 
@@ -7,6 +8,7 @@ from sqlalchemy import text
 from auth.security import CurrentUser, get_current_user
 from db import SessionLocal
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
@@ -66,6 +68,7 @@ def get_news(
         ).all()
         return [_serialize(row) for row in rows]
     except Exception as error:
+        logger.exception("Failed to retrieve news (scope=%s)", scope)
         raise HTTPException(status_code=422, detail=str(error)) from error
     finally:
         db.close()
@@ -90,6 +93,7 @@ def get_news_facets(
             {"user_id": current_user["user_id"], "scope": scope},
         ).scalar_one()
     except Exception as error:
+        logger.exception("Failed to retrieve news facets (scope=%s)", scope)
         raise HTTPException(status_code=422, detail=str(error)) from error
     finally:
         db.close()
