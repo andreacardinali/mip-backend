@@ -838,6 +838,38 @@ version, stage (`ACQUIRED`, `ENRICHED`, `VALIDATED`), source identity, semantic 
 optional aware occurrence timestamp or date-only event day, observation time,
 subjects, parent event IDs, payload, raw payload, evidence and provenance.
 Subjects may be unresolved or multi-entity; parent IDs must reference lake rows.
+Run the entire lake installer, not individual selected statements. It upgrades an
+empty earlier lake by adding `entity_id` and replacing global revision uniqueness
+with entity-scoped uniqueness before creating the entity index. If an earlier
+lake already contains events, installation stops without migrating or deleting
+them: subjects and revision chains require a separate reviewed data migration.
+For a populated lake without `entity_id`, first back up the database and stop all
+lake writers. Run the complete `oneshot/migrate_event_lake_entity_scope.sql` in a
+clean session, then the complete `oneshot/install_event_lake.sql` before restarting
+writers. Do not run the old writer against the migrated schema. If a script fails,
+execute `ROLLBACK` before retrying. The migration adds the entity column, foreign
+key, index and scoped uniqueness itself so the installer can accept populated data.
+It requires the earlier schema, the normal timestamp trigger, valid subject UUIDs
+and existing entities, contiguous revision chains and valid parent UUIDs. It never
+resolves symbols or creates entities; subjects without an entity remain unresolved.
+The transaction locks the lake and entities; a lock wait exceeding ten seconds
+aborts rather than waiting indefinitely. Allow space for an original snapshot,
+expanded rows, temporary planning tables, indexes and WAL before execution.
+The retained `event_lake_entity_migration.original` snapshot and `event_map` provide
+audit data, not an automatic downgrade. The script is intentionally one-use and
+refuses an already extended schema or an existing audit schema. It keeps every old
+event UUID on the lowest-UUID entity branch of that event (or the unresolved row),
+allocates UUIDs for additional branches, preserves payloads and timestamps, rebuilds
+contiguous revisions per entity and recomputes semantic hashes in UTC. Parent links
+prefer the matching entity branch; if none exists, they retain all branches of that
+parent. Embedded payload UUIDs are not rewritten. Multi-entity expansion with
+external foreign keys is refused for manual review of consumer identity semantics.
+The immutability trigger and self-referencing foreign keys are suspended only inside
+the locked transaction; FK validation, counts, UUID and timestamp checks must pass
+before the trigger is restored and the transaction commits. Any error prevents commit;
+rollback restores the old data, constraints and trigger state. The final result reports
+original, migrated and unresolved row counts. This migrates existing lake events only,
+not historical domain tables, and does not install the new stored writer or cutover.
 The lake has a nullable UUID `entity_id` foreign key to `entities`, indexed with
 event type, stage and occurrence time. The stored writer splits multi-entity
 subjects into one row per distinct entity, retaining the same logical event key

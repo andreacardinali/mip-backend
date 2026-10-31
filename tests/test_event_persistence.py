@@ -95,8 +95,64 @@ def test_installer_declares_revision_and_timestamp_guards():
     semantic = sql.split("v_semantic :=", 1)[1].split("v_hash :=", 1)[0]
     for excluded in ("observed_at", "provenance", "raw_payload", "ingested_at"):
         assert excluded not in semantic
+    assert sql.removeprefix("ROLLBACK;\n\n").startswith("BEGIN;")
+    assert sql.rstrip().endswith("COMMIT;")
+
+
+def test_installer_upgrades_only_empty_legacy_lake_before_entity_index():
+    sql = (
+        Path(__file__).resolve().parents[1] / "oneshot" / "install_event_lake.sql"
+    ).read_text()
+    upgrade = sql.split("DO $$", 1)[1].split("CREATE INDEX", 1)[0]
+    assert "LOCK TABLE public.event_lake IN ACCESS EXCLUSIVE MODE" in upgrade
+    assert "pg_catalog.pg_attribute" in upgrade
+    assert "pg_catalog.pg_constraint" in upgrade
+    assert "constraint_row.conkey" in upgrade
+    assert "pg_catalog.pg_index" in upgrade
+    assert "index_row.indexrelid = constraint_row.conindid" in upgrade
+    assert "index_row.indnullsnotdistinct" in upgrade
+    guard = upgrade.index("IF EXISTS (SELECT FROM public.event_lake)")
+    add_column = upgrade.index("ADD COLUMN entity_id uuid REFERENCES")
+    drop_constraint = upgrade.index("DROP CONSTRAINT %I")
+    add_constraint = upgrade.index("ADD CONSTRAINT event_lake_entity_revision_key")
+    assert guard < add_column < drop_constraint < add_constraint
+    assert "requires an entity-scoped data migration" in upgrade
+    assert "IF NOT v_entity_exists THEN" in upgrade
+    assert "IF NOT v_has_entity_unique THEN" in upgrade
+    assert "FOREACH v_constraint_name IN ARRAY v_old_constraints LOOP" in upgrade
+    assert "UPDATE public.event_lake" not in upgrade
+    assert "DELETE FROM" not in upgrade
+
+
+def test_populated_lake_migration_preserves_ids_and_rebuilds_entity_chains():
+    sql = (
+        Path(__file__).resolve().parents[1]
+        / "oneshot" / "migrate_event_lake_entity_scope.sql"
+    ).read_text()
     assert sql.startswith("BEGIN;")
     assert sql.rstrip().endswith("COMMIT;")
+    assert "LOCK TABLE public.event_lake IN ACCESS EXCLUSIVE MODE" in sql
+    assert "CREATE TABLE event_lake_entity_migration.original AS TABLE" in sql
+    assert "CREATE TABLE event_lake_entity_migration.event_map" in sql
+    assert "THEN event_id ELSE gen_random_uuid()" in sql
+    assert "mapping.entity_id" in sql
+    assert "lag(mapping.migrated_event_id) OVER" in sql
+    assert "same_entity.entity_id IS NOT DISTINCT FROM mapping.entity_id" in sql
+    assert "'subjects', plan.migrated_subjects" in sql
+    assert "'parent_event_ids', plan.migrated_parents" in sql
+    assert "UNIQUE NULLS NOT DISTINCT (event_type, stage, source, event_key, entity_id, revision)" in sql
+    assert sql.index("DISABLE TRIGGER") < sql.index("UPDATE public.event_lake")
+    assert "pg_catalog.pg_get_constraintdef(oid)" in sql
+    assert "confrelid = 'public.event_lake'::regclass AND contype = 'f'" in sql
+    assert sql.index("VALIDATE CONSTRAINT %I") > sql.index("INSERT INTO public.event_lake")
+    assert sql.index("timestamp preservation failed") < sql.index("ENABLE TRIGGER")
+    for timestamp in ("created_at", "updated_at", "ingested_at", "last_seen_at"):
+        assert f"lake.{timestamp} IS DISTINCT FROM plan.{timestamp}" in sql
+    assert "External foreign keys require a reviewed multi-entity mapping" in sql
+    assert "Existing revision chains are inconsistent" in sql
+    assert "DELETE FROM" not in sql
+    assert "DROP TABLE" not in sql
+    assert "sp_save_event" not in sql
 
 
 def test_lake_entity_scope_applies_to_fanout_revisions_and_lookups():

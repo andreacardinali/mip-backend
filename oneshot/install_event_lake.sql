@@ -1,3 +1,5 @@
+ROLLBACK;
+
 BEGIN;
 
 CREATE TABLE IF NOT EXISTS public.event_type_catalog (
@@ -63,6 +65,70 @@ CREATE TABLE IF NOT EXISTS public.event_lake (
     UNIQUE NULLS NOT DISTINCT (event_type, stage, source, event_key, entity_id, revision),
     CHECK ((revision = 1) = (supersedes_event_id IS NULL))
 );
+
+DO $$
+DECLARE
+    v_entity_exists boolean;
+    v_has_entity_unique boolean := false;
+    v_old_constraints text[] := '{}';
+    v_constraint record;
+    v_constraint_name text;
+BEGIN
+    LOCK TABLE public.event_lake IN ACCESS EXCLUSIVE MODE;
+    SELECT EXISTS (
+        SELECT FROM pg_catalog.pg_attribute
+        WHERE attrelid = 'public.event_lake'::regclass
+          AND attname = 'entity_id' AND NOT attisdropped
+    ) INTO v_entity_exists;
+    FOR v_constraint IN
+        SELECT constraint_row.conname, index_row.indnullsnotdistinct,
+               ARRAY(
+                   SELECT attribute.attname::text
+                   FROM unnest(constraint_row.conkey) WITH ORDINALITY
+                       AS key_column(attnum, position)
+                   JOIN pg_catalog.pg_attribute attribute
+                     ON attribute.attrelid = constraint_row.conrelid
+                    AND attribute.attnum = key_column.attnum
+                   ORDER BY key_column.position
+               ) AS column_names
+        FROM pg_catalog.pg_constraint constraint_row
+                JOIN pg_catalog.pg_index index_row
+                    ON index_row.indexrelid = constraint_row.conindid
+        WHERE constraint_row.conrelid = 'public.event_lake'::regclass
+          AND constraint_row.contype = 'u'
+    LOOP
+        IF v_constraint.column_names =
+            ARRAY['event_type', 'stage', 'source', 'event_key', 'revision'] THEN
+            v_old_constraints := array_append(v_old_constraints, v_constraint.conname::text);
+        ELSIF v_constraint.column_names =
+            ARRAY['event_type', 'stage', 'source', 'event_key', 'entity_id', 'revision']
+            AND v_constraint.indnullsnotdistinct THEN
+            v_has_entity_unique := true;
+        END IF;
+    END LOOP;
+    IF NOT v_entity_exists OR cardinality(v_old_constraints) > 0
+       OR NOT v_has_entity_unique THEN
+        IF EXISTS (SELECT FROM public.event_lake) THEN
+            RAISE EXCEPTION 'Existing event_lake requires an entity-scoped data migration'
+                USING HINT = 'Do not run cutover or remove events. Migrate existing subjects and revision chains before reinstalling.';
+        END IF;
+        IF NOT v_entity_exists THEN
+            ALTER TABLE public.event_lake
+                ADD COLUMN entity_id uuid REFERENCES public.entities(entity_id);
+        END IF;
+        FOREACH v_constraint_name IN ARRAY v_old_constraints LOOP
+            EXECUTE format('ALTER TABLE public.event_lake DROP CONSTRAINT %I',
+                           v_constraint_name);
+        END LOOP;
+        IF NOT v_has_entity_unique THEN
+            ALTER TABLE public.event_lake
+                ADD CONSTRAINT event_lake_entity_revision_key
+                UNIQUE NULLS NOT DISTINCT
+                (event_type, stage, source, event_key, entity_id, revision);
+        END IF;
+    END IF;
+END;
+$$;
 
 CREATE INDEX IF NOT EXISTS ix_event_lake_entity
     ON public.event_lake(entity_id, event_type, stage, occurred_at DESC)
