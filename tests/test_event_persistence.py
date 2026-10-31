@@ -10,6 +10,7 @@ from services.event_contract import EventEnvelope, stable_event_key
 from services.event_persistence import (
     save_catalyst,
     save_event,
+    save_filing,
     save_intelligence_event,
 )
 
@@ -82,7 +83,10 @@ def test_installer_declares_revision_and_timestamp_guards():
     sql = (
         Path(__file__).resolve().parents[1] / "oneshot" / "install_event_lake.sql"
     ).read_text()
-    assert "UNIQUE (event_type, stage, source, event_key, revision)" in sql
+    assert (
+        "UNIQUE NULLS NOT DISTINCT "
+        "(event_type, stage, source, event_key, entity_id, revision)" in sql
+    )
     assert "pg_advisory_xact_lock" in sql
     assert "BEFORE INSERT OR UPDATE OR DELETE" in sql
     assert "NEW.created_at := v_now" in sql
@@ -93,6 +97,79 @@ def test_installer_declares_revision_and_timestamp_guards():
         assert excluded not in semantic
     assert sql.startswith("BEGIN;")
     assert sql.rstrip().endswith("COMMIT;")
+
+
+def test_lake_entity_scope_applies_to_fanout_revisions_and_lookups():
+    root = Path(__file__).resolve().parents[1] / "oneshot"
+    installer = (root / "install_event_lake.sql").read_text()
+    cutover = (root / "install_event_lake_cutover.sql").read_text()
+    assert "entity_id uuid REFERENCES public.entities(entity_id)" in installer
+    assert "ON public.event_lake(entity_id, event_type, stage, occurred_at DESC)" in installer
+    assert "IF cardinality(v_entity_ids) > 1 THEN" in installer
+    assert "FOREACH v_entity_id IN ARRAY v_entity_ids LOOP" in installer
+    assert "jsonb_set(p_envelope, '{subjects}', v_subjects)" in installer
+    assert "v_event_id := coalesce(v_event_id, v_child_event_id)" in installer
+    assert installer.count("entity_id IS NOT DISTINCT FROM v_entity_id") == 2
+    assert "v_source, v_key, v_entity_id)::text" in installer
+    assert (
+        "SELECT DISTINCT ON (event_type, stage, source, event_key, entity_id)"
+        in cutover
+    )
+    assert cutover.count("root.entity_id IS NOT DISTINCT FROM lake.entity_id") == 2
+    assert "original.entity_id IS NOT DISTINCT FROM lake.entity_id" in cutover
+    assert "AND score.entity_id = association.entity_id" in cutover
+    assert "SELECT DISTINCT ON ((payload->>'news_id')::uuid)" in cutover
+    article_writer = cutover.split("v_article_event_id :=", 1)[1].split(
+        "SELECT news_entity_id", 1
+    )[0]
+    assert "jsonb_build_object('entity_id', p_entity_id)" in article_writer
+    assert "'subjects', '[]'::jsonb" not in article_writer
+
+
+def test_news_cutover_preserves_ids_and_writes_only_to_lake():
+    sql = (
+        Path(__file__).resolve().parents[1] / "oneshot" / "install_event_lake_cutover.sql"
+    ).read_text()
+    assert "CREATE VIEW public.news AS" in sql
+    assert "CREATE VIEW public.news_entities AS" in sql
+    assert "coalesce((v_previous.payload->>'news_id')::uuid, gen_random_uuid())" in sql
+    for name in ("news", "news_entities"):
+        assert f"INSERT INTO public.{name} (" not in sql
+        assert f"UPDATE public.{name} " not in sql
+    assert "public.sp_save_event(jsonb_build_object(" in sql
+    assert "ALTER TABLE public.news SET SCHEMA event_legacy" in sql
+    assert "DROP TABLE" not in sql
+
+
+def test_cutover_projects_all_legacy_archives_and_registers_their_types():
+    root = Path(__file__).resolve().parents[1] / "oneshot"
+    cutover = (root / "install_event_lake_cutover.sql").read_text()
+    installer = (root / "install_event_lake.sql").read_text()
+    for table in (
+        "news", "news_entities", "news_clusters", "news_impacts", "catalysts",
+        "catalyst_history", "filings", "collection_intelligence_events",
+    ):
+        assert f"CREATE VIEW public.{table} AS" in cutover
+    for event_type in (
+        "NEWS_ASSOCIATION", "NEWS_CLUSTER", "NEWS_IMPACT", "CATALYST_HISTORY",
+    ):
+        assert f"('{event_type}', 1," in installer
+    assert "AND root.revision = 1" in cutover
+
+
+def test_common_sql_writer_resolves_issuer_without_creating_incomplete_instruments():
+    sql = (
+        Path(__file__).resolve().parents[1] / "oneshot" / "install_event_lake.sql"
+    ).read_text()
+    assert "public.sp_event_resolve_catalyst_entity(" in sql
+    assert "public.sp_event_resolve_filing_entity(" in sql
+    assert "identity_row.normalized_value = v_cik" in sql
+    assert "INSERT INTO public.entity_identities" in sql
+    assert "INSERT INTO public.instruments" not in sql
+    assert "must resolve to exactly one active entity" in sql
+    assert "v_key := v_previous.event_key" in sql
+    assert "'catalyst_id', v_previous.payload->'catalyst_id'" in sql
+    assert "'filing_id', v_previous.payload->'filing_id'" in sql
 
 
 @pytest.mark.parametrize(
@@ -193,3 +270,28 @@ def test_provider_earnings_identity_survives_rescheduling():
     assert first["event_key"] == second["event_key"]
     assert first["event_day"] != second["event_day"]
     assert first["provenance"]["identity_strategy"] == "provider_id"
+    assert db.execute.call_count == 2
+
+
+def test_filing_writes_only_to_lake():
+    db = Mock()
+    save_filing(db, {
+        "source": "SEC", "symbol": "AAPL", "cik": "0000320193",
+        "accepted_at": datetime(2026, 10, 31, tzinfo=UTC),
+        "filing_date": date(2026, 10, 31), "filing_type": "10-Q",
+        "accession_number": "accession", "payload": {},
+    })
+    db.execute.assert_called_once()
+    assert "public.sp_save_event" in str(db.execute.call_args.args[0])
+    db.commit.assert_not_called()
+
+
+def test_intelligence_writes_only_to_lake():
+    db = Mock()
+    save_intelligence_event(
+        db, branch="DAILY_MOVER", event_key="instrument|2026-10-31|2",
+        entity_id="entity", instrument_id="instrument", category="mover",
+        payload={"dailyChangePct": 2}, evidence={},
+    )
+    db.execute.assert_called_once()
+    assert "public.sp_save_event" in str(db.execute.call_args.args[0])

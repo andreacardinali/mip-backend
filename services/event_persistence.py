@@ -54,25 +54,6 @@ def _catalyst_identity(row: dict[str, Any]) -> tuple[str, str]:
 def save_news_article(
     db: Session, *, entity_id: str, payload: dict[str, Any]
 ) -> dict[str, Any]:
-    published_at = _instant(payload.get("published_at"))
-    save_event(
-        db,
-        EventEnvelope(
-            event_type="NEWS_ARTICLE",
-            stage="ACQUIRED",
-            source=payload.get("provider") or payload.get("source_name") or "UNKNOWN",
-            event_key=str(payload.get("external_id") or stable_event_key(payload)),
-            source_event_id=payload.get("external_id"),
-            occurred_at=published_at,
-            event_day=published_at.date() if published_at else None,
-            subjects=[
-                {"symbol": symbol} for symbol in payload.get("related_symbols", [])
-            ],
-            payload={key: value for key, value in payload.items() if key != "raw_json"},
-            raw_payload=payload.get("raw_json"),
-            provenance={"projection_entity_id": entity_id},
-        ),
-    )
     result = db.execute(
         text(
             """
@@ -87,18 +68,6 @@ def save_news_article(
 
 
 def save_news_scores(db: Session, scores: list[dict[str, Any]]) -> int:
-    for score in scores:
-        save_event(
-            db,
-            EventEnvelope(
-                event_type="NEWS_SCORE",
-                stage="ENRICHED",
-                source="NEWS_ENRICHMENT",
-                event_key=str(score["news_entity_id"]),
-                payload=dict(score),
-                provenance={"news_entity_id": str(score["news_entity_id"])},
-            ),
-        )
     return int(
         db.execute(
             text("SELECT public.sp_news_update_entity_scores(CAST(:scores AS jsonb))"),
@@ -116,7 +85,7 @@ def save_catalyst(db: Session, row: dict[str, Any]) -> Any:
     if instant is None:
         payload["date"] = value.isoformat()
     event_key, strategy = _catalyst_identity(row)
-    save_event(
+    return save_event(
         db,
         EventEnvelope(
             event_type="CATALYST",
@@ -150,29 +119,6 @@ def save_catalyst(db: Session, row: dict[str, Any]) -> Any:
             provenance={"identity_strategy": strategy},
         ),
     )
-    return db.execute(
-        text(
-            """
-            SELECT public.sp_upsert_catalyst(
-                p_entity_id => CAST(:entity_id AS uuid),
-                p_symbol => CAST(:symbol AS text),
-                p_entity_subtype => CAST(:entity_subtype AS text),
-                p_entity_date => CAST(:entity_date AS timestamptz),
-                p_entity_status => CAST(:status AS text),
-                p_importance => CAST(:importance AS text),
-                p_title => CAST(:title AS text),
-                p_source => CAST(:source AS text),
-                p_payload => CAST(:payload AS jsonb)
-            )
-            """
-        ),
-        {
-            **row,
-            "entity_id": row.get("entity_id"),
-            "entity_date": instant,
-            "payload": json.dumps(payload, default=str),
-        },
-    ).scalar_one()
 
 
 def save_filing(db: Session, row: dict[str, Any]) -> None:
@@ -204,29 +150,6 @@ def save_filing(db: Session, row: dict[str, Any]) -> None:
                 )
             },
         ),
-    )
-    db.execute(
-        text(
-            """
-            SELECT public.sp_upsert_filing(
-                p_symbol => :symbol,
-                p_filing_type => :filing_type,
-                p_cik => :cik,
-                p_filing_date => :filing_date,
-                p_accepted_at => CAST(:accepted_at AS timestamptz),
-                p_title => :title,
-                p_source => :source,
-                p_raw_payload => CAST(:payload AS jsonb),
-                p_filing_subtype => :filing_subtype,
-                p_accession_number => :accession_number
-            )
-            """
-        ),
-        {
-            **row,
-            "accepted_at": accepted_at,
-            "payload": json.dumps(row["payload"]),
-        },
     )
 
 
@@ -303,24 +226,4 @@ def save_intelligence_event(
                 "marketEvidence": evidence.get("marketEvidence"),
             },
         ),
-    )
-    db.execute(
-        text(
-            """
-            SELECT public.sp_save_intelligence_event(
-                :branch, :event_key, CAST(:entity_id AS uuid),
-                CAST(:instrument_id AS uuid), :category,
-                CAST(:payload AS jsonb), CAST(:evidence AS jsonb)
-            )
-            """
-        ),
-        {
-            "branch": branch,
-            "event_key": event_key,
-            "entity_id": entity_id,
-            "instrument_id": instrument_id,
-            "category": category,
-            "payload": json.dumps(payload, default=str),
-            "evidence": json.dumps(evidence, default=str),
-        },
     )

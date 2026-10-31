@@ -57,11 +57,12 @@ class RefactorTests(unittest.TestCase):
             evidence=evidence,
         )
         statement, params = db.execute.call_args.args
-        self.assertIn("public.sp_save_intelligence_event", str(statement))
-        self.assertEqual(json.loads(params["payload"]), payload)
-        self.assertEqual(json.loads(params["evidence"]), evidence)
-        self.assertEqual(params["event_key"], "event")
-        self.assertNotIn("user_id", params)
+        self.assertIn("public.sp_save_event", str(statement))
+        envelope = json.loads(params["envelope"])
+        self.assertEqual(envelope["payload"], payload)
+        self.assertEqual(envelope["evidence"], evidence)
+        self.assertEqual(envelope["event_key"], "event")
+        self.assertNotIn("user_id", envelope)
         db.commit.assert_called_once_with()
         db.rollback.assert_not_called()
 
@@ -101,12 +102,14 @@ class RefactorTests(unittest.TestCase):
         )
         self.assertEqual(result, "catalyst-id")
         statement, params = db.execute.call_args.args
-        self.assertIn("public.sp_upsert_catalyst", str(statement))
-        self.assertEqual(params["symbol"], "TEST")
-        self.assertEqual(params["entity_subtype"], "EARNINGS")
-        self.assertIsNone(params["entity_date"])
+        self.assertIn("public.sp_save_event", str(statement))
+        envelope = json.loads(params["envelope"])
+        self.assertEqual(envelope["subjects"][0]["symbol"], "TEST")
+        self.assertEqual(envelope["payload"]["subtype"], "EARNINGS")
+        self.assertIsNone(envelope["occurred_at"])
+        self.assertEqual(envelope["event_day"], "2026-07-01")
         self.assertEqual(
-            json.loads(params["payload"]),
+            envelope["payload"]["details"],
             {"eventConfidence": 85, "date": "2026-07-01"},
         )
         self.assertEqual(payload, {"eventConfidence": 85})

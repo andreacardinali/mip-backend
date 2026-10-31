@@ -79,7 +79,6 @@ class Tests(unittest.TestCase):
                     }
                 ]
             ),
-            R("lake-event-id"),
             R({"inserted": True, "associations_inserted": 1}),
         ]
         md = Mock()

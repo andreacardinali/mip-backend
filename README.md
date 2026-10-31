@@ -838,11 +838,23 @@ version, stage (`ACQUIRED`, `ENRICHED`, `VALIDATED`), source identity, semantic 
 optional aware occurrence timestamp or date-only event day, observation time,
 subjects, parent event IDs, payload, raw payload, evidence and provenance.
 Subjects may be unresolved or multi-entity; parent IDs must reference lake rows.
+The lake has a nullable UUID `entity_id` foreign key to `entities`, indexed with
+event type, stage and occurrence time. The stored writer splits multi-entity
+subjects into one row per distinct entity, retaining the same logical event key
+but separate UUIDs and revision chains. Entity-free subjects are retained on each
+row; events with no resolved entity retain `entity_id = NULL`. Catalyst and filing
+subjects are resolved by the shared stored routines before this split. News
+articles are stored for each associated entity with a shared logical `news_id`;
+the compatibility news view exposes one article per `news_id`.
+The singular `sp_save_event` return remains a row UUID: for multi-entity envelopes
+it returns the row for the lowest entity UUID, not all association row IDs. Use
+the logical identity plus `entity_id` to look up another entity's revision.
 No recipient, owner, quantity, allocation or exposure belongs in this contract.
 Additional types or payload versions require a reviewed catalog registration with
 allowed stages and required payload field types, not an enum or table change.
 
-Deduplication is scoped to `(event_type, stage, source, event_key)`. A transaction
+Deduplication is scoped to `(event_type, stage, source, event_key, entity_id)`;
+the uniqueness constraint treats NULL entity IDs as equal. A transaction
 advisory lock serializes concurrent observations of the same identity. Identical
 semantic content returns the latest event ID and updates `last_seen_at`; changed
 content creates an immutable revision linked through `supersedes_event_id`.
