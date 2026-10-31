@@ -383,6 +383,32 @@ def test_alert_api_requires_authentication(alert_api, method):
 
 
 @pytest.mark.parametrize("method", ["post", "put"])
+@pytest.mark.parametrize("source", [None, {"config": {"enabled": False}}, {"config": {"enabled": True}}])
+def test_alert_destination_is_active_and_owner_scoped(alert_api, method, source):
+    client, _, database, repository, authentication = alert_api
+    source_id = "00000000-0000-0000-0000-000000000003"
+    database.execute.return_value.mappings.return_value.first.return_value = source
+    rule_id = repository.save_user_rule.return_value
+    url = "/api/alerts" if method == "post" else f"/api/alerts/{rule_id}"
+    response = client.request(method, url, json={
+        "name": "Entry", "conditions": {"source_id": source_id},
+    })
+    statement, parameters = database.execute.call_args.args
+    assert "sp_get_user_notification_source_config" in str(statement)
+    assert parameters == {"user_id": authentication["user"]["user_id"], "source_id": source_id}
+    if source is None or not source["config"]["enabled"]:
+        assert response.status_code == 422
+        repository.save_user_rule.assert_not_called()
+        database.commit.assert_not_called()
+        database.rollback.assert_called_once_with()
+    else:
+        assert response.status_code == 200
+        assert repository.save_user_rule.call_args.args[-1]["conditions"]["source_id"] == source_id
+        database.commit.assert_called_once_with()
+    database.close.assert_called_once_with()
+
+
+@pytest.mark.parametrize("method", ["post", "put"])
 def test_alert_api_saves_normalized_rule_for_authenticated_owner(alert_api, method):
     client, _, database, repository, authentication = alert_api
     rule_id = repository.save_user_rule.return_value

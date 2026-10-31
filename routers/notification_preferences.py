@@ -4,6 +4,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, StrictBool
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 
 from auth.security import CurrentUser, get_current_user
 from db import SessionLocal
@@ -41,6 +42,12 @@ class DeliveryPreferencesPayload(BaseModel):
 
     paused: StrictBool
     default_source_id: UUID | None
+
+
+class ScreenerSummaryPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: StrictBool
 
 
 @router.get("/collections")
@@ -191,7 +198,29 @@ def update_notification_delivery(
         db.commit()
     except Exception as error:
         db.rollback()
-        raise HTTPException(status_code=422, detail="Invalid notification destination") from error
+        if isinstance(error, DBAPIError) and getattr(error.orig, "sqlstate", None) == "22023":
+            raise HTTPException(status_code=422, detail="Invalid notification destination") from error
+        raise
+    finally:
+        db.close()
+    return get_notification_preferences(current_user)
+
+
+@router.put("/screener-summary")
+def update_screener_summary_subscription(
+    payload: ScreenerSummaryPayload,
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    db = SessionLocal()
+    try:
+        db.execute(
+            text("SELECT public.sp_save_user_screener_summary_subscription(CAST(:user_id AS uuid), :enabled)"),
+            {"user_id": current_user["user_id"], "enabled": payload.enabled},
+        ).scalar_one()
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
     finally:
         db.close()
     return get_notification_preferences(current_user)
