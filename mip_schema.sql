@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict 0Y4orhDRfV8ccbY8e8rAmpdo1oboqqyL9KGGgY01F4mBMPQe2toPCAFbeVIUB5B
+\restrict yFG8RwNFGbOsBkrFvsWHgzE4fElBkF3SmbbBrvqioL1LjiQxg39lmlVm8I1bXwE
 
 -- Dumped from database version 18.6 (Debian 18.6-1.pgdg13+2)
 -- Dumped by pg_dump version 18.6 (Debian 18.6-1.pgdg13+2)
@@ -110,6 +110,48 @@ CREATE TYPE public.trend_type AS ENUM (
     'BEARISH',
     'SIDEWAYS'
 );
+
+
+--
+-- Name: event_lake_timestamps(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.event_lake_timestamps() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_now timestamptz := clock_timestamp();
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        
+        IF current_setting('mip.event_lake_cleanup', true) IS DISTINCT FROM 'on'
+           OR to_regclass('pg_temp.event_lake_cleanup_candidates') IS NULL THEN
+            RAISE EXCEPTION 'Event lake revisions cannot be deleted';
+        END IF;
+        IF NOT EXISTS (
+            SELECT FROM pg_temp.event_lake_cleanup_candidates candidate
+            WHERE candidate.event_id = OLD.event_id
+        ) THEN
+            RAISE EXCEPTION 'Event lake revision is outside the cleanup selection';
+        END IF;
+        RETURN OLD;
+        
+    ELSIF TG_OP = 'INSERT' THEN
+        NEW.created_at := v_now;
+        NEW.updated_at := v_now;
+        NEW.ingested_at := v_now;
+        NEW.last_seen_at := v_now;
+    ELSE
+        IF (to_jsonb(NEW) - ARRAY['last_seen_at', 'updated_at'])
+            IS DISTINCT FROM (to_jsonb(OLD) - ARRAY['last_seen_at', 'updated_at']) THEN
+            RAISE EXCEPTION 'Event lake content is immutable; insert a revision';
+        END IF;
+        NEW.last_seen_at := greatest(OLD.last_seen_at, NEW.last_seen_at, v_now);
+        NEW.updated_at := v_now;
+    END IF;
+    RETURN NEW;
+END;
+$$;
 
 
 --
@@ -931,80 +973,171 @@ CREATE FUNCTION public.sp_claim_notifications(p_limit integer) RETURNS TABLE(not
     AS $$
 BEGIN
     RETURN QUERY
-
-    WITH candidates AS
-    (
+    WITH candidates AS (
         SELECT n.notification_id
-        FROM notifications n
-
-        JOIN user_sources us
-          ON us.source_id = n.source_id
-         AND us.user_id = n.user_id
-
-        WHERE n.status IN (
-                  'PENDING',
-                  'RETRY'
-              )
-
+        FROM public.notifications n
+        JOIN public.user_sources us ON us.source_id = n.source_id AND us.user_id = n.user_id
+        LEFT JOIN public.user_notification_delivery delivery ON delivery.user_id = n.user_id
+        WHERE n.status IN ('PENDING', 'RETRY')
           AND n.source_id IS NOT NULL
-
-          AND COALESCE(
-                (us.config->>'enabled')::boolean,
-                true
-              ) = true
-
-          AND COALESCE(
-                n.next_attempt_at,
-                now()
-              ) <= now()
-
+          AND NOT COALESCE(delivery.paused, false)
+          AND COALESCE((us.config->>'enabled')::boolean, true)
+          AND COALESCE(n.next_attempt_at, now()) <= now()
         ORDER BY n.created_at
-
         FOR UPDATE OF n SKIP LOCKED
-
-        LIMIT GREATEST(
-            p_limit,
-            1
-        )
-    ),
-
-    claimed AS
-    (
-        UPDATE notifications n
-        SET
-            status = 'PROCESSING',
-            processing_started_at = now(),
-            attempt_count =
-                n.attempt_count + 1,
-            last_error = NULL
-
-        FROM candidates c
-
-        WHERE n.notification_id =
-              c.notification_id
-
+        LIMIT GREATEST(p_limit, 1)
+    ), claimed AS (
+        UPDATE public.notifications n
+        SET status = 'PROCESSING', processing_started_at = now(),
+            attempt_count = n.attempt_count + 1, last_error = NULL
+        FROM candidates candidate
+        WHERE n.notification_id = candidate.notification_id
         RETURNING n.*
     )
+    SELECT claimed.notification_id, claimed.user_id, claimed.source_id, claimed.channel,
+        claimed.notification_key, claimed.notification_type, claimed.severity,
+        claimed.title, claimed.message, claimed.context, us.external_id, us.config,
+        claimed.attempt_count
+    FROM claimed
+    JOIN public.user_sources us ON us.source_id = claimed.source_id AND us.user_id = claimed.user_id;
+END;
+$$;
 
-    SELECT
-        c.notification_id,
-        c.user_id,
-        c.source_id,
-        c.channel,
-        c.notification_key,
-        c.notification_type,
-        c.severity,
-        c.title,
-        c.message,
-        c.context,
-        us.external_id,
-        us.config,
-        c.attempt_count
 
-    FROM claimed c
+--
+-- Name: sp_cleanup_event_lake(integer, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
 
-    JOIN user_sources us
-      ON us.source_id = c.source_id;
+CREATE FUNCTION public.sp_cleanup_event_lake(p_threshold_days integer DEFAULT 30, p_dry_run boolean DEFAULT true) RETURNS TABLE(cutoff_at timestamp with time zone, eligible_rows bigint, protected_rows bigint, deleted_rows bigint)
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    SET lock_timeout TO '10s'
+    AS $$
+DECLARE
+    reference record;
+    join_condition text;
+    previous_cleanup_setting text;
+BEGIN
+    IF p_threshold_days IS NULL OR p_threshold_days <= 0 THEN
+        RAISE EXCEPTION 'Cleanup threshold must be a positive number of days'
+            USING ERRCODE = '22023';
+    END IF;
+    IF p_dry_run IS NULL THEN
+        RAISE EXCEPTION 'Cleanup dry-run flag cannot be null'
+            USING ERRCODE = '22023';
+    END IF;
+    IF to_regclass('pg_temp.event_lake_cleanup_candidates') IS NOT NULL
+       OR to_regclass('pg_temp.event_lake_cleanup_protected') IS NOT NULL THEN
+        RAISE EXCEPTION 'An event lake cleanup selection already exists in this session';
+    END IF;
+
+    LOCK TABLE public.event_lake IN SHARE ROW EXCLUSIVE MODE;
+    cutoff_at := statement_timestamp() - make_interval(days => p_threshold_days);
+    deleted_rows := 0;
+
+    CREATE TEMP TABLE event_lake_cleanup_protected (
+        event_id uuid PRIMARY KEY
+    ) ON COMMIT DROP;
+
+    INSERT INTO pg_temp.event_lake_cleanup_protected (event_id)
+    SELECT lake.event_id
+    FROM public.event_lake lake
+    JOIN (
+        SELECT event_type, stage, source, event_key, entity_id
+        FROM public.event_lake
+        GROUP BY event_type, stage, source, event_key, entity_id
+        HAVING max(last_seen_at) >= cutoff_at
+            OR max(event_day) >= (statement_timestamp() AT TIME ZONE 'UTC')::date
+            OR max(occurred_at) >= statement_timestamp()
+    ) retained USING (event_type, stage, source, event_key)
+    WHERE lake.entity_id IS NOT DISTINCT FROM retained.entity_id;
+
+    FOR reference IN
+        SELECT constraint_row.conrelid, constraint_row.conkey, constraint_row.confkey,
+            namespace.nspname AS schema_name, relation.relname AS table_name
+        FROM pg_constraint constraint_row
+        JOIN pg_class relation ON relation.oid = constraint_row.conrelid
+        JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+        WHERE constraint_row.contype = 'f'
+          AND constraint_row.confrelid = 'public.event_lake'::regclass
+          AND constraint_row.conrelid <> constraint_row.confrelid
+        ORDER BY constraint_row.conrelid, constraint_row.oid
+    LOOP
+        EXECUTE format('LOCK TABLE %I.%I IN SHARE MODE',
+            reference.schema_name, reference.table_name);
+        SELECT string_agg(format('referencing.%I = lake.%I',
+            source_attribute.attname, target_attribute.attname), ' AND ' ORDER BY keys.position)
+        INTO join_condition
+        FROM unnest(reference.conkey, reference.confkey)
+            WITH ORDINALITY AS keys(source_number, target_number, position)
+        JOIN pg_attribute source_attribute
+            ON source_attribute.attrelid = reference.conrelid
+           AND source_attribute.attnum = keys.source_number
+        JOIN pg_attribute target_attribute
+            ON target_attribute.attrelid = 'public.event_lake'::regclass
+           AND target_attribute.attnum = keys.target_number;
+        EXECUTE format(
+            'INSERT INTO pg_temp.event_lake_cleanup_protected (event_id)
+             SELECT lake.event_id FROM public.event_lake lake
+             JOIN %I.%I referencing ON %s ON CONFLICT DO NOTHING',
+            reference.schema_name, reference.table_name, join_condition);
+    END LOOP;
+
+    WITH RECURSIVE edges AS (
+        SELECT event_id, parent_id
+        FROM public.event_lake
+        CROSS JOIN LATERAL unnest(parent_event_ids) AS parents(parent_id)
+        UNION
+        SELECT event_id, supersedes_event_id
+        FROM public.event_lake
+        WHERE supersedes_event_id IS NOT NULL
+        UNION
+        SELECT supersedes_event_id, event_id
+        FROM public.event_lake
+        WHERE supersedes_event_id IS NOT NULL
+    ), retained(event_id) AS (
+        SELECT event_id FROM pg_temp.event_lake_cleanup_protected
+        UNION
+        SELECT edges.parent_id
+        FROM retained
+        JOIN edges ON edges.event_id = retained.event_id
+    )
+    INSERT INTO pg_temp.event_lake_cleanup_protected (event_id)
+    SELECT retained.event_id
+    FROM retained
+    JOIN public.event_lake lake ON lake.event_id = retained.event_id
+    ON CONFLICT DO NOTHING;
+
+    CREATE TEMP TABLE event_lake_cleanup_candidates (
+        event_id uuid PRIMARY KEY
+    ) ON COMMIT DROP;
+    INSERT INTO pg_temp.event_lake_cleanup_candidates (event_id)
+    SELECT lake.event_id
+    FROM public.event_lake lake
+    WHERE NOT EXISTS (
+        SELECT FROM pg_temp.event_lake_cleanup_protected retained
+        WHERE retained.event_id = lake.event_id
+    );
+
+    SELECT count(*) INTO eligible_rows FROM pg_temp.event_lake_cleanup_candidates;
+    SELECT count(*) INTO protected_rows FROM public.event_lake
+    WHERE last_seen_at < cutoff_at AND event_id NOT IN (
+        SELECT event_id FROM pg_temp.event_lake_cleanup_candidates
+    );
+
+    IF NOT p_dry_run THEN
+        previous_cleanup_setting := current_setting('mip.event_lake_cleanup', true);
+        PERFORM set_config('mip.event_lake_cleanup', 'on', true);
+        DELETE FROM public.event_lake lake
+        USING pg_temp.event_lake_cleanup_candidates candidate
+        WHERE lake.event_id = candidate.event_id;
+        GET DIAGNOSTICS deleted_rows = ROW_COUNT;
+        PERFORM set_config('mip.event_lake_cleanup', coalesce(previous_cleanup_setting, ''), true);
+    END IF;
+
+    DROP TABLE pg_temp.event_lake_cleanup_candidates;
+    DROP TABLE pg_temp.event_lake_cleanup_protected;
+    RETURN NEXT;
 END;
 $$;
 
@@ -1572,6 +1705,15 @@ BEGIN
     /*
      * Preserve the source name as an alias.
      */
+
+    IF EXISTS (
+        SELECT FROM public.event_lake
+        WHERE entity_id = p_source_entity_id
+    ) THEN
+        RAISE EXCEPTION
+            'Cannot consolidate an entity referenced by immutable lake events; an entity redirect policy is required';
+    END IF;
+
     INSERT INTO entity_aliases (
         entity_id,
         alias_name
@@ -1581,6 +1723,15 @@ BEGIN
         v_source.name
     )
     ON CONFLICT DO NOTHING;
+
+
+    IF EXISTS (
+        SELECT FROM public.event_lake
+        WHERE entity_id = p_source_entity_id
+    ) THEN
+        RAISE EXCEPTION
+            'Cannot consolidate an entity referenced by immutable lake events; an entity redirect policy is required';
+    END IF;
 
     INSERT INTO entity_aliases (
         entity_id,
@@ -1740,65 +1891,12 @@ BEGIN
     /*
      * Simple entity references.
      */
-    UPDATE catalysts
-    SET entity_id = p_target_entity_id
-    WHERE entity_id = p_source_entity_id
-      AND NOT EXISTS (
-          SELECT 1
-          FROM catalysts target
-          WHERE target.entity_id = p_target_entity_id
-            AND target.catalyst_type = catalysts.catalyst_type
-            AND target.catalyst_date
-                IS NOT DISTINCT FROM catalysts.catalyst_date
-      );
-
-    DELETE FROM catalysts source
-    WHERE source.entity_id = p_source_entity_id
-      AND EXISTS (
-          SELECT 1
-          FROM catalysts target
-          WHERE target.entity_id = p_target_entity_id
-            AND target.catalyst_type = source.catalyst_type
-            AND target.catalyst_date
-                IS NOT DISTINCT FROM source.catalyst_date
-      );
-
-    UPDATE filings
-    SET entity_id = p_target_entity_id
-    WHERE entity_id = p_source_entity_id;
-
     UPDATE etf_constituents
     SET entity_id = p_target_entity_id
     WHERE entity_id = p_source_entity_id;
 
     UPDATE instrument_entity_exposure
     SET entity_id = p_target_entity_id
-    WHERE entity_id = p_source_entity_id;
-
-    UPDATE news_entities source
-    SET entity_id = p_target_entity_id
-    WHERE source.entity_id = p_source_entity_id
-      AND NOT EXISTS (
-          SELECT 1
-          FROM news_entities target
-          WHERE target.news_id = source.news_id
-            AND target.entity_id = p_target_entity_id
-      );
-
-    DELETE FROM news_entities
-    WHERE entity_id = p_source_entity_id;
-
-    UPDATE news_impacts source
-    SET entity_id = p_target_entity_id
-    WHERE source.entity_id = p_source_entity_id
-      AND NOT EXISTS (
-          SELECT 1
-          FROM news_impacts target
-          WHERE target.news_id = source.news_id
-            AND target.entity_id = p_target_entity_id
-      );
-
-    DELETE FROM news_impacts
     WHERE entity_id = p_source_entity_id;
 
     UPDATE notifications
@@ -2598,18 +2696,22 @@ CREATE FUNCTION public.sp_delete_user_notification_source(p_user_id uuid, p_sour
     AS $$
 BEGIN
     IF EXISTS (
-        SELECT 1
-        FROM public.notification_subscriptions ns
-        WHERE ns.user_id = p_user_id
-          AND ns.source_id = p_source_id
-          AND ns.enabled = true
+        SELECT 1 FROM public.user_notification_delivery delivery
+        WHERE delivery.user_id = p_user_id AND delivery.default_source_id = p_source_id
+    ) OR EXISTS (
+        SELECT 1 FROM public.alert_rules ar
+        WHERE ar.user_id = p_user_id AND ar.conditions->>'source_id' = p_source_id::text
     ) THEN
-        RAISE EXCEPTION 'Notification source is used by an enabled preference';
+        RAISE EXCEPTION 'Notification source is used by the default or a rule';
     END IF;
 
+        UPDATE public.notification_subscriptions ns
+        SET source_id = NULL
+        WHERE ns.user_id = p_user_id AND ns.source_id = p_source_id
+            AND UPPER(ns.event_type) = 'SCREENER_SUMMARY';
+
     DELETE FROM public.user_sources us
-    WHERE us.user_id = p_user_id
-      AND us.source_id = p_source_id;
+    WHERE us.user_id = p_user_id AND us.source_id = p_source_id;
     RETURN FOUND;
 END;
 $$;
@@ -2874,6 +2976,106 @@ $$;
 
 
 --
+-- Name: sp_event_resolve_catalyst_entity(uuid, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_event_resolve_catalyst_entity(p_entity_id uuid, p_symbol text) RETURNS uuid
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_symbol text := upper(nullif(btrim(p_symbol), ''));
+    v_matches uuid[];
+BEGIN
+    IF p_entity_id IS NOT NULL THEN
+        IF NOT EXISTS (SELECT FROM public.entities
+                       WHERE entity_id = p_entity_id AND active) THEN
+            RAISE EXCEPTION 'Active entity not found: %', p_entity_id;
+        END IF;
+        IF v_symbol IS NOT NULL AND NOT EXISTS (
+            SELECT FROM public.instruments
+            WHERE entity_id = p_entity_id AND upper(btrim(symbol)) = v_symbol
+        ) THEN
+            RAISE EXCEPTION 'Symbol % does not belong to entity %', v_symbol, p_entity_id;
+        END IF;
+        RETURN p_entity_id;
+    END IF;
+    SELECT array_agg(DISTINCT instrument.entity_id ORDER BY instrument.entity_id)
+    INTO v_matches
+    FROM public.instruments instrument
+    JOIN public.entities entity USING (entity_id)
+    WHERE entity.active AND upper(btrim(instrument.symbol)) = v_symbol;
+    IF coalesce(cardinality(v_matches), 0) <> 1 THEN
+        RAISE EXCEPTION 'Symbol % must resolve to exactly one active entity: %',
+            v_symbol, v_matches;
+    END IF;
+    RETURN v_matches[1];
+END;
+$$;
+
+
+--
+-- Name: sp_event_resolve_filing_entity(text, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_event_resolve_filing_entity(p_symbol text, p_cik text) RETURNS uuid
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_symbol text := nullif(upper(btrim(p_symbol)), '');
+    v_cik text := nullif(regexp_replace(coalesce(p_cik, ''), '[^0-9]', '', 'g'), '');
+    v_type_id uuid;
+    v_identity_id uuid;
+    v_entity_id uuid;
+BEGIN
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'filing-issuer:' || coalesce(v_cik, v_symbol, 'UNKNOWN'), 0
+    ));
+    SELECT identity_type_id INTO v_type_id FROM public.identity_types
+    WHERE upper(code) = 'CIK' AND upper(target_kind) = 'ENTITY'
+    ORDER BY identity_type_id LIMIT 1;
+    IF v_cik IS NOT NULL AND v_type_id IS NOT NULL THEN
+        SELECT link.entity_id, identity_row.identity_id
+        INTO v_entity_id, v_identity_id
+        FROM public.identities identity_row
+        JOIN public.entity_identities link USING (identity_id)
+        WHERE identity_row.identity_type_id = v_type_id
+          AND identity_row.normalized_value = v_cik
+        ORDER BY link.is_primary DESC, link.verified_at DESC NULLS LAST,
+                 link.created_at DESC LIMIT 1;
+    END IF;
+    IF v_entity_id IS NULL AND v_symbol IS NOT NULL THEN
+        SELECT entity_id INTO v_entity_id FROM public.instruments
+        WHERE upper(btrim(symbol)) = v_symbol
+        ORDER BY (exchange IS NULL), updated_at DESC NULLS LAST,
+                 created_at DESC NULLS LAST, instrument_id LIMIT 1;
+    END IF;
+    IF v_entity_id IS NULL THEN
+        INSERT INTO public.entities(name, entity_type)
+        VALUES (coalesce(v_symbol, v_cik, 'UNKNOWN SEC ISSUER'), 'COMPANY')
+        RETURNING entity_id INTO v_entity_id;
+    END IF;
+    IF v_type_id IS NOT NULL AND v_cik IS NOT NULL AND v_identity_id IS NULL THEN
+        SELECT identity_id INTO v_identity_id FROM public.identities
+        WHERE identity_type_id = v_type_id AND normalized_value = v_cik LIMIT 1;
+        IF v_identity_id IS NULL THEN
+            INSERT INTO public.identities(identity_type_id, identity_value, normalized_value)
+            VALUES (v_type_id, coalesce(nullif(btrim(p_cik), ''), v_cik), v_cik)
+            RETURNING identity_id INTO v_identity_id;
+        END IF;
+        IF NOT EXISTS (SELECT FROM public.entity_identities
+                       WHERE entity_id = v_entity_id AND identity_id = v_identity_id) THEN
+            INSERT INTO public.entity_identities(entity_id, identity_id, is_primary, verified_at)
+            VALUES (v_entity_id, v_identity_id, NOT EXISTS (
+                SELECT FROM public.entity_identities WHERE entity_id = v_entity_id
+            ), now());
+        END IF;
+    END IF;
+    RETURN v_entity_id;
+END;
+$$;
+
+
+--
 -- Name: sp_fail_scheduler_job(uuid, text, timestamp with time zone); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -2888,6 +3090,112 @@ BEGIN
     IF v_job_id IS NULL THEN RAISE EXCEPTION 'Scheduler run not found: %', p_job_run_id; END IF;
     UPDATE scheduler_jobs SET last_run_at=p_completed_at WHERE job_id=v_job_id;
 END;
+$$;
+
+
+--
+-- Name: sp_get_collection_intelligence_candidates(text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_get_collection_intelligence_candidates(p_branch text) RETURNS SETOF jsonb
+    LANGUAGE sql STABLE
+    AS $$
+    WITH subscriptions AS (
+        SELECT u.user_id, c.*
+        FROM public.users u
+        CROSS JOIN LATERAL public.sp_list_monitoring_collections(u.user_id) c
+        WHERE u.is_active AND (
+            p_branch = ANY(c.enabled_categories)
+            OR (p_branch = 'BREAKING_CATALYST' AND 'NEWS' = ANY(c.enabled_categories))
+        )
+    ), members AS (
+        SELECT s.*, pos.instrument_id, pos.quantity
+        FROM subscriptions s
+        JOIN public.positions pos ON s.collection_type = 'PORTFOLIO'
+            AND pos.portfolio_id = s.collection_id AND pos.quantity <> 0
+        UNION
+        SELECT s.*, i.instrument_id, NULL::numeric
+        FROM subscriptions s
+        JOIN public.watchlist_items wi ON s.collection_type = 'WATCHLIST'
+            AND wi.watchlist_id = s.collection_id
+        JOIN public.instruments i ON i.entity_id = wi.entity_id
+        UNION
+        SELECT s.*, m.instrument_id, NULL::numeric
+        FROM subscriptions s
+        JOIN public.market_universe_members m ON s.collection_type = 'UNIVERSE'
+            AND m.universe_id = s.collection_id
+            AND m.valid_from <= now() AND (m.valid_to IS NULL OR m.valid_to > now())
+    ), valued AS (
+        SELECT m.*, i.entity_id, i.symbol, i.exchange, i.currency_code,
+               i.instrument_type, e.name,
+               CASE WHEN m.collection_type = 'PORTFOLIO' AND i.last_price > 0
+                    AND (
+                        upper(trim(i.currency_code)) = upper(trim(p.base_currency))
+                        OR (
+                            EXISTS (SELECT 1 FROM public.exchange_rates er
+                                WHERE er.currency_code = upper(trim(i.currency_code))
+                                  AND er.rate_to_usd > 0)
+                            AND EXISTS (SELECT 1 FROM public.exchange_rates er
+                                WHERE er.currency_code = upper(trim(p.base_currency))
+                                  AND er.rate_to_usd > 0)
+                        )
+                    )
+                    THEN public.fx_convert(m.quantity * i.last_price,
+                        i.currency_code, p.base_currency) END AS position_value
+        FROM members m
+        JOIN public.instruments i ON i.instrument_id = m.instrument_id
+        JOIN public.entities e ON e.entity_id = i.entity_id
+        LEFT JOIN public.portfolios p ON m.collection_type = 'PORTFOLIO'
+            AND p.portfolio_id = m.collection_id AND p.user_id = m.user_id
+    ), totals AS (
+        SELECT user_id, collection_type, collection_id,
+               bool_and(position_value IS NOT NULL) AS complete,
+               sum(position_value) AS total_value
+        FROM valued
+        GROUP BY user_id, collection_type, collection_id
+    ), entities AS (
+        SELECT user_id, collection_type, collection_id, entity_id,
+               sum(quantity) AS quantity, sum(position_value) AS market_value,
+               bool_and(position_value IS NOT NULL) AS complete
+        FROM valued
+        GROUP BY user_id, collection_type, collection_id, entity_id
+    ), representative AS (
+        SELECT DISTINCT ON (user_id, collection_type, collection_id, entity_id,
+            CASE WHEN p_branch = 'DAILY_MOVER' THEN instrument_id END) *
+        FROM valued
+        ORDER BY user_id, collection_type, collection_id, entity_id,
+                 CASE WHEN p_branch = 'DAILY_MOVER' THEN instrument_id END,
+                 abs(position_value) DESC NULLS LAST, symbol, instrument_id
+    )
+    SELECT jsonb_build_object(
+        'user_id', r.user_id, 'entity_id', r.entity_id,
+        'instrument_id', r.instrument_id, 'symbol', r.symbol, 'name', r.name,
+        'exchange', r.exchange, 'currency_code', r.currency_code,
+        'instrument_type', r.instrument_type,
+        'collection_type', r.collection_type, 'collection_id', r.collection_id,
+        'collection_name', r.collection_name, 'enabled_categories', r.enabled_categories,
+        'quantity', CASE WHEN p_branch = 'DAILY_MOVER' THEN r.quantity ELSE a.quantity END,
+        'market_value', CASE WHEN p_branch = 'DAILY_MOVER' THEN r.position_value
+                            WHEN a.complete THEN a.market_value END,
+        'allocation_pct', CASE WHEN t.complete AND t.total_value > 0
+            THEN round((CASE WHEN p_branch = 'DAILY_MOVER' THEN r.position_value
+                            ELSE a.market_value END) / t.total_value * 100, 4) END,
+        'in_portfolio', r.collection_type = 'PORTFOLIO',
+        'in_watchlist', r.collection_type = 'WATCHLIST',
+        'related_symbols', (
+            SELECT jsonb_agg(jsonb_build_object(
+                'instrument_id', v.instrument_id, 'symbol', v.symbol,
+                'exchange', v.exchange, 'currency', v.currency_code
+            ) ORDER BY v.symbol, v.instrument_id)
+            FROM valued v WHERE v.user_id = r.user_id
+              AND v.collection_type = r.collection_type AND v.collection_id = r.collection_id
+              AND v.entity_id = r.entity_id
+        )
+    )
+    FROM representative r
+    JOIN entities a USING (user_id, collection_type, collection_id, entity_id)
+    JOIN totals t USING (user_id, collection_type, collection_id)
+    ORDER BY r.user_id, r.collection_type, r.collection_id, r.name, r.entity_id
 $$;
 
 
@@ -3316,6 +3624,52 @@ ORDER BY
     a.user_id,
     a.symbol,
     a.exchange NULLS LAST;
+$$;
+
+
+--
+-- Name: sp_get_intelligence_coverage(text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_get_intelligence_coverage(p_branch text) RETURNS SETOF jsonb
+    LANGUAGE sql STABLE
+    AS $$
+    WITH covered_instruments AS (
+        SELECT instrument_id FROM public.positions WHERE quantity <> 0
+        UNION
+        SELECT i.instrument_id FROM public.watchlist_items wi
+        JOIN public.instruments i ON i.entity_id = wi.entity_id
+        UNION
+        SELECT m.instrument_id FROM public.market_universe_members m
+        JOIN public.market_universes u USING (universe_id)
+        WHERE u.active AND m.valid_from <= now()
+            AND (m.valid_to IS NULL OR m.valid_to > now())
+    ), covered AS (
+        SELECT i.*, e.name
+        FROM covered_instruments c
+        JOIN public.instruments i USING (instrument_id)
+        JOIN public.entities e USING (entity_id)
+    ), representative AS (
+        SELECT DISTINCT ON (entity_id,
+            CASE WHEN p_branch = 'DAILY_MOVER' THEN instrument_id END) *
+        FROM covered
+        ORDER BY entity_id,
+            CASE WHEN p_branch = 'DAILY_MOVER' THEN instrument_id END,
+            symbol, instrument_id
+    )
+    SELECT jsonb_build_object(
+        'entity_id', r.entity_id, 'instrument_id', r.instrument_id,
+        'symbol', r.symbol, 'name', r.name, 'exchange', r.exchange,
+        'currency_code', r.currency_code, 'instrument_type', r.instrument_type,
+        'related_symbols', (
+            SELECT jsonb_agg(jsonb_build_object(
+                'instrument_id', c.instrument_id, 'symbol', c.symbol,
+                'exchange', c.exchange, 'currency', c.currency_code
+            ) ORDER BY c.symbol, c.instrument_id)
+            FROM covered c WHERE c.entity_id = r.entity_id
+        )
+    )
+    FROM representative r ORDER BY r.entity_id, r.instrument_id
 $$;
 
 
@@ -3829,13 +4183,89 @@ CREATE FUNCTION public.sp_get_recent_catalysts(p_entity_ids uuid[], p_days integ
             ),
             '[]'::jsonb
         ) AS symbols
-    FROM public.catalysts c
+    FROM ( SELECT COALESCE((lake.payload ->> 'catalyst_id'::text)::uuid, root.event_id) AS catalyst_id,
+    lake.entity_id,
+        CASE upper(lake.payload ->> 'subtype'::text)
+            WHEN 'QUARTERLY_EARNINGS'::text THEN 'EARNINGS'::text
+            WHEN 'CASH_DIVIDEND'::text THEN 'DIVIDEND'::text
+            WHEN 'STOCK_SPLIT'::text THEN 'SPLIT'::text
+            ELSE upper(lake.payload ->> 'subtype'::text)
+        END::character varying(50) AS catalyst_type,
+    lake.occurred_at AS catalyst_date,
+    ((lake.payload ->> 'status'::text))::character varying(30) AS status,
+        CASE upper(lake.payload ->> 'importance'::text)
+            WHEN 'HIGH'::text THEN 90::numeric
+            WHEN 'MEDIUM'::text THEN 50::numeric
+            WHEN 'LOW'::text THEN 10::numeric
+            ELSE (lake.payload ->> 'importance'::text)::numeric
+        END AS importance,
+    lake.payload ->> 'title'::text AS title,
+    lake.source::character varying(50) AS source,
+    lake.raw_payload,
+    lake.event_day AS catalyst_day
+   FROM (SELECT DISTINCT ON (lake.event_type, lake.stage, lake.source, lake.event_key, lake.entity_id) lake.event_id, lake.schema_version, lake.event_type, lake.payload_version, lake.stage, lake.source, lake.source_event_id, lake.event_key, lake.revision, lake.supersedes_event_id, lake.content_hash, lake.occurred_at, lake.event_day, lake.observed_at, lake.ingested_at, lake.subjects, lake.parent_event_ids, lake.payload, lake.raw_payload, lake.evidence, lake.provenance, lake.created_at, lake.updated_at, lake.last_seen_at, lake.entity_id FROM public.event_lake AS lake ORDER BY lake.event_type, lake.stage, lake.source, lake.event_key, lake.entity_id, lake.revision DESC) lake
+     JOIN public.event_lake root ON root.event_type = lake.event_type AND root.stage = lake.stage AND root.source = lake.source AND root.event_key = lake.event_key AND root.revision = 1 AND NOT root.entity_id IS DISTINCT FROM lake.entity_id
+  WHERE lake.event_type = 'CATALYST'::text AND lake.stage = 'ACQUIRED'::text) c
     WHERE c.entity_id = ANY(p_entity_ids)
       AND c.catalyst_date >=
           now() - make_interval(days => GREATEST(p_days, 0))
     ORDER BY
         c.catalyst_date DESC,
         c.catalyst_id;
+$$;
+
+
+--
+-- Name: sp_get_recent_intelligence_catalysts(uuid[], integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_get_recent_intelligence_catalysts(p_entity_ids uuid[], p_days integer DEFAULT 30) RETURNS TABLE(catalyst_id text, entity_id uuid, catalyst_type text, catalyst_date timestamp with time zone, status text, importance numeric, title text, source text, symbols jsonb)
+    LANGUAGE sql STABLE
+    AS $$
+    WITH history AS (
+        SELECT c.catalyst_id::text, c.entity_id, c.catalyst_type::text,
+               c.catalyst_date, c.status::text, c.importance,
+               c.title, c.source, c.symbols, 1 AS priority
+        FROM public.sp_get_recent_catalysts(p_entity_ids, p_days) c
+        UNION ALL
+        SELECT e.branch || '|' || e.event_key, e.entity_id,
+               e.payload->>'eventType',
+               (left(e.payload->>'eventDate', 10)::date)::timestamp AT TIME ZONE 'UTC',
+               CASE WHEN e.branch = 'UPCOMING_CATALYST' THEN 'EXPECTED' ELSE 'OBSERVED' END,
+               coalesce((e.payload->>'eventConfidence')::numeric, 0),
+               e.payload->>'headline', e.branch,
+               coalesce((
+                   SELECT jsonb_agg(jsonb_build_object(
+                       'instrument_id', i.instrument_id, 'symbol', i.symbol,
+                       'exchange', i.exchange, 'currency', i.currency_code
+                   ) ORDER BY i.symbol, i.instrument_id)
+                   FROM public.instruments i WHERE i.entity_id = e.entity_id
+               ), '[]'::jsonb), 0
+        FROM ( SELECT event_type AS branch,
+    COALESCE(provenance ->> 'projection_event_key'::text, event_key) AS event_key,
+    entity_id,
+    ((subjects -> 0) ->> 'instrument_id'::text)::uuid AS instrument_id,
+    COALESCE(provenance ->> 'category'::text, event_type) AS category,
+    payload || jsonb_build_object('entity_id', entity_id, 'instrument_id', (subjects -> 0) ->> 'instrument_id'::text) AS payload,
+    evidence,
+    ( SELECT min(original.created_at) AS min
+           FROM public.event_lake original
+          WHERE original.event_type = lake.event_type AND original.stage = lake.stage AND original.source = lake.source AND original.event_key = lake.event_key AND NOT original.entity_id IS DISTINCT FROM lake.entity_id) AS first_seen_at,
+    last_seen_at
+   FROM (SELECT DISTINCT ON (lake.event_type, lake.stage, lake.source, lake.event_key, lake.entity_id) lake.event_id, lake.schema_version, lake.event_type, lake.payload_version, lake.stage, lake.source, lake.source_event_id, lake.event_key, lake.revision, lake.supersedes_event_id, lake.content_hash, lake.occurred_at, lake.event_day, lake.observed_at, lake.ingested_at, lake.subjects, lake.parent_event_ids, lake.payload, lake.raw_payload, lake.evidence, lake.provenance, lake.created_at, lake.updated_at, lake.last_seen_at, lake.entity_id FROM public.event_lake AS lake ORDER BY lake.event_type, lake.stage, lake.source, lake.event_key, lake.entity_id, lake.revision DESC) lake
+  WHERE stage = 'VALIDATED'::text AND (event_type = ANY (ARRAY['DAILY_MOVER'::text, 'UPCOMING_CATALYST'::text, 'BREAKING_CATALYST'::text]))) e
+        WHERE e.entity_id = ANY(p_entity_ids)
+          AND e.branch IN ('UPCOMING_CATALYST', 'BREAKING_CATALYST')
+          AND left(e.payload->>'eventDate', 10)::date >=
+              (now() - make_interval(days => GREATEST(p_days, 0)))::date
+    ), deduplicated AS (
+        SELECT DISTINCT ON (entity_id, catalyst_type, catalyst_date, title) *
+        FROM history
+        ORDER BY entity_id, catalyst_type, catalyst_date, title, priority, catalyst_id
+    )
+    SELECT catalyst_id, entity_id, catalyst_type, catalyst_date,
+           status, importance, title, source, symbols
+    FROM deduplicated ORDER BY catalyst_date DESC, catalyst_id
 $$;
 
 
@@ -4078,7 +4508,29 @@ BEGIN
             (asset_match.payload ->> 'in_portfolio')::boolean AS in_portfolio,
             (asset_match.payload ->> 'in_watchlist')::boolean AS in_watchlist,
             (asset_match.payload ->> 'asset_scope')::varchar AS asset_scope
-        FROM public.catalysts c
+        FROM ( SELECT COALESCE((lake.payload ->> 'catalyst_id'::text)::uuid, root.event_id) AS catalyst_id,
+    lake.entity_id,
+        CASE upper(lake.payload ->> 'subtype'::text)
+            WHEN 'QUARTERLY_EARNINGS'::text THEN 'EARNINGS'::text
+            WHEN 'CASH_DIVIDEND'::text THEN 'DIVIDEND'::text
+            WHEN 'STOCK_SPLIT'::text THEN 'SPLIT'::text
+            ELSE upper(lake.payload ->> 'subtype'::text)
+        END::character varying(50) AS catalyst_type,
+    lake.occurred_at AS catalyst_date,
+    ((lake.payload ->> 'status'::text))::character varying(30) AS status,
+        CASE upper(lake.payload ->> 'importance'::text)
+            WHEN 'HIGH'::text THEN 90::numeric
+            WHEN 'MEDIUM'::text THEN 50::numeric
+            WHEN 'LOW'::text THEN 10::numeric
+            ELSE (lake.payload ->> 'importance'::text)::numeric
+        END AS importance,
+    lake.payload ->> 'title'::text AS title,
+    lake.source::character varying(50) AS source,
+    lake.raw_payload,
+    lake.event_day AS catalyst_day
+   FROM (SELECT DISTINCT ON (lake.event_type, lake.stage, lake.source, lake.event_key, lake.entity_id) lake.event_id, lake.schema_version, lake.event_type, lake.payload_version, lake.stage, lake.source, lake.source_event_id, lake.event_key, lake.revision, lake.supersedes_event_id, lake.content_hash, lake.occurred_at, lake.event_day, lake.observed_at, lake.ingested_at, lake.subjects, lake.parent_event_ids, lake.payload, lake.raw_payload, lake.evidence, lake.provenance, lake.created_at, lake.updated_at, lake.last_seen_at, lake.entity_id FROM public.event_lake AS lake ORDER BY lake.event_type, lake.stage, lake.source, lake.event_key, lake.entity_id, lake.revision DESC) lake
+     JOIN public.event_lake root ON root.event_type = lake.event_type AND root.stage = lake.stage AND root.source = lake.source AND root.event_key = lake.event_key AND root.revision = 1 AND NOT root.entity_id IS DISTINCT FROM lake.entity_id
+  WHERE lake.event_type = 'CATALYST'::text AND lake.stage = 'ACQUIRED'::text) c
         JOIN public.entities e
           ON e.entity_id = c.entity_id
         LEFT JOIN preferred_instrument pi
@@ -4347,20 +4799,102 @@ CREATE FUNCTION public.sp_get_user_entity_overview(p_user_id uuid, p_entity_id u
                   AND m.valid_to IS NULL
             )
         ), '[]'::jsonb),
-        'news_count', (SELECT count(*) FROM public.news n WHERE EXISTS (
-            SELECT 1 FROM public.news_entities ne
+        'news_count', (SELECT count(*) FROM ( SELECT DISTINCT ON (((payload ->> 'news_id'::text)::uuid)) (payload ->> 'news_id'::text)::uuid AS news_id,
+    (payload ->> 'cluster_id'::text)::uuid AS cluster_id,
+    (payload ->> 'source_id'::text)::uuid AS source_id,
+    payload ->> 'headline'::text AS title,
+    payload ->> 'summary'::text AS summary,
+    payload ->> 'url'::text AS url,
+    ((payload ->> 'content_hash'::text))::character varying(64) AS content_hash,
+    occurred_at AS published_at,
+    raw_payload AS raw_json
+   FROM (SELECT DISTINCT ON (lake.event_type, lake.stage, lake.source, lake.event_key, lake.entity_id) lake.event_id, lake.schema_version, lake.event_type, lake.payload_version, lake.stage, lake.source, lake.source_event_id, lake.event_key, lake.revision, lake.supersedes_event_id, lake.content_hash, lake.occurred_at, lake.event_day, lake.observed_at, lake.ingested_at, lake.subjects, lake.parent_event_ids, lake.payload, lake.raw_payload, lake.evidence, lake.provenance, lake.created_at, lake.updated_at, lake.last_seen_at, lake.entity_id FROM public.event_lake AS lake ORDER BY lake.event_type, lake.stage, lake.source, lake.event_key, lake.entity_id, lake.revision DESC) AS event_lake_latest
+  WHERE event_type = 'NEWS_ARTICLE'::text AND stage = 'ACQUIRED'::text
+  ORDER BY ((payload ->> 'news_id'::text)::uuid), created_at DESC, event_id) n WHERE EXISTS (
+            SELECT 1 FROM ( SELECT (association.payload ->> 'news_entity_id'::text)::uuid AS news_entity_id,
+    (association.payload ->> 'news_id'::text)::uuid AS news_id,
+    association.entity_id,
+    (COALESCE(score.payload, association.payload) ->> 'relevance'::text)::numeric AS relevance,
+    (COALESCE(score.payload, association.payload) ->> 'sentiment'::text)::numeric AS sentiment,
+    (COALESCE(score.payload, association.payload) ->> 'impact'::text)::numeric AS impact
+   FROM (SELECT DISTINCT ON (lake.event_type, lake.stage, lake.source, lake.event_key, lake.entity_id) lake.event_id, lake.schema_version, lake.event_type, lake.payload_version, lake.stage, lake.source, lake.source_event_id, lake.event_key, lake.revision, lake.supersedes_event_id, lake.content_hash, lake.occurred_at, lake.event_day, lake.observed_at, lake.ingested_at, lake.subjects, lake.parent_event_ids, lake.payload, lake.raw_payload, lake.evidence, lake.provenance, lake.created_at, lake.updated_at, lake.last_seen_at, lake.entity_id FROM public.event_lake AS lake ORDER BY lake.event_type, lake.stage, lake.source, lake.event_key, lake.entity_id, lake.revision DESC) association
+     LEFT JOIN (SELECT DISTINCT ON (lake.event_type, lake.stage, lake.source, lake.event_key, lake.entity_id) lake.event_id, lake.schema_version, lake.event_type, lake.payload_version, lake.stage, lake.source, lake.source_event_id, lake.event_key, lake.revision, lake.supersedes_event_id, lake.content_hash, lake.occurred_at, lake.event_day, lake.observed_at, lake.ingested_at, lake.subjects, lake.parent_event_ids, lake.payload, lake.raw_payload, lake.evidence, lake.provenance, lake.created_at, lake.updated_at, lake.last_seen_at, lake.entity_id FROM public.event_lake AS lake ORDER BY lake.event_type, lake.stage, lake.source, lake.event_key, lake.entity_id, lake.revision DESC) score ON score.event_type = 'NEWS_SCORE'::text AND score.stage = 'ENRICHED'::text AND score.source = 'NEWS_ENRICHMENT'::text AND score.entity_id = association.entity_id AND score.event_key = (association.payload ->> 'news_entity_id'::text)
+  WHERE association.event_type = 'NEWS_ASSOCIATION'::text AND association.stage = 'ACQUIRED'::text) ne
             WHERE ne.news_id = n.news_id AND ne.entity_id = e.entity_id
         )),
         'news', coalesce((SELECT jsonb_agg(to_jsonb(recent) ORDER BY recent.published_at DESC NULLS LAST, recent.news_id)
             FROM (SELECT n.news_id, n.title, n.summary, n.url, n.published_at
-                FROM public.news n WHERE EXISTS (SELECT 1 FROM public.news_entities ne
+                FROM ( SELECT DISTINCT ON (((payload ->> 'news_id'::text)::uuid)) (payload ->> 'news_id'::text)::uuid AS news_id,
+    (payload ->> 'cluster_id'::text)::uuid AS cluster_id,
+    (payload ->> 'source_id'::text)::uuid AS source_id,
+    payload ->> 'headline'::text AS title,
+    payload ->> 'summary'::text AS summary,
+    payload ->> 'url'::text AS url,
+    ((payload ->> 'content_hash'::text))::character varying(64) AS content_hash,
+    occurred_at AS published_at,
+    raw_payload AS raw_json
+   FROM (SELECT DISTINCT ON (lake.event_type, lake.stage, lake.source, lake.event_key, lake.entity_id) lake.event_id, lake.schema_version, lake.event_type, lake.payload_version, lake.stage, lake.source, lake.source_event_id, lake.event_key, lake.revision, lake.supersedes_event_id, lake.content_hash, lake.occurred_at, lake.event_day, lake.observed_at, lake.ingested_at, lake.subjects, lake.parent_event_ids, lake.payload, lake.raw_payload, lake.evidence, lake.provenance, lake.created_at, lake.updated_at, lake.last_seen_at, lake.entity_id FROM public.event_lake AS lake ORDER BY lake.event_type, lake.stage, lake.source, lake.event_key, lake.entity_id, lake.revision DESC) AS event_lake_latest
+  WHERE event_type = 'NEWS_ARTICLE'::text AND stage = 'ACQUIRED'::text
+  ORDER BY ((payload ->> 'news_id'::text)::uuid), created_at DESC, event_id) n WHERE EXISTS (SELECT 1 FROM ( SELECT (association.payload ->> 'news_entity_id'::text)::uuid AS news_entity_id,
+    (association.payload ->> 'news_id'::text)::uuid AS news_id,
+    association.entity_id,
+    (COALESCE(score.payload, association.payload) ->> 'relevance'::text)::numeric AS relevance,
+    (COALESCE(score.payload, association.payload) ->> 'sentiment'::text)::numeric AS sentiment,
+    (COALESCE(score.payload, association.payload) ->> 'impact'::text)::numeric AS impact
+   FROM (SELECT DISTINCT ON (lake.event_type, lake.stage, lake.source, lake.event_key, lake.entity_id) lake.event_id, lake.schema_version, lake.event_type, lake.payload_version, lake.stage, lake.source, lake.source_event_id, lake.event_key, lake.revision, lake.supersedes_event_id, lake.content_hash, lake.occurred_at, lake.event_day, lake.observed_at, lake.ingested_at, lake.subjects, lake.parent_event_ids, lake.payload, lake.raw_payload, lake.evidence, lake.provenance, lake.created_at, lake.updated_at, lake.last_seen_at, lake.entity_id FROM public.event_lake AS lake ORDER BY lake.event_type, lake.stage, lake.source, lake.event_key, lake.entity_id, lake.revision DESC) association
+     LEFT JOIN (SELECT DISTINCT ON (lake.event_type, lake.stage, lake.source, lake.event_key, lake.entity_id) lake.event_id, lake.schema_version, lake.event_type, lake.payload_version, lake.stage, lake.source, lake.source_event_id, lake.event_key, lake.revision, lake.supersedes_event_id, lake.content_hash, lake.occurred_at, lake.event_day, lake.observed_at, lake.ingested_at, lake.subjects, lake.parent_event_ids, lake.payload, lake.raw_payload, lake.evidence, lake.provenance, lake.created_at, lake.updated_at, lake.last_seen_at, lake.entity_id FROM public.event_lake AS lake ORDER BY lake.event_type, lake.stage, lake.source, lake.event_key, lake.entity_id, lake.revision DESC) score ON score.event_type = 'NEWS_SCORE'::text AND score.stage = 'ENRICHED'::text AND score.source = 'NEWS_ENRICHMENT'::text AND score.entity_id = association.entity_id AND score.event_key = (association.payload ->> 'news_entity_id'::text)
+  WHERE association.event_type = 'NEWS_ASSOCIATION'::text AND association.stage = 'ACQUIRED'::text) ne
                     WHERE ne.news_id = n.news_id AND ne.entity_id = e.entity_id)
                 ORDER BY n.published_at DESC NULLS LAST, n.news_id LIMIT 50) recent
         ), '[]'::jsonb),
-        'catalyst_count', (SELECT count(*) FROM public.catalysts c WHERE c.entity_id = e.entity_id),
+        'catalyst_count', (SELECT count(*) FROM ( SELECT COALESCE((lake.payload ->> 'catalyst_id'::text)::uuid, root.event_id) AS catalyst_id,
+    lake.entity_id,
+        CASE upper(lake.payload ->> 'subtype'::text)
+            WHEN 'QUARTERLY_EARNINGS'::text THEN 'EARNINGS'::text
+            WHEN 'CASH_DIVIDEND'::text THEN 'DIVIDEND'::text
+            WHEN 'STOCK_SPLIT'::text THEN 'SPLIT'::text
+            ELSE upper(lake.payload ->> 'subtype'::text)
+        END::character varying(50) AS catalyst_type,
+    lake.occurred_at AS catalyst_date,
+    ((lake.payload ->> 'status'::text))::character varying(30) AS status,
+        CASE upper(lake.payload ->> 'importance'::text)
+            WHEN 'HIGH'::text THEN 90::numeric
+            WHEN 'MEDIUM'::text THEN 50::numeric
+            WHEN 'LOW'::text THEN 10::numeric
+            ELSE (lake.payload ->> 'importance'::text)::numeric
+        END AS importance,
+    lake.payload ->> 'title'::text AS title,
+    lake.source::character varying(50) AS source,
+    lake.raw_payload,
+    lake.event_day AS catalyst_day
+   FROM (SELECT DISTINCT ON (lake.event_type, lake.stage, lake.source, lake.event_key, lake.entity_id) lake.event_id, lake.schema_version, lake.event_type, lake.payload_version, lake.stage, lake.source, lake.source_event_id, lake.event_key, lake.revision, lake.supersedes_event_id, lake.content_hash, lake.occurred_at, lake.event_day, lake.observed_at, lake.ingested_at, lake.subjects, lake.parent_event_ids, lake.payload, lake.raw_payload, lake.evidence, lake.provenance, lake.created_at, lake.updated_at, lake.last_seen_at, lake.entity_id FROM public.event_lake AS lake ORDER BY lake.event_type, lake.stage, lake.source, lake.event_key, lake.entity_id, lake.revision DESC) lake
+     JOIN public.event_lake root ON root.event_type = lake.event_type AND root.stage = lake.stage AND root.source = lake.source AND root.event_key = lake.event_key AND root.revision = 1 AND NOT root.entity_id IS DISTINCT FROM lake.entity_id
+  WHERE lake.event_type = 'CATALYST'::text AND lake.stage = 'ACQUIRED'::text) c WHERE c.entity_id = e.entity_id),
         'catalysts', coalesce((SELECT jsonb_agg(to_jsonb(recent) ORDER BY recent.catalyst_day DESC, recent.catalyst_id)
             FROM (SELECT c.catalyst_id, c.title, c.catalyst_type, c.catalyst_date, c.catalyst_day, c.status, c.importance, c.source
-                FROM public.catalysts c WHERE c.entity_id = e.entity_id
+                FROM ( SELECT COALESCE((lake.payload ->> 'catalyst_id'::text)::uuid, root.event_id) AS catalyst_id,
+    lake.entity_id,
+        CASE upper(lake.payload ->> 'subtype'::text)
+            WHEN 'QUARTERLY_EARNINGS'::text THEN 'EARNINGS'::text
+            WHEN 'CASH_DIVIDEND'::text THEN 'DIVIDEND'::text
+            WHEN 'STOCK_SPLIT'::text THEN 'SPLIT'::text
+            ELSE upper(lake.payload ->> 'subtype'::text)
+        END::character varying(50) AS catalyst_type,
+    lake.occurred_at AS catalyst_date,
+    ((lake.payload ->> 'status'::text))::character varying(30) AS status,
+        CASE upper(lake.payload ->> 'importance'::text)
+            WHEN 'HIGH'::text THEN 90::numeric
+            WHEN 'MEDIUM'::text THEN 50::numeric
+            WHEN 'LOW'::text THEN 10::numeric
+            ELSE (lake.payload ->> 'importance'::text)::numeric
+        END AS importance,
+    lake.payload ->> 'title'::text AS title,
+    lake.source::character varying(50) AS source,
+    lake.raw_payload,
+    lake.event_day AS catalyst_day
+   FROM (SELECT DISTINCT ON (lake.event_type, lake.stage, lake.source, lake.event_key, lake.entity_id) lake.event_id, lake.schema_version, lake.event_type, lake.payload_version, lake.stage, lake.source, lake.source_event_id, lake.event_key, lake.revision, lake.supersedes_event_id, lake.content_hash, lake.occurred_at, lake.event_day, lake.observed_at, lake.ingested_at, lake.subjects, lake.parent_event_ids, lake.payload, lake.raw_payload, lake.evidence, lake.provenance, lake.created_at, lake.updated_at, lake.last_seen_at, lake.entity_id FROM public.event_lake AS lake ORDER BY lake.event_type, lake.stage, lake.source, lake.event_key, lake.entity_id, lake.revision DESC) lake
+     JOIN public.event_lake root ON root.event_type = lake.event_type AND root.stage = lake.stage AND root.source = lake.source AND root.event_key = lake.event_key AND root.revision = 1 AND NOT root.entity_id IS DISTINCT FROM lake.entity_id
+  WHERE lake.event_type = 'CATALYST'::text AND lake.stage = 'ACQUIRED'::text) c WHERE c.entity_id = e.entity_id
                 ORDER BY c.catalyst_day DESC, c.catalyst_id LIMIT 50) recent
         ), '[]'::jsonb),
         'opportunities', coalesce((SELECT jsonb_agg(
@@ -4400,6 +4934,20 @@ SELECT
 FROM users
 WHERE username =
       p_username;
+$$;
+
+
+--
+-- Name: sp_get_user_notification_delivery(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_get_user_notification_delivery(p_user_id uuid) RETURNS TABLE(paused boolean, default_source_id uuid)
+    LANGUAGE sql STABLE
+    AS $$
+    SELECT COALESCE(delivery.paused, false), delivery.default_source_id
+    FROM public.users u
+    LEFT JOIN public.user_notification_delivery delivery ON delivery.user_id = u.user_id
+    WHERE u.user_id = p_user_id;
 $$;
 
 
@@ -4653,6 +5201,33 @@ CREATE FUNCTION public.sp_import_asset_profile(p_payload jsonb) RETURNS TABLE(en
     AS $$
     SELECT r.entity_id, r.instrument_id, r.imported
     FROM public.sp_upsert_asset_profile(p_payload, NULL, NULL, true) r;
+$$;
+
+
+--
+-- Name: sp_list_monitoring_collections(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_list_monitoring_collections(p_user_id uuid) RETURNS TABLE(collection_type text, collection_id uuid, collection_name text, enabled_categories text[])
+    LANGUAGE sql STABLE
+    AS $$
+    WITH collections AS (
+        SELECT 'PORTFOLIO'::text AS collection_type, p.portfolio_id AS collection_id,
+               p.name::text AS collection_name
+        FROM public.portfolios p WHERE p.user_id = p_user_id
+        UNION ALL
+        SELECT 'WATCHLIST', w.watchlist_id, w.name::text
+        FROM public.watchlists w WHERE w.user_id = p_user_id
+        UNION ALL
+        SELECT 'UNIVERSE', u.universe_id, u.name::text
+        FROM public.market_universes u WHERE u.active
+    )
+    SELECT c.*, coalesce(s.enabled_categories, '{}'::text[])
+    FROM collections c
+    LEFT JOIN public.collection_intelligence_subscriptions s
+      ON s.user_id = p_user_id AND s.collection_type = c.collection_type
+     AND s.collection_id = c.collection_id
+    ORDER BY c.collection_type, c.collection_name, c.collection_id
 $$;
 
 
@@ -7581,19 +8156,30 @@ CREATE FUNCTION public.sp_market_screener_list_runs(p_limit integer DEFAULT 50) 
     AS $$
     SELECT jsonb_build_object(
         'screener_run_id', run.screener_run_id,
-        'status', run.status,
+        'job_run_id', run.job_run_id,
+        'job_key', job.job_key,
+        'status', CASE WHEN run.status = 'RUNNING'
+            AND job_run.status IN ('FAILED', 'SUCCESS', 'PARTIAL')
+            THEN 'FAILED' ELSE run.status END,
         'discovery_snapshot_id', run.discovery_snapshot_id,
         'scan_run_id', run.scan_run_id,
         'started_at', run.started_at,
-        'completed_at', run.completed_at,
+        'completed_at', CASE WHEN run.status = 'RUNNING'
+            AND job_run.status IN ('FAILED', 'SUCCESS', 'PARTIAL')
+            THEN job_run.completed_at ELSE run.completed_at END,
         'phase_results', run.phase_results,
-        'error_message', run.error_message,
+        'error_message', CASE WHEN run.status = 'RUNNING'
+            AND job_run.status IN ('FAILED', 'SUCCESS', 'PARTIAL')
+            THEN COALESCE(job_run.error_message, 'Analysis interrupted before completion')
+            ELSE run.error_message END,
         'ranking_snapshot_id', snapshot.ranking_snapshot_id,
         'opportunity_count', COALESCE(snapshot.opportunity_count, 0)
     )
-    FROM public.market_screener_runs AS run
-    LEFT JOIN public.market_screener_ranking_snapshots AS snapshot
-      ON snapshot.screener_run_id = run.screener_run_id
+    FROM public.market_screener_runs run
+    LEFT JOIN public.scheduler_job_runs job_run ON job_run.job_run_id = run.job_run_id
+    LEFT JOIN public.scheduler_jobs job ON job.job_id = job_run.job_id
+    LEFT JOIN public.market_screener_ranking_snapshots snapshot
+        ON snapshot.screener_run_id = run.screener_run_id
     ORDER BY run.started_at DESC
     LIMIT LEAST(GREATEST(COALESCE(p_limit, 50), 1), 500);
 $$;
@@ -8107,14 +8693,40 @@ BEGIN
                 e.entity_id,
                 NULL
             ) AS asset_match
-        FROM public.news n
+        FROM ( SELECT DISTINCT ON (((payload ->> 'news_id'::text)::uuid)) (payload ->> 'news_id'::text)::uuid AS news_id,
+    (payload ->> 'cluster_id'::text)::uuid AS cluster_id,
+    (payload ->> 'source_id'::text)::uuid AS source_id,
+    payload ->> 'headline'::text AS title,
+    payload ->> 'summary'::text AS summary,
+    payload ->> 'url'::text AS url,
+    ((payload ->> 'content_hash'::text))::character varying(64) AS content_hash,
+    occurred_at AS published_at,
+    raw_payload AS raw_json
+   FROM (SELECT DISTINCT ON (lake.event_type, lake.stage, lake.source, lake.event_key, lake.entity_id) lake.event_id, lake.schema_version, lake.event_type, lake.payload_version, lake.stage, lake.source, lake.source_event_id, lake.event_key, lake.revision, lake.supersedes_event_id, lake.content_hash, lake.occurred_at, lake.event_day, lake.observed_at, lake.ingested_at, lake.subjects, lake.parent_event_ids, lake.payload, lake.raw_payload, lake.evidence, lake.provenance, lake.created_at, lake.updated_at, lake.last_seen_at, lake.entity_id FROM public.event_lake AS lake ORDER BY lake.event_type, lake.stage, lake.source, lake.event_key, lake.entity_id, lake.revision DESC) AS event_lake_latest
+  WHERE event_type = 'NEWS_ARTICLE'::text AND stage = 'ACQUIRED'::text
+  ORDER BY ((payload ->> 'news_id'::text)::uuid), created_at DESC, event_id) n
         LEFT JOIN public.news_sources ns
           ON ns.source_id = n.source_id
-        LEFT JOIN public.news_entities ne
+        LEFT JOIN ( SELECT (association.payload ->> 'news_entity_id'::text)::uuid AS news_entity_id,
+    (association.payload ->> 'news_id'::text)::uuid AS news_id,
+    association.entity_id,
+    (COALESCE(score.payload, association.payload) ->> 'relevance'::text)::numeric AS relevance,
+    (COALESCE(score.payload, association.payload) ->> 'sentiment'::text)::numeric AS sentiment,
+    (COALESCE(score.payload, association.payload) ->> 'impact'::text)::numeric AS impact
+   FROM (SELECT DISTINCT ON (lake.event_type, lake.stage, lake.source, lake.event_key, lake.entity_id) lake.event_id, lake.schema_version, lake.event_type, lake.payload_version, lake.stage, lake.source, lake.source_event_id, lake.event_key, lake.revision, lake.supersedes_event_id, lake.content_hash, lake.occurred_at, lake.event_day, lake.observed_at, lake.ingested_at, lake.subjects, lake.parent_event_ids, lake.payload, lake.raw_payload, lake.evidence, lake.provenance, lake.created_at, lake.updated_at, lake.last_seen_at, lake.entity_id FROM public.event_lake AS lake ORDER BY lake.event_type, lake.stage, lake.source, lake.event_key, lake.entity_id, lake.revision DESC) association
+     LEFT JOIN (SELECT DISTINCT ON (lake.event_type, lake.stage, lake.source, lake.event_key, lake.entity_id) lake.event_id, lake.schema_version, lake.event_type, lake.payload_version, lake.stage, lake.source, lake.source_event_id, lake.event_key, lake.revision, lake.supersedes_event_id, lake.content_hash, lake.occurred_at, lake.event_day, lake.observed_at, lake.ingested_at, lake.subjects, lake.parent_event_ids, lake.payload, lake.raw_payload, lake.evidence, lake.provenance, lake.created_at, lake.updated_at, lake.last_seen_at, lake.entity_id FROM public.event_lake AS lake ORDER BY lake.event_type, lake.stage, lake.source, lake.event_key, lake.entity_id, lake.revision DESC) score ON score.event_type = 'NEWS_SCORE'::text AND score.stage = 'ENRICHED'::text AND score.source = 'NEWS_ENRICHMENT'::text AND score.entity_id = association.entity_id AND score.event_key = (association.payload ->> 'news_entity_id'::text)
+  WHERE association.event_type = 'NEWS_ASSOCIATION'::text AND association.stage = 'ACQUIRED'::text) ne
           ON ne.news_id = n.news_id
         LEFT JOIN public.entities e
           ON e.entity_id = ne.entity_id
-        LEFT JOIN public.news_impacts ni
+        LEFT JOIN ( SELECT (payload ->> 'impact_id'::text)::uuid AS impact_id,
+    (payload ->> 'news_id'::text)::uuid AS news_id,
+    entity_id,
+    (payload ->> 'direct_impact'::text)::numeric AS direct_impact,
+    (payload ->> 'propagated_impact'::text)::numeric AS propagated_impact,
+    (payload ->> 'confidence'::text)::numeric AS confidence
+   FROM (SELECT DISTINCT ON (lake.event_type, lake.stage, lake.source, lake.event_key, lake.entity_id) lake.event_id, lake.schema_version, lake.event_type, lake.payload_version, lake.stage, lake.source, lake.source_event_id, lake.event_key, lake.revision, lake.supersedes_event_id, lake.content_hash, lake.occurred_at, lake.event_day, lake.observed_at, lake.ingested_at, lake.subjects, lake.parent_event_ids, lake.payload, lake.raw_payload, lake.evidence, lake.provenance, lake.created_at, lake.updated_at, lake.last_seen_at, lake.entity_id FROM public.event_lake AS lake ORDER BY lake.event_type, lake.stage, lake.source, lake.event_key, lake.entity_id, lake.revision DESC) AS event_lake_latest
+  WHERE event_type = 'NEWS_IMPACT'::text AND stage = 'ENRICHED'::text) ni
           ON ni.news_id = n.news_id
          AND ni.entity_id = ne.entity_id
     ), news_rollup AS (
@@ -8370,8 +8982,27 @@ BEGIN
         n.summary,
         ns.name AS source_name,
         n.published_at
-    FROM public.news_entities ne
-    JOIN public.news n ON n.news_id = ne.news_id
+    FROM ( SELECT (association.payload ->> 'news_entity_id'::text)::uuid AS news_entity_id,
+    (association.payload ->> 'news_id'::text)::uuid AS news_id,
+    association.entity_id,
+    (COALESCE(score.payload, association.payload) ->> 'relevance'::text)::numeric AS relevance,
+    (COALESCE(score.payload, association.payload) ->> 'sentiment'::text)::numeric AS sentiment,
+    (COALESCE(score.payload, association.payload) ->> 'impact'::text)::numeric AS impact
+   FROM (SELECT DISTINCT ON (lake.event_type, lake.stage, lake.source, lake.event_key, lake.entity_id) lake.event_id, lake.schema_version, lake.event_type, lake.payload_version, lake.stage, lake.source, lake.source_event_id, lake.event_key, lake.revision, lake.supersedes_event_id, lake.content_hash, lake.occurred_at, lake.event_day, lake.observed_at, lake.ingested_at, lake.subjects, lake.parent_event_ids, lake.payload, lake.raw_payload, lake.evidence, lake.provenance, lake.created_at, lake.updated_at, lake.last_seen_at, lake.entity_id FROM public.event_lake AS lake ORDER BY lake.event_type, lake.stage, lake.source, lake.event_key, lake.entity_id, lake.revision DESC) association
+     LEFT JOIN (SELECT DISTINCT ON (lake.event_type, lake.stage, lake.source, lake.event_key, lake.entity_id) lake.event_id, lake.schema_version, lake.event_type, lake.payload_version, lake.stage, lake.source, lake.source_event_id, lake.event_key, lake.revision, lake.supersedes_event_id, lake.content_hash, lake.occurred_at, lake.event_day, lake.observed_at, lake.ingested_at, lake.subjects, lake.parent_event_ids, lake.payload, lake.raw_payload, lake.evidence, lake.provenance, lake.created_at, lake.updated_at, lake.last_seen_at, lake.entity_id FROM public.event_lake AS lake ORDER BY lake.event_type, lake.stage, lake.source, lake.event_key, lake.entity_id, lake.revision DESC) score ON score.event_type = 'NEWS_SCORE'::text AND score.stage = 'ENRICHED'::text AND score.source = 'NEWS_ENRICHMENT'::text AND score.entity_id = association.entity_id AND score.event_key = (association.payload ->> 'news_entity_id'::text)
+  WHERE association.event_type = 'NEWS_ASSOCIATION'::text AND association.stage = 'ACQUIRED'::text) ne
+    JOIN ( SELECT DISTINCT ON (((payload ->> 'news_id'::text)::uuid)) (payload ->> 'news_id'::text)::uuid AS news_id,
+    (payload ->> 'cluster_id'::text)::uuid AS cluster_id,
+    (payload ->> 'source_id'::text)::uuid AS source_id,
+    payload ->> 'headline'::text AS title,
+    payload ->> 'summary'::text AS summary,
+    payload ->> 'url'::text AS url,
+    ((payload ->> 'content_hash'::text))::character varying(64) AS content_hash,
+    occurred_at AS published_at,
+    raw_payload AS raw_json
+   FROM (SELECT DISTINCT ON (lake.event_type, lake.stage, lake.source, lake.event_key, lake.entity_id) lake.event_id, lake.schema_version, lake.event_type, lake.payload_version, lake.stage, lake.source, lake.source_event_id, lake.event_key, lake.revision, lake.supersedes_event_id, lake.content_hash, lake.occurred_at, lake.event_day, lake.observed_at, lake.ingested_at, lake.subjects, lake.parent_event_ids, lake.payload, lake.raw_payload, lake.evidence, lake.provenance, lake.created_at, lake.updated_at, lake.last_seen_at, lake.entity_id FROM public.event_lake AS lake ORDER BY lake.event_type, lake.stage, lake.source, lake.event_key, lake.entity_id, lake.revision DESC) AS event_lake_latest
+  WHERE event_type = 'NEWS_ARTICLE'::text AND stage = 'ACQUIRED'::text
+  ORDER BY ((payload ->> 'news_id'::text)::uuid), created_at DESC, event_id) n ON n.news_id = ne.news_id
     JOIN public.entities e ON e.entity_id = ne.entity_id
     LEFT JOIN public.news_sources ns ON ns.source_id = n.source_id
     LEFT JOIN public.instruments i ON i.entity_id = ne.entity_id
@@ -8401,29 +9032,31 @@ CREATE FUNCTION public.sp_news_update_entity_scores(p_scores jsonb) RETURNS inte
     LANGUAGE plpgsql
     AS $$
 DECLARE
-    v_updated integer;
+    v_score jsonb;
+    v_association public.event_lake%ROWTYPE;
+    v_updated integer := 0;
 BEGIN
-    IF jsonb_typeof(p_scores) <> 'array' THEN
+    IF p_scores IS NULL OR jsonb_typeof(p_scores) <> 'array' THEN
         RAISE EXCEPTION 'p_scores must be a JSON array';
     END IF;
-
-    WITH parsed AS (
-        SELECT
-            (value->>'news_entity_id')::uuid AS news_entity_id,
-            greatest(0.0, least(1.0, (value->>'relevance')::numeric)) AS relevance,
-            greatest(-1.0, least(1.0, (value->>'sentiment')::numeric)) AS sentiment,
-            greatest(0.0, least(1.0, (value->>'impact')::numeric)) AS impact
-        FROM jsonb_array_elements(p_scores)
-    )
-    UPDATE public.news_entities ne
-    SET
-        relevance = parsed.relevance,
-        sentiment = parsed.sentiment,
-        impact = parsed.impact
-    FROM parsed
-    WHERE ne.news_entity_id = parsed.news_entity_id;
-
-    GET DIAGNOSTICS v_updated = ROW_COUNT;
+    FOR v_score IN SELECT value FROM jsonb_array_elements(p_scores) LOOP
+        SELECT * INTO v_association FROM public.event_lake_latest
+        WHERE event_type = 'NEWS_ASSOCIATION' AND stage = 'ACQUIRED'
+          AND (payload->>'news_entity_id')::uuid = (v_score->>'news_entity_id')::uuid;
+        IF NOT FOUND THEN CONTINUE; END IF;
+        PERFORM public.sp_save_event(jsonb_build_object(
+            'schema_version', 1, 'payload_version', 1, 'event_type', 'NEWS_SCORE',
+            'stage', 'ENRICHED', 'source', 'NEWS_ENRICHMENT',
+            'event_key', v_score->>'news_entity_id', 'subjects', v_association.subjects,
+            'parent_event_ids', jsonb_build_array(v_association.event_id),
+            'payload', jsonb_build_object('news_entity_id', v_score->>'news_entity_id',
+                'relevance', greatest(0.0, least(1.0, (v_score->>'relevance')::numeric)),
+                'sentiment', greatest(-1.0, least(1.0, (v_score->>'sentiment')::numeric)),
+                'impact', greatest(0.0, least(1.0, (v_score->>'impact')::numeric))),
+            'evidence', '{}'::jsonb, 'provenance', '{}'::jsonb
+        ));
+        v_updated := v_updated + 1;
+    END LOOP;
     RETURN v_updated;
 END;
 $$;
@@ -8438,192 +9071,111 @@ CREATE FUNCTION public.sp_news_upsert_article(p_entity_id uuid, p_payload jsonb)
     AS $$
 DECLARE
     v_source_id uuid;
-    v_news_id uuid;
-    v_content_hash varchar(64);
     v_source_name varchar(100);
     v_title text;
-    v_summary text;
     v_url text;
     v_published_at timestamptz;
-    v_news_inserted boolean := false;
-    v_association_inserted boolean := false;
+    v_key text;
+    v_previous public.event_lake%ROWTYPE;
+    v_news_id uuid;
+    v_news_entity_id uuid;
+    v_article_event_id uuid;
+    v_inserted boolean;
+    v_association_inserted boolean;
+    v_payload jsonb;
 BEGIN
-    IF p_entity_id IS NULL THEN
-        RAISE EXCEPTION 'p_entity_id is required';
-    END IF;
-
-    IF p_payload IS NULL
-       OR jsonb_typeof(p_payload) <> 'object'
-    THEN
+    IF p_payload IS NULL OR jsonb_typeof(p_payload) <> 'object' THEN
         RAISE EXCEPTION 'p_payload must be a JSON object';
     END IF;
-
-    IF NOT EXISTS (
-        SELECT 1
-        FROM public.entities e
-        WHERE e.entity_id = p_entity_id
+    IF p_entity_id IS NULL OR NOT EXISTS (
+        SELECT FROM public.entities WHERE entity_id = p_entity_id
     ) THEN
         RAISE EXCEPTION 'Entity not found: %', p_entity_id;
     END IF;
-
-    v_source_name := left(
-        coalesce(
-            nullif(btrim(p_payload->>'source_name'), ''),
-            nullif(btrim(p_payload->>'publisher'), ''),
-            nullif(btrim(p_payload->>'source'), ''),
-            nullif(btrim(p_payload->>'provider'), ''),
-            'UNKNOWN'
-        ),
-        100
-    );
-
-    v_title := coalesce(
-        nullif(btrim(p_payload->>'headline'), ''),
-        nullif(btrim(p_payload->>'title'), '')
-    );
-
-    v_summary := nullif(
-        btrim(p_payload->>'summary'),
-        ''
-    );
-
-    v_url := coalesce(
-        nullif(btrim(p_payload->>'url'), ''),
-        nullif(btrim(p_payload->>'link'), '')
-    );
-
+    v_source_name := left(coalesce(
+        nullif(btrim(p_payload->>'source_name'), ''),
+        nullif(btrim(p_payload->>'publisher'), ''),
+        nullif(btrim(p_payload->>'source'), ''),
+        nullif(btrim(p_payload->>'provider'), ''), 'UNKNOWN'
+    ), 100);
+    v_title := coalesce(nullif(btrim(p_payload->>'headline'), ''),
+                        nullif(btrim(p_payload->>'title'), ''));
+    IF v_title IS NULL THEN
+        RAISE EXCEPTION 'News title/headline is required';
+    END IF;
+    v_url := coalesce(nullif(btrim(p_payload->>'url'), ''),
+                      nullif(btrim(p_payload->>'link'), ''));
     v_published_at := coalesce(
         nullif(p_payload->>'published_at', '')::timestamptz,
         nullif(p_payload->>'publishedAt', '')::timestamptz,
         nullif(p_payload->>'date', '')::timestamptz
     );
-
-    IF v_title IS NULL THEN
-        RAISE EXCEPTION 'News title/headline is required';
-    END IF;
-
-    /*
-     * Preferisce una chiave sorgente stabile quando presente.
-     * In assenza di external_id, utilizza URL e contenuto normalizzato.
-     */
-    v_content_hash := encode(
-        digest(
-            concat_ws(
-                '|',
-                lower(v_source_name),
-                coalesce(
-                    nullif(btrim(p_payload->>'external_id'), ''),
-                    nullif(btrim(p_payload->>'id'), ''),
-                    ''
-                ),
-                coalesce(lower(v_url), ''),
-                lower(v_title),
-                coalesce(v_published_at::text, '')
-            ),
-            'sha256'
-        ),
-        'hex'
+    v_key := encode(sha256(convert_to(jsonb_build_array(
+        lower(v_source_name), coalesce(
+            nullif(btrim(p_payload->>'external_id'), ''),
+            nullif(btrim(p_payload->>'id'), ''), v_url,
+            jsonb_build_array(lower(v_title), v_published_at)::text
+        )
+    )::text, 'UTF8')), 'hex');
+    PERFORM pg_advisory_xact_lock(hashtextextended('news:' || lower(v_source_name), 0));
+    SELECT * INTO v_previous FROM public.event_lake_latest
+    WHERE event_type = 'NEWS_ARTICLE' AND stage = 'ACQUIRED'
+      AND source = v_source_name
+      AND (event_key = v_key OR (v_url IS NOT NULL AND payload->>'url' = v_url)
+           OR (coalesce(nullif(p_payload->>'external_id', ''), nullif(p_payload->>'id', ''))
+               IS NOT NULL AND source_event_id = coalesce(
+                   nullif(p_payload->>'external_id', ''), nullif(p_payload->>'id', ''))))
+    ORDER BY created_at DESC, revision DESC, event_id LIMIT 1;
+    v_inserted := NOT FOUND;
+    v_key := coalesce(v_previous.event_key, v_key);
+    v_news_id := coalesce((v_previous.payload->>'news_id')::uuid, gen_random_uuid());
+    INSERT INTO public.news_sources(name) VALUES (v_source_name)
+    ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name
+    RETURNING source_id INTO v_source_id;
+    v_payload := coalesce(v_previous.payload, '{}'::jsonb) || jsonb_build_object(
+        'news_id', v_news_id, 'source_id', v_source_id, 'headline', v_title,
+        'summary', coalesce(nullif(btrim(p_payload->>'summary'), ''), v_previous.payload->>'summary'),
+        'url', coalesce(v_url, v_previous.payload->>'url'),
+        'content_hash', coalesce(v_previous.payload->>'content_hash', v_key)
     );
-
-    INSERT INTO public.news_sources (
-        name
-    )
-    VALUES (
-        v_source_name
-    )
-    ON CONFLICT (name)
-    DO UPDATE SET
-        name = EXCLUDED.name
-    RETURNING source_id
-    INTO v_source_id;
-
-    INSERT INTO public.news (
-        source_id,
-        title,
-        summary,
-        url,
-        content_hash,
-        published_at,
-        raw_json
-    )
-    VALUES (
-        v_source_id,
-        v_title,
-        v_summary,
-        v_url,
-        v_content_hash,
-        v_published_at,
-        p_payload
-    )
-    ON CONFLICT (content_hash)
-    DO NOTHING
-    RETURNING news_id
-    INTO v_news_id;
-
-    IF v_news_id IS NOT NULL THEN
-        v_news_inserted := true;
-    ELSE
-        SELECT n.news_id
-        INTO v_news_id
-        FROM public.news n
-        WHERE n.content_hash = v_content_hash;
+    v_article_event_id := public.sp_save_event(jsonb_build_object(
+        'schema_version', 1, 'payload_version', 1, 'event_type', 'NEWS_ARTICLE',
+        'stage', 'ACQUIRED', 'source', v_source_name, 'event_key', v_key,
+        'source_event_id', coalesce(nullif(p_payload->>'external_id', ''),
+                                    nullif(p_payload->>'id', ''), v_previous.source_event_id),
+        'occurred_at', coalesce(v_published_at, v_previous.occurred_at),
+        'subjects', jsonb_build_array(jsonb_build_object('entity_id', p_entity_id)),
+        'parent_event_ids', '[]'::jsonb,
+        'payload', v_payload,
+        'raw_payload', coalesce(v_previous.raw_payload, '{}'::jsonb) || p_payload,
+        'evidence', '{}'::jsonb, 'provenance', '{}'::jsonb
+    ));
+    SELECT (association.payload->>'news_entity_id')::uuid INTO v_news_entity_id
+    FROM public.event_lake_latest association
+    WHERE association.event_type = 'NEWS_ASSOCIATION' AND association.stage = 'ACQUIRED'
+      AND (association.payload->>'news_id')::uuid = v_news_id
+      AND association.entity_id = p_entity_id;
+    v_association_inserted := NOT FOUND;
+    IF v_association_inserted THEN
+        v_news_entity_id := gen_random_uuid();
+        PERFORM public.sp_save_event(jsonb_build_object(
+            'schema_version', 1, 'payload_version', 1, 'event_type', 'NEWS_ASSOCIATION',
+            'stage', 'ACQUIRED', 'source', 'NEWS_INGESTION',
+            'event_key', v_news_entity_id::text,
+            'subjects', jsonb_build_array(jsonb_build_object('entity_id', p_entity_id)),
+            'parent_event_ids', jsonb_build_array(v_article_event_id),
+            'payload', jsonb_build_object('news_entity_id', v_news_entity_id,
+                'news_id', v_news_id, 'entity_id', p_entity_id,
+                'relevance', nullif(p_payload->>'relevance', '')::numeric,
+                'sentiment', nullif(p_payload->>'sentiment', '')::numeric,
+                'impact', nullif(p_payload->>'impact', '')::numeric),
+            'evidence', '{}'::jsonb, 'provenance', '{}'::jsonb
+        ));
     END IF;
-
-    IF v_news_id IS NULL THEN
-        RAISE EXCEPTION
-            'Unable to resolve news row for content hash %',
-            v_content_hash;
-    END IF;
-
-    /*
-     * Se la notizia esisteva già, aggiorna soltanto i dati integrativi
-     * senza cancellare valori già presenti con valori nulli.
-     */
-    IF NOT v_news_inserted THEN
-        UPDATE public.news n
-        SET
-            source_id = coalesce(n.source_id, v_source_id),
-            title = coalesce(nullif(v_title, ''), n.title),
-            summary = coalesce(v_summary, n.summary),
-            url = coalesce(v_url, n.url),
-            published_at = coalesce(v_published_at, n.published_at),
-            raw_json =
-                coalesce(n.raw_json, '{}'::jsonb)
-                || coalesce(p_payload, '{}'::jsonb)
-        WHERE n.news_id = v_news_id;
-    END IF;
-
-    INSERT INTO public.news_entities (
-        news_id,
-        entity_id,
-        relevance,
-        sentiment,
-        impact
-    )
-    VALUES (
-        v_news_id,
-        p_entity_id,
-        nullif(p_payload->>'relevance', '')::numeric,
-        nullif(p_payload->>'sentiment', '')::numeric,
-        nullif(p_payload->>'impact', '')::numeric
-    )
-    ON CONFLICT (news_id, entity_id)
-    DO NOTHING;
-
-    v_association_inserted := FOUND;
-
-    RETURN jsonb_build_object(
-        'news_id', v_news_id,
-        'inserted', v_news_inserted,
-        'updated', NOT v_news_inserted,
-        'association_inserted', v_association_inserted,
-        'associations_inserted',
-            CASE
-                WHEN v_association_inserted THEN 1
-                ELSE 0
-            END,
-        'content_hash', v_content_hash
-    );
+    RETURN jsonb_build_object('news_id', v_news_id, 'inserted', v_inserted,
+        'updated', NOT v_inserted, 'association_inserted', v_association_inserted,
+        'associations_inserted', CASE WHEN v_association_inserted THEN 1 ELSE 0 END,
+        'content_hash', v_payload->>'content_hash');
 END;
 $$;
 
@@ -9385,67 +9937,394 @@ $$;
 --
 
 CREATE FUNCTION public.sp_resolve_user_notification_target(p_user_id uuid, p_notification_type character varying, p_severity character varying, p_fallback_channel character varying DEFAULT 'TELEGRAM'::character varying) RETURNS TABLE(source_id uuid, channel character varying, resolution_status character varying)
+    LANGUAGE sql STABLE
+    AS $$
+    SELECT * FROM public.sp_resolve_user_notification_target(
+        p_user_id, p_notification_type, p_severity, p_fallback_channel, NULL::uuid
+    );
+$$;
+
+
+--
+-- Name: sp_resolve_user_notification_target(uuid, character varying, character varying, character varying, uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_resolve_user_notification_target(p_user_id uuid, p_notification_type character varying, p_severity character varying, p_fallback_channel character varying, p_source_id uuid) RETURNS TABLE(source_id uuid, channel character varying, resolution_status character varying)
     LANGUAGE plpgsql STABLE
     AS $$
 DECLARE
-    v_subscription public.notification_subscriptions%ROWTYPE;
+    v_delivery record;
     v_source public.user_sources%ROWTYPE;
-    v_severity_rank integer;
-    v_minimum_rank integer;
 BEGIN
-    SELECT ns.*
-    INTO v_subscription
-    FROM public.notification_subscriptions ns
-    WHERE ns.user_id = p_user_id
-      AND ns.portfolio_id IS NULL
-      AND UPPER(ns.event_type) = UPPER(p_notification_type)
-    LIMIT 1;
-
-    IF FOUND THEN
-        IF NOT v_subscription.enabled THEN
-            RETURN QUERY SELECT NULL::uuid, NULL::varchar, 'PREFERENCE_DISABLED'::varchar;
-            RETURN;
-        END IF;
-
-        v_severity_rank := CASE UPPER(COALESCE(p_severity, 'LOW'))
-            WHEN 'CRITICAL' THEN 4 WHEN 'HIGH' THEN 3
-            WHEN 'MEDIUM' THEN 2 ELSE 1 END;
-        v_minimum_rank := CASE UPPER(COALESCE(v_subscription.severity_min, 'LOW'))
-            WHEN 'CRITICAL' THEN 4 WHEN 'HIGH' THEN 3
-            WHEN 'MEDIUM' THEN 2 ELSE 1 END;
-
-        IF v_severity_rank < v_minimum_rank THEN
-            RETURN QUERY SELECT NULL::uuid, NULL::varchar, 'PREFERENCE_DISABLED'::varchar;
-            RETURN;
-        END IF;
-
-        SELECT us.*
-        INTO v_source
-        FROM public.user_sources us
-        WHERE us.source_id = v_subscription.source_id
-          AND us.user_id = p_user_id
-          AND COALESCE((us.config->>'enabled')::boolean, true) = true;
-    ELSE
-        SELECT us.*
-        INTO v_source
-        FROM public.user_sources us
-        WHERE us.user_id = p_user_id
-          AND UPPER(us.source_type) = UPPER(p_fallback_channel)
-          AND COALESCE((us.config->>'enabled')::boolean, true) = true
-        ORDER BY us.created_at DESC
-        LIMIT 1;
+    SELECT * INTO v_delivery FROM public.sp_get_user_notification_delivery(p_user_id);
+    IF v_delivery.paused THEN
+        RETURN QUERY SELECT NULL::uuid, NULL::varchar, 'PAUSED'::varchar;
+        RETURN;
     END IF;
+
+    IF UPPER(p_notification_type) = 'SCREENER_SUMMARY' AND NOT EXISTS (
+        SELECT 1 FROM public.notification_subscriptions ns
+        WHERE ns.user_id = p_user_id AND ns.portfolio_id IS NULL
+          AND UPPER(ns.event_type) = 'SCREENER_SUMMARY' AND ns.enabled
+    ) THEN
+        RETURN QUERY SELECT NULL::uuid, NULL::varchar, 'PREFERENCE_DISABLED'::varchar;
+        RETURN;
+    END IF;
+
+    SELECT us.* INTO v_source
+    FROM public.user_sources us
+    WHERE us.user_id = p_user_id
+      AND us.source_id = COALESCE(p_source_id, v_delivery.default_source_id)
+      AND COALESCE((us.config->>'enabled')::boolean, true);
 
     IF v_source.source_id IS NULL THEN
         RETURN QUERY SELECT NULL::uuid, NULL::varchar, 'SOURCE_NOT_FOUND'::varchar;
         RETURN;
     END IF;
 
-    RETURN QUERY SELECT
-        v_source.source_id,
-        UPPER(v_source.source_type)::varchar,
-        'RESOLVED'::varchar;
+    RETURN QUERY SELECT v_source.source_id, UPPER(v_source.source_type)::varchar, 'RESOLVED'::varchar;
 END;
+$$;
+
+
+--
+-- Name: sp_save_collection_intelligence(uuid, text, uuid, text[]); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_save_collection_intelligence(p_user_id uuid, p_collection_type text, p_collection_id uuid, p_categories text[]) RETURNS boolean
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM public.sp_list_monitoring_collections(p_user_id) c
+        WHERE c.collection_type = p_collection_type AND c.collection_id = p_collection_id
+    ) THEN
+        RETURN false;
+    END IF;
+    INSERT INTO public.collection_intelligence_subscriptions
+        (user_id, collection_type, collection_id, enabled_categories)
+    VALUES (p_user_id, p_collection_type, p_collection_id, p_categories)
+    ON CONFLICT (user_id, collection_type, collection_id) DO UPDATE
+        SET enabled_categories = EXCLUDED.enabled_categories, updated_at = now();
+    RETURN true;
+END
+$$;
+
+
+--
+-- Name: sp_save_event(jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_save_event(p_envelope jsonb) RETURNS uuid
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    SET "TimeZone" TO 'UTC'
+    SET "DateStyle" TO 'ISO, YMD'
+    AS $_$
+DECLARE
+    v_type public.event_type_catalog%ROWTYPE;
+    v_previous public.event_lake%ROWTYPE;
+    v_event_id uuid;
+    v_field record;
+    v_event_type text := p_envelope->>'event_type';
+    v_stage text := p_envelope->>'stage';
+    v_source text := p_envelope->>'source';
+    v_key text := p_envelope->>'event_key';
+    v_payload_version integer := (p_envelope->>'payload_version')::integer;
+    v_occurred_at timestamptz := (p_envelope->>'occurred_at')::timestamptz;
+    v_event_day date := (p_envelope->>'event_day')::date;
+    v_observed_at timestamptz := coalesce(
+        (p_envelope->>'observed_at')::timestamptz, clock_timestamp()
+    );
+    v_parents uuid[];
+    v_subjects jsonb;
+    v_subject jsonb;
+    v_entity_id uuid;
+    v_entity_ids uuid[];
+    v_resolved_subjects jsonb := '[]'::jsonb;
+    v_child_event_id uuid;
+    v_payload jsonb := p_envelope->'payload';
+    v_semantic jsonb;
+    v_hash text;
+BEGIN
+    IF jsonb_typeof(p_envelope) IS DISTINCT FROM 'object'
+        OR (p_envelope->>'schema_version')::integer IS DISTINCT FROM 1
+        OR nullif(btrim(v_source), '') IS NULL
+        OR nullif(btrim(v_key), '') IS NULL
+        OR v_stage IS NULL
+        OR v_stage NOT IN ('ACQUIRED', 'ENRICHED', 'VALIDATED') THEN
+        RAISE EXCEPTION 'Invalid event envelope';
+    END IF;
+    SELECT * INTO v_type
+    FROM public.event_type_catalog
+    WHERE event_type = v_event_type AND payload_version = v_payload_version;
+    IF NOT FOUND OR NOT v_stage = ANY(v_type.allowed_stages) THEN
+        RAISE EXCEPTION 'Unregistered event type/version or stage: %/%/%',
+            v_event_type, v_payload_version, v_stage;
+    END IF;
+    FOREACH v_source IN ARRAY ARRAY['payload', 'evidence', 'provenance'] LOOP
+        IF jsonb_typeof(p_envelope->v_source) IS DISTINCT FROM 'object' THEN
+            RAISE EXCEPTION '% must be an object', v_source;
+        END IF;
+    END LOOP;
+    v_source := p_envelope->>'source';
+    IF jsonb_typeof(p_envelope->'subjects') IS DISTINCT FROM 'array'
+        OR jsonb_typeof(p_envelope->'parent_event_ids') IS DISTINCT FROM 'array'
+        OR (p_envelope->'raw_payload' <> 'null'::jsonb
+            AND jsonb_typeof(p_envelope->'raw_payload') <> 'object') THEN
+        RAISE EXCEPTION 'Invalid subjects, parents or raw payload';
+    END IF;
+    IF EXISTS (
+        SELECT FROM jsonb_array_elements(p_envelope->'subjects') AS subject(value)
+        WHERE jsonb_typeof(value) <> 'object'
+    ) THEN
+        RAISE EXCEPTION 'Subjects must be objects';
+    END IF;
+    FOR v_field IN SELECT * FROM jsonb_each_text(v_type.required_payload_types) LOOP
+        IF jsonb_typeof(p_envelope->'payload'->v_field.key)
+            IS DISTINCT FROM v_field.value THEN
+            RAISE EXCEPTION 'Invalid % payload field %: expected %',
+                v_event_type, v_field.key, v_field.value;
+        END IF;
+    END LOOP;
+    IF (p_envelope->>'occurred_at') IS NOT NULL
+        AND (p_envelope->>'occurred_at') !~ '(Z|[+-][0-9]{2}:[0-9]{2})$'
+        OR (p_envelope->>'observed_at') IS NOT NULL
+        AND (p_envelope->>'observed_at') !~ '(Z|[+-][0-9]{2}:[0-9]{2})$' THEN
+        RAISE EXCEPTION 'Instants require an explicit UTC offset';
+    END IF;
+    IF v_event_type IN ('CATALYST', 'FILING')
+       AND p_envelope->'provenance'->>'legacy_table' IS NULL THEN
+        FOR v_subject IN
+            SELECT value FROM jsonb_array_elements(
+                CASE WHEN jsonb_array_length(p_envelope->'subjects') = 0
+                     THEN '[{}]'::jsonb ELSE p_envelope->'subjects' END
+            )
+        LOOP
+            IF v_event_type = 'CATALYST' THEN
+                v_entity_id := public.sp_event_resolve_catalyst_entity(
+                    (v_subject->>'entity_id')::uuid, v_subject->>'symbol'
+                );
+            ELSE
+                v_entity_id := public.sp_event_resolve_filing_entity(
+                    v_subject->>'symbol', p_envelope->'payload'->>'cik'
+                );
+            END IF;
+            v_resolved_subjects := v_resolved_subjects || jsonb_build_array(
+                v_subject || jsonb_build_object('entity_id', v_entity_id)
+            );
+        END LOOP;
+        p_envelope := jsonb_set(p_envelope, '{subjects}', v_resolved_subjects);
+    END IF;
+    SELECT array_agg(DISTINCT (value->>'entity_id')::uuid
+                     ORDER BY (value->>'entity_id')::uuid)
+    INTO v_entity_ids
+    FROM jsonb_array_elements(p_envelope->'subjects')
+    WHERE value->>'entity_id' IS NOT NULL;
+    IF cardinality(v_entity_ids) > 1 THEN
+        FOREACH v_entity_id IN ARRAY v_entity_ids LOOP
+            SELECT jsonb_agg(value ORDER BY value) INTO v_subjects
+            FROM jsonb_array_elements(p_envelope->'subjects')
+            WHERE value->>'entity_id' IS NULL
+               OR (value->>'entity_id')::uuid = v_entity_id;
+            v_child_event_id := public.sp_save_event(
+                jsonb_set(p_envelope, '{subjects}', v_subjects)
+            );
+            v_event_id := coalesce(v_event_id, v_child_event_id);
+        END LOOP;
+        RETURN v_event_id;
+    END IF;
+    v_entity_id := v_entity_ids[1];
+    SELECT coalesce(jsonb_agg(value ORDER BY value), '[]'::jsonb)
+    INTO v_subjects
+    FROM (
+        SELECT DISTINCT value FROM jsonb_array_elements(p_envelope->'subjects')
+    ) AS subjects;
+    SELECT coalesce(array_agg(DISTINCT value::uuid ORDER BY value::uuid), '{}'::uuid[])
+    INTO v_parents
+    FROM jsonb_array_elements_text(p_envelope->'parent_event_ids');
+    IF EXISTS (
+        SELECT FROM unnest(v_parents) AS parent(event_id)
+        WHERE NOT EXISTS (
+            SELECT FROM public.event_lake AS lake WHERE lake.event_id = parent.event_id
+        )
+    ) THEN
+        RAISE EXCEPTION 'Unknown parent event';
+    END IF;
+    IF v_event_type IN ('CATALYST', 'FILING')
+       AND p_envelope->'provenance'->>'legacy_table' IS NULL THEN
+        PERFORM pg_advisory_xact_lock(hashtextextended(
+            jsonb_build_array(v_event_type, v_stage, v_source)::text, 0
+        ));
+        SELECT * INTO v_previous FROM public.event_lake
+        WHERE event_type = v_event_type AND stage = v_stage AND source = v_source
+                    AND entity_id IS NOT DISTINCT FROM v_entity_id
+          AND (event_key = v_key OR (
+            v_event_type = 'FILING'
+            AND payload->>'cik' = v_payload->>'cik'
+            AND CASE WHEN nullif(p_envelope->>'source_event_id', '') IS NOT NULL
+                THEN source_event_id = p_envelope->>'source_event_id'
+                ELSE payload->>'filing_type' = v_payload->>'filing_type'
+                     AND occurred_at = v_occurred_at END
+          ) OR (
+            v_event_type = 'CATALYST'
+            AND upper(payload->>'subtype') = upper(v_payload->>'subtype')
+            AND CASE WHEN nullif(p_envelope->>'source_event_id', '') IS NOT NULL
+                THEN source_event_id = p_envelope->>'source_event_id'
+                WHEN p_envelope->'raw_payload'->>'fiscalYear' IS NOT NULL
+                     AND coalesce(p_envelope->'raw_payload'->>'fiscalQuarter',
+                                  p_envelope->'raw_payload'->>'fiscalPeriod') IS NOT NULL
+                THEN raw_payload->>'fiscalYear' = p_envelope->'raw_payload'->>'fiscalYear'
+                     AND coalesce(raw_payload->>'fiscalQuarter', raw_payload->>'fiscalPeriod') =
+                         coalesce(p_envelope->'raw_payload'->>'fiscalQuarter',
+                                  p_envelope->'raw_payload'->>'fiscalPeriod')
+                ELSE source_event_id IS NULL AND event_day = v_event_day END
+          ))
+        ORDER BY (event_key = v_key) DESC, created_at DESC, revision DESC, event_id LIMIT 1;
+        IF FOUND THEN
+            v_key := v_previous.event_key;
+            IF v_event_type = 'CATALYST' AND v_previous.payload ? 'catalyst_id' THEN
+                v_payload := v_payload || jsonb_build_object(
+                    'catalyst_id', v_previous.payload->'catalyst_id'
+                );
+            ELSIF v_event_type = 'FILING' AND v_previous.payload ? 'filing_id' THEN
+                v_payload := v_payload || jsonb_build_object(
+                    'filing_id', v_previous.payload->'filing_id',
+                    'created_at', v_previous.payload->'created_at'
+                );
+            END IF;
+        END IF;
+        p_envelope := jsonb_set(p_envelope, '{payload}', v_payload);
+    END IF;
+    v_semantic := jsonb_build_object(
+        'schema_version', 1, 'payload_version', v_payload_version,
+        'source_event_id', p_envelope->>'source_event_id',
+        'occurred_at', v_occurred_at, 'event_day', v_event_day,
+        'subjects', v_subjects, 'parent_event_ids', v_parents,
+        'payload', p_envelope->'payload', 'evidence', p_envelope->'evidence'
+    );
+    v_hash := encode(sha256(convert_to(v_semantic::text, 'UTF8')), 'hex');
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        jsonb_build_array(v_event_type, v_stage, v_source, v_key, v_entity_id)::text, 0
+    ));
+    SELECT * INTO v_previous
+    FROM public.event_lake
+    WHERE event_type = v_event_type AND stage = v_stage
+        AND source = v_source AND event_key = v_key
+        AND entity_id IS NOT DISTINCT FROM v_entity_id
+    ORDER BY revision DESC
+    LIMIT 1;
+    IF FOUND AND v_previous.content_hash = v_hash THEN
+        UPDATE public.event_lake
+        SET last_seen_at = clock_timestamp()
+        WHERE event_id = v_previous.event_id;
+        RETURN v_previous.event_id;
+    END IF;
+    INSERT INTO public.event_lake (
+        entity_id, schema_version, event_type, payload_version, stage, source, source_event_id,
+        event_key, revision, supersedes_event_id, content_hash,
+        occurred_at, event_day, observed_at, subjects, parent_event_ids,
+        payload, raw_payload, evidence, provenance
+    )
+    VALUES (
+        v_entity_id, 1, v_event_type, v_payload_version, v_stage, v_source,
+        p_envelope->>'source_event_id', v_key,
+        coalesce(v_previous.revision, 0) + 1, v_previous.event_id, v_hash,
+        v_occurred_at, v_event_day, v_observed_at, v_subjects, v_parents,
+        p_envelope->'payload', nullif(p_envelope->'raw_payload', 'null'::jsonb),
+        p_envelope->'evidence', p_envelope->'provenance'
+    )
+    RETURNING event_id INTO v_event_id;
+    RETURN v_event_id;
+END;
+$_$;
+
+
+--
+-- Name: sp_save_intelligence_event(text, text, uuid, uuid, text, jsonb, jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_save_intelligence_event(p_branch text, p_event_key text, p_entity_id uuid, p_instrument_id uuid, p_category text, p_payload jsonb, p_evidence jsonb) RETURNS void
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_key text;
+    v_day date;
+BEGIN
+    SELECT lake.event_key INTO v_key FROM public.event_lake_latest lake
+    WHERE lake.event_type = p_branch AND lake.stage = 'VALIDATED'
+      AND lake.source = 'COLLECTION_RESEARCH' AND lake.entity_id = p_entity_id
+      AND coalesce(lake.provenance->>'projection_event_key', lake.event_key) = p_event_key
+      AND lake.subjects->0->>'instrument_id' = p_instrument_id::text
+    ORDER BY lake.created_at DESC, lake.event_id LIMIT 1;
+    v_day := CASE WHEN p_branch = 'DAILY_MOVER' AND strpos(p_event_key, '|') > 0
+                  THEN split_part(p_event_key, '|', 2)::date
+                  ELSE nullif(p_payload->>'eventDate', '')::date END;
+    PERFORM public.sp_save_event(jsonb_build_object(
+        'schema_version', 1, 'payload_version', 1,
+        'event_type', p_branch, 'stage', 'VALIDATED',
+        'source', 'COLLECTION_RESEARCH', 'event_key', coalesce(v_key, p_event_key),
+        'event_day', v_day,
+        'parent_event_ids', '[]'::jsonb,
+        'subjects', jsonb_build_array(jsonb_build_object(
+            'entity_id', p_entity_id, 'instrument_id', p_instrument_id)),
+        'payload', p_payload - ARRAY['daysUntilEvent', 'eventKey', 'sources',
+            'relatedSymbols', 'name', 'symbol', 'entity_id', 'observedDate', 'marketEvidence'],
+        'raw_payload', p_payload,
+        'evidence', coalesce(p_evidence, '{}'::jsonb) - 'marketEvidence',
+        'provenance', jsonb_build_object('branch', p_branch,
+            'category', p_category, 'projection_event_key', p_event_key,
+            'marketEvidence', p_evidence->'marketEvidence')));
+END;
+$$;
+
+
+--
+-- Name: sp_save_user_notification_delivery(uuid, boolean, uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_save_user_notification_delivery(p_user_id uuid, p_paused boolean, p_source_id uuid) RETURNS boolean
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF p_paused IS NULL THEN
+        RAISE EXCEPTION 'Notification pause must be a boolean' USING ERRCODE = '22023';
+    END IF;
+
+    IF p_source_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM public.user_sources us
+        WHERE us.user_id = p_user_id AND us.source_id = p_source_id
+          AND COALESCE((us.config->>'enabled')::boolean, true)
+    ) THEN
+        RAISE EXCEPTION 'Enabled notification source does not belong to user'
+            USING ERRCODE = '22023';
+    END IF;
+
+    INSERT INTO public.user_notification_delivery (user_id, paused, default_source_id)
+    VALUES (p_user_id, p_paused, p_source_id)
+    ON CONFLICT (user_id) DO UPDATE
+    SET paused = EXCLUDED.paused,
+        default_source_id = EXCLUDED.default_source_id,
+        updated_at = now();
+    RETURN true;
+END;
+$$;
+
+
+--
+-- Name: sp_save_user_screener_summary_subscription(uuid, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_save_user_screener_summary_subscription(p_user_id uuid, p_enabled boolean) RETURNS boolean
+    LANGUAGE sql
+    AS $$
+    INSERT INTO public.notification_subscriptions (
+        user_id, portfolio_id, event_type, source_id, enabled, severity_min, config
+    )
+    VALUES (p_user_id, NULL, 'SCREENER_SUMMARY', NULL, p_enabled, NULL, '{}'::jsonb)
+    ON CONFLICT (user_id, event_type) WHERE portfolio_id IS NULL
+    DO UPDATE SET enabled = EXCLUDED.enabled, source_id = NULL, severity_min = NULL
+    RETURNING enabled;
 $$;
 
 
@@ -9797,6 +10676,15 @@ BEGIN
         error_message = 'Recovered orphaned run during scheduler startup'
     WHERE job_id = p_job_id AND status = 'RUNNING';
     GET DIAGNOSTICS v_recovered = ROW_COUNT;
+    UPDATE public.market_screener_runs screener
+    SET status = 'FAILED', completed_at = job_run.completed_at,
+        updated_at = now(), error_message = COALESCE(job_run.error_message,
+            'Analysis interrupted before completion')
+    FROM public.scheduler_job_runs job_run
+    WHERE screener.job_run_id = job_run.job_run_id
+      AND job_run.job_id = p_job_id AND screener.status = 'RUNNING'
+      AND job_run.status IN ('FAILED', 'SUCCESS', 'PARTIAL');
+
 
     UPDATE public.scheduler_manual_run_requests request
     SET status = 'FAILED', completed_at = now(),
@@ -10736,162 +11624,41 @@ CREATE FUNCTION public.sp_upsert_catalyst(p_entity_id uuid, p_symbol text, p_ent
     AS $$
 DECLARE
     v_entity_id uuid;
-    v_catalyst_id uuid;
-    v_catalyst_type varchar(50);
-    v_importance numeric;
-	v_catalyst_day date;
-    v_symbol text;
-    v_matching_entity_ids uuid[];
+    v_existing public.event_lake%ROWTYPE;
+    v_day date;
+    v_key text;
 BEGIN
-    v_symbol := upper(nullif(btrim(p_symbol), ''));
-
-    v_catalyst_type :=
-        CASE upper(coalesce(p_entity_subtype, ''))
-            WHEN 'QUARTERLY_EARNINGS' THEN 'EARNINGS'
-            WHEN 'EARNINGS' THEN 'EARNINGS'
-            WHEN 'CASH_DIVIDEND' THEN 'DIVIDEND'
-            WHEN 'DIVIDEND' THEN 'DIVIDEND'
-            WHEN 'STOCK_SPLIT' THEN 'SPLIT'
-            WHEN 'SPLIT' THEN 'SPLIT'
-            ELSE 'OTHER'
-        END;
-
-    v_importance :=
-        CASE upper(coalesce(p_importance, 'MEDIUM'))
-            WHEN 'HIGH' THEN 90
-            WHEN 'MEDIUM' THEN 50
-            WHEN 'LOW' THEN 10
-            ELSE 50
-        END;
-	v_catalyst_day :=
-	    COALESCE(
-	        NULLIF(
-	            p_payload->>'date',
-	            ''
-	        )::date,
-	        (p_entity_date AT TIME ZONE 'UTC')::date
-	    );
-    /*
-     * L'entity_id esplicito è sempre autorevole.
-     */
-    IF p_entity_id IS NOT NULL THEN
-        SELECT e.entity_id
-        INTO v_entity_id
-        FROM public.entities e
-        WHERE e.entity_id = p_entity_id
-          AND e.active = true;
-
-        IF v_entity_id IS NULL THEN
-            RAISE EXCEPTION
-                'Active entity not found: %',
-                p_entity_id;
-        END IF;
-
-        IF v_symbol IS NOT NULL
-           AND NOT EXISTS (
-               SELECT 1
-               FROM public.instruments i
-               WHERE i.entity_id = v_entity_id
-                 AND upper(btrim(i.symbol)) = v_symbol
-           )
-        THEN
-            RAISE EXCEPTION
-                'Symbol % does not belong to entity %',
-                p_symbol,
-                v_entity_id;
-        END IF;
-    ELSE
-        IF v_symbol IS NULL THEN
-            RAISE EXCEPTION
-                'Either p_entity_id or p_symbol is required';
-        END IF;
-
-        SELECT array_agg(
-            DISTINCT i.entity_id
-            ORDER BY i.entity_id
-        )
-        INTO v_matching_entity_ids
-        FROM public.instruments i
-        JOIN public.entities e
-          ON e.entity_id = i.entity_id
-        WHERE e.active = true
-          AND upper(btrim(i.symbol)) = v_symbol;
-
-        IF COALESCE(array_length(v_matching_entity_ids, 1), 0) = 0 THEN
-            RAISE EXCEPTION
-                'No entity found for symbol %',
-                p_symbol;
-        END IF;
-
-        IF array_length(v_matching_entity_ids, 1) > 1 THEN
-            RAISE EXCEPTION
-                'Symbol % resolves to multiple entities: %',
-                p_symbol,
-                v_matching_entity_ids;
-        END IF;
-
-        v_entity_id := v_matching_entity_ids[1];
-    END IF;
-
-	INSERT INTO public.catalysts (
-	    entity_id,
-	    catalyst_type,
-	    catalyst_day,
-	    catalyst_date,
-	    status,
-	    importance,
-	    title,
-	    source,
-	    raw_payload
-	)
-    VALUES (
-        v_entity_id,
-        v_catalyst_type,
-		v_catalyst_day,
-        p_entity_date,
-        p_entity_status,
-        v_importance,
-        p_title,
-        p_source,
-        COALESCE(p_payload, '{}'::jsonb)
-        || jsonb_strip_nulls(
-            jsonb_build_object(
-                'source_symbol', v_symbol,
-                'entity_id', v_entity_id
-            )
-        )
-    )
-	ON CONFLICT (
-		entity_id,
-		catalyst_type,
-		source,
-		catalyst_day
-	)
-    DO UPDATE SET
-	    catalyst_date = COALESCE(
-	        EXCLUDED.catalyst_date,
-	        public.catalysts.catalyst_date
-	    ),
-        status = EXCLUDED.status,
-        importance = GREATEST(
-            COALESCE(public.catalysts.importance, 0),
-            COALESCE(EXCLUDED.importance, 0)
-        ),
-        title = COALESCE(
-            NULLIF(EXCLUDED.title, ''),
-            public.catalysts.title
-        ),
-        source = COALESCE(
-            NULLIF(EXCLUDED.source, ''),
-            public.catalysts.source
-        ),
-        raw_payload =
-            COALESCE(public.catalysts.raw_payload, '{}'::jsonb)
-            || COALESCE(EXCLUDED.raw_payload, '{}'::jsonb)
-    RETURNING catalyst_id
-    INTO v_catalyst_id;
-
-    RETURN v_catalyst_id;
+    v_entity_id := public.sp_event_resolve_catalyst_entity(p_entity_id, p_symbol);
+    v_day := coalesce(nullif(p_payload->>'date', '')::date,
+                      (p_entity_date AT TIME ZONE 'UTC')::date);
+    SELECT lake.* INTO v_existing
+    FROM public.event_lake_latest lake
+    WHERE lake.event_type = 'CATALYST' AND lake.stage = 'ACQUIRED'
+      AND lake.entity_id = v_entity_id AND lake.source = p_source
+      AND lake.event_day = v_day AND lake.payload->>'subtype' = p_entity_subtype
+    ORDER BY lake.created_at DESC, lake.event_id LIMIT 1;
+    v_key := coalesce(v_existing.event_key,
+        encode(sha256(convert_to(jsonb_build_array(
+            v_entity_id, p_entity_subtype, v_day)::text, 'UTF8')), 'hex'));
+    PERFORM public.sp_save_event(jsonb_build_object(
+        'schema_version', 1, 'payload_version', 1,
+        'event_type', 'CATALYST', 'stage', 'ACQUIRED', 'source', p_source,
+        'event_key', v_key, 'occurred_at', p_entity_date, 'event_day', v_day,
+        'parent_event_ids', '[]'::jsonb, 'evidence', '{}'::jsonb,
+        'subjects', jsonb_build_array(jsonb_build_object(
+            'entity_id', v_entity_id, 'symbol', p_symbol)),
+        'payload', jsonb_strip_nulls(jsonb_build_object(
+            'catalyst_id', v_existing.payload->>'catalyst_id',
+            'subtype', p_entity_subtype, 'status', p_entity_status,
+            'importance', p_importance, 'title', p_title,
+            'details', coalesce(p_payload, '{}'::jsonb))),
+        'raw_payload', coalesce(p_payload, '{}'::jsonb),
+        'provenance', jsonb_build_object('writer', 'sp_upsert_catalyst')));
+    RETURN coalesce((v_existing.payload->>'catalyst_id')::uuid,
+        (SELECT event_id FROM public.event_lake
+         WHERE event_type = 'CATALYST' AND stage = 'ACQUIRED'
+           AND source = p_source AND event_key = v_key
+           AND entity_id = v_entity_id AND revision = 1));
 END;
 $$;
 
@@ -11052,175 +11819,38 @@ CREATE FUNCTION public.sp_upsert_filing(p_symbol text, p_filing_type text, p_cik
     AS $$
 DECLARE
     v_entity_id uuid;
-    v_cik_identity_type_id uuid;
-    v_cik_identity_id uuid;
-    v_normalized_cik text;
-    v_symbol text;
+    v_existing public.event_lake%ROWTYPE;
+    v_key text;
 BEGIN
-    v_symbol := nullif(upper(btrim(p_symbol)), '');
-    v_normalized_cik := nullif(regexp_replace(coalesce(p_cik, ''), '[^0-9]', '', 'g'), '');
-
-    ------------------------------------------------------------------
-    -- Resolve the entity by CIK first. A SEC filing identifies the
-    -- issuer, but does not provide enough listing metadata to create a
-    -- complete instrument (exchange and currency are unavailable).
-    ------------------------------------------------------------------
-    IF v_normalized_cik IS NOT NULL THEN
-        SELECT it.identity_type_id
-          INTO v_cik_identity_type_id
-          FROM public.identity_types it
-         WHERE upper(it.code) = 'CIK'
-           AND upper(it.target_kind) = 'ENTITY'
-         ORDER BY it.identity_type_id
-         LIMIT 1;
-
-        IF v_cik_identity_type_id IS NOT NULL THEN
-            SELECT ei.entity_id,
-                   identity_row.identity_id
-              INTO v_entity_id,
-                   v_cik_identity_id
-              FROM public.identities identity_row
-              JOIN public.entity_identities ei
-                ON ei.identity_id = identity_row.identity_id
-             WHERE identity_row.identity_type_id = v_cik_identity_type_id
-               AND identity_row.normalized_value = v_normalized_cik
-             ORDER BY ei.is_primary DESC,
-                      ei.verified_at DESC NULLS LAST,
-                      ei.created_at DESC
-             LIMIT 1;
-        END IF;
-    END IF;
-
-    ------------------------------------------------------------------
-    -- Fall back to an existing instrument symbol only when the CIK did
-    -- not already identify the entity.
-    ------------------------------------------------------------------
-    IF v_entity_id IS NULL AND v_symbol IS NOT NULL THEN
-        SELECT instrument.entity_id
-          INTO v_entity_id
-          FROM public.instruments instrument
-         WHERE upper(btrim(instrument.symbol)) = v_symbol
-         ORDER BY
-             (instrument.exchange IS NULL),
-             instrument.updated_at DESC NULLS LAST,
-             instrument.created_at DESC NULLS LAST,
-             instrument.instrument_id
-         LIMIT 1;
-    END IF;
-
-    ------------------------------------------------------------------
-    -- Create only the issuer entity when it is still unknown. Do not
-    -- create an incomplete instrument from a filing feed.
-    ------------------------------------------------------------------
-    IF v_entity_id IS NULL THEN
-        INSERT INTO public.entities (
-            name,
-            entity_type
-        )
-        VALUES (
-            coalesce(v_symbol, v_normalized_cik, 'UNKNOWN SEC ISSUER'),
-            'COMPANY'
-        )
-        RETURNING entity_id
-             INTO v_entity_id;
-    END IF;
-
-    ------------------------------------------------------------------
-    -- Persist the CIK identity when the identity type exists and this
-    -- CIK is not yet linked. The explicit existence checks avoid
-    -- depending on undocumented conflict targets.
-    ------------------------------------------------------------------
-    IF v_cik_identity_type_id IS NOT NULL
-       AND v_normalized_cik IS NOT NULL
-       AND v_cik_identity_id IS NULL THEN
-        SELECT identity_row.identity_id
-          INTO v_cik_identity_id
-          FROM public.identities identity_row
-         WHERE identity_row.identity_type_id = v_cik_identity_type_id
-           AND identity_row.normalized_value = v_normalized_cik
-         LIMIT 1;
-
-        IF v_cik_identity_id IS NULL THEN
-            INSERT INTO public.identities (
-                identity_type_id,
-                identity_value,
-                normalized_value
-            )
-            VALUES (
-                v_cik_identity_type_id,
-                coalesce(nullif(btrim(p_cik), ''), v_normalized_cik),
-                v_normalized_cik
-            )
-            RETURNING identity_id
-                 INTO v_cik_identity_id;
-        END IF;
-
-        IF NOT EXISTS (
-            SELECT 1
-              FROM public.entity_identities ei
-             WHERE ei.entity_id = v_entity_id
-               AND ei.identity_id = v_cik_identity_id
-        ) THEN
-            INSERT INTO public.entity_identities (
-                entity_id,
-                identity_id,
-                is_primary,
-                verified_at
-            )
-            VALUES (
-                v_entity_id,
-                v_cik_identity_id,
-                NOT EXISTS (
-                    SELECT 1
-                      FROM public.entity_identities existing_identity
-                     WHERE existing_identity.entity_id = v_entity_id
-                ),
-                now()
-            );
-        END IF;
-    END IF;
-
-    ------------------------------------------------------------------
-    -- Upsert the filing at entity level.
-    ------------------------------------------------------------------
-    INSERT INTO public.filings (
-        entity_id,
-        filing_type,
-        filing_subtype,
-        filing_date,
-        accepted_at,
-        cik,
-        accession_number,
-        title,
-        source,
-        raw_payload
-    )
-    VALUES (
-        v_entity_id,
-        p_filing_type,
-        p_filing_subtype,
-        p_filing_date,
-        p_accepted_at,
-        p_cik,
-        p_accession_number,
-        p_title,
-        p_source,
-        p_raw_payload
-    )
-    ON CONFLICT (
-        cik,
-        accepted_at,
-        filing_type
-    )
-    DO UPDATE
-       SET entity_id        = EXCLUDED.entity_id,
-           filing_subtype   = EXCLUDED.filing_subtype,
-           filing_date      = EXCLUDED.filing_date,
-           accession_number = EXCLUDED.accession_number,
-           title            = EXCLUDED.title,
-           source           = EXCLUDED.source,
-           raw_payload      = EXCLUDED.raw_payload;
-
+    v_entity_id := public.sp_event_resolve_filing_entity(p_symbol, p_cik);
+    SELECT lake.* INTO v_existing FROM public.event_lake_latest lake
+    WHERE lake.event_type = 'FILING' AND lake.stage = 'ACQUIRED'
+      AND lake.source = p_source AND lake.entity_id = v_entity_id
+      AND lake.payload->>'cik' = p_cik
+      AND lake.payload->>'filing_type' = p_filing_type
+      AND lake.occurred_at = p_accepted_at
+    ORDER BY lake.created_at DESC, lake.event_id LIMIT 1;
+    v_key := coalesce(v_existing.event_key,
+        encode(sha256(convert_to(jsonb_build_array(p_cik,
+            coalesce(p_accession_number,
+                jsonb_build_array(p_filing_type, p_accepted_at)::text))::text,
+            'UTF8')), 'hex'));
+    PERFORM public.sp_save_event(jsonb_build_object(
+        'schema_version', 1, 'payload_version', 1,
+        'event_type', 'FILING', 'stage', 'ACQUIRED', 'source', p_source,
+        'event_key', v_key, 'source_event_id', p_accession_number,
+        'occurred_at', p_accepted_at, 'event_day', p_filing_date,
+        'parent_event_ids', '[]'::jsonb, 'evidence', '{}'::jsonb,
+        'subjects', jsonb_build_array(jsonb_build_object(
+            'entity_id', v_entity_id, 'symbol', p_symbol, 'cik', p_cik)),
+        'payload', jsonb_strip_nulls(jsonb_build_object(
+            'filing_id', v_existing.payload->>'filing_id',
+            'filing_type', p_filing_type, 'filing_subtype', p_filing_subtype,
+            'cik', p_cik, 'accepted_at', p_accepted_at,
+            'accession_number', p_accession_number, 'title', p_title,
+            'created_at', v_existing.payload->>'created_at')),
+        'raw_payload', coalesce(p_raw_payload, '{}'::jsonb),
+        'provenance', jsonb_build_object('writer', 'sp_upsert_filing')));
     RETURN v_entity_id;
 END;
 $$;
@@ -12133,32 +12763,17 @@ CREATE TABLE public.cache_portfolio_theme_exposure (
 
 
 --
--- Name: catalyst_history; Type: TABLE; Schema: public; Owner: -
+-- Name: collection_intelligence_subscriptions; Type: TABLE; Schema: public; Owner: -
 --
 
-CREATE TABLE public.catalyst_history (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    catalyst_id uuid,
-    previous_status character varying(30),
-    new_status character varying(30)
-);
-
-
---
--- Name: catalysts; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.catalysts (
-    catalyst_id uuid DEFAULT gen_random_uuid() NOT NULL,
-    entity_id uuid,
-    catalyst_type character varying(50),
-    catalyst_date timestamp with time zone,
-    status character varying(30),
-    importance numeric,
-    title text,
-    source character varying(50),
-    raw_payload jsonb,
-    catalyst_day date NOT NULL
+CREATE TABLE public.collection_intelligence_subscriptions (
+    user_id uuid NOT NULL,
+    collection_type text NOT NULL,
+    collection_id uuid NOT NULL,
+    enabled_categories text[] DEFAULT '{}'::text[] CONSTRAINT collection_intelligence_subscriptio_enabled_categories_not_null NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT collection_intelligence_subscriptions_collection_type_check CHECK ((collection_type = ANY (ARRAY['PORTFOLIO'::text, 'WATCHLIST'::text, 'UNIVERSE'::text]))),
+    CONSTRAINT collection_intelligence_subscriptions_enabled_categories_check CHECK ((enabled_categories <@ ARRAY['DAILY_MOVER'::text, 'UPCOMING_CATALYST'::text, 'BREAKING_CATALYST'::text, 'NEWS'::text]))
 );
 
 
@@ -12318,6 +12933,101 @@ CREATE TABLE public.etf_constituents (
 
 
 --
+-- Name: event_lake; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.event_lake (
+    event_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    schema_version integer NOT NULL,
+    event_type text NOT NULL,
+    payload_version integer NOT NULL,
+    stage text NOT NULL,
+    source text NOT NULL,
+    source_event_id text,
+    event_key text NOT NULL,
+    revision integer NOT NULL,
+    supersedes_event_id uuid,
+    content_hash text NOT NULL,
+    occurred_at timestamp with time zone,
+    event_day date,
+    observed_at timestamp with time zone NOT NULL,
+    ingested_at timestamp with time zone NOT NULL,
+    subjects jsonb NOT NULL,
+    parent_event_ids uuid[] DEFAULT '{}'::uuid[] NOT NULL,
+    payload jsonb NOT NULL,
+    raw_payload jsonb,
+    evidence jsonb NOT NULL,
+    provenance jsonb NOT NULL,
+    created_at timestamp with time zone NOT NULL,
+    updated_at timestamp with time zone NOT NULL,
+    last_seen_at timestamp with time zone NOT NULL,
+    entity_id uuid,
+    CONSTRAINT event_lake_check CHECK (((revision = 1) = (supersedes_event_id IS NULL))),
+    CONSTRAINT event_lake_content_hash_check CHECK ((content_hash ~ '^[a-f0-9]{64}$'::text)),
+    CONSTRAINT event_lake_event_key_check CHECK ((btrim(event_key) <> ''::text)),
+    CONSTRAINT event_lake_evidence_check CHECK ((jsonb_typeof(evidence) = 'object'::text)),
+    CONSTRAINT event_lake_payload_check CHECK ((jsonb_typeof(payload) = 'object'::text)),
+    CONSTRAINT event_lake_provenance_check CHECK ((jsonb_typeof(provenance) = 'object'::text)),
+    CONSTRAINT event_lake_raw_payload_check CHECK ((jsonb_typeof(raw_payload) = 'object'::text)),
+    CONSTRAINT event_lake_revision_check CHECK ((revision > 0)),
+    CONSTRAINT event_lake_schema_version_check CHECK ((schema_version = 1)),
+    CONSTRAINT event_lake_source_check CHECK ((btrim(source) <> ''::text)),
+    CONSTRAINT event_lake_stage_check CHECK ((stage = ANY (ARRAY['ACQUIRED'::text, 'ENRICHED'::text, 'VALIDATED'::text]))),
+    CONSTRAINT event_lake_subjects_check CHECK ((jsonb_typeof(subjects) = 'array'::text))
+);
+
+
+--
+-- Name: event_lake_latest; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.event_lake_latest AS
+ SELECT DISTINCT ON (event_type, stage, source, event_key, entity_id) event_id,
+    schema_version,
+    event_type,
+    payload_version,
+    stage,
+    source,
+    source_event_id,
+    event_key,
+    revision,
+    supersedes_event_id,
+    content_hash,
+    occurred_at,
+    event_day,
+    observed_at,
+    ingested_at,
+    subjects,
+    parent_event_ids,
+    payload,
+    raw_payload,
+    evidence,
+    provenance,
+    created_at,
+    updated_at,
+    last_seen_at,
+    entity_id
+   FROM public.event_lake
+  ORDER BY event_type, stage, source, event_key, entity_id, revision DESC;
+
+
+--
+-- Name: event_type_catalog; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.event_type_catalog (
+    event_type text NOT NULL,
+    payload_version integer NOT NULL,
+    allowed_stages text[] NOT NULL,
+    required_payload_types jsonb NOT NULL,
+    CONSTRAINT event_type_catalog_allowed_stages_check CHECK ((cardinality(allowed_stages) > 0)),
+    CONSTRAINT event_type_catalog_event_type_check CHECK ((btrim(event_type) <> ''::text)),
+    CONSTRAINT event_type_catalog_payload_version_check CHECK ((payload_version > 0)),
+    CONSTRAINT event_type_catalog_required_payload_types_check CHECK ((jsonb_typeof(required_payload_types) = 'object'::text))
+);
+
+
+--
 -- Name: exchange_holiday_snapshots; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -12407,26 +13117,6 @@ CREATE TABLE public.external_systems (
     active boolean DEFAULT true NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL
-);
-
-
---
--- Name: filings; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.filings (
-    filing_id uuid DEFAULT gen_random_uuid() NOT NULL,
-    entity_id uuid NOT NULL,
-    filing_type character varying(20) NOT NULL,
-    filing_date date,
-    accepted_at timestamp with time zone,
-    cik character varying(20),
-    accession_number character varying(50),
-    title text,
-    source character varying(50),
-    raw_payload jsonb,
-    created_at timestamp with time zone DEFAULT now(),
-    filing_subtype character varying(50)
 );
 
 
@@ -13006,62 +13696,6 @@ CREATE TABLE public.market_universes (
 
 
 --
--- Name: news; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.news (
-    news_id uuid DEFAULT gen_random_uuid() NOT NULL,
-    cluster_id uuid,
-    source_id uuid,
-    title text,
-    summary text,
-    url text,
-    content_hash character varying(64),
-    published_at timestamp with time zone,
-    raw_json jsonb
-);
-
-
---
--- Name: news_clusters; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.news_clusters (
-    cluster_id uuid DEFAULT gen_random_uuid() NOT NULL,
-    title text,
-    created_at timestamp with time zone DEFAULT now()
-);
-
-
---
--- Name: news_entities; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.news_entities (
-    news_entity_id uuid DEFAULT gen_random_uuid() NOT NULL,
-    news_id uuid,
-    entity_id uuid,
-    relevance numeric,
-    sentiment numeric,
-    impact numeric
-);
-
-
---
--- Name: news_impacts; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.news_impacts (
-    impact_id uuid DEFAULT gen_random_uuid() NOT NULL,
-    news_id uuid,
-    entity_id uuid,
-    direct_impact numeric,
-    propagated_impact numeric,
-    confidence numeric
-);
-
-
---
 -- Name: news_sources; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -13555,6 +14189,18 @@ COMMENT ON COLUMN public.trading_signals.enrichment_fingerprint IS 'SHA-256 fing
 
 
 --
+-- Name: user_notification_delivery; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.user_notification_delivery (
+    user_id uuid NOT NULL,
+    paused boolean DEFAULT false NOT NULL,
+    default_source_id uuid,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
 -- Name: user_roles; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -13778,19 +14424,11 @@ ALTER TABLE ONLY public.api_sources
 
 
 --
--- Name: catalyst_history catalyst_history_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: collection_intelligence_subscriptions collection_intelligence_subscriptions_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.catalyst_history
-    ADD CONSTRAINT catalyst_history_pkey PRIMARY KEY (id);
-
-
---
--- Name: catalysts catalysts_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.catalysts
-    ADD CONSTRAINT catalysts_pkey PRIMARY KEY (catalyst_id);
+ALTER TABLE ONLY public.collection_intelligence_subscriptions
+    ADD CONSTRAINT collection_intelligence_subscriptions_pkey PRIMARY KEY (user_id, collection_type, collection_id);
 
 
 --
@@ -13874,6 +14512,30 @@ ALTER TABLE ONLY public.etf_constituents
 
 
 --
+-- Name: event_lake event_lake_entity_revision_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.event_lake
+    ADD CONSTRAINT event_lake_entity_revision_key UNIQUE NULLS NOT DISTINCT (event_type, stage, source, event_key, entity_id, revision);
+
+
+--
+-- Name: event_lake event_lake_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.event_lake
+    ADD CONSTRAINT event_lake_pkey PRIMARY KEY (event_id);
+
+
+--
+-- Name: event_type_catalog event_type_catalog_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.event_type_catalog
+    ADD CONSTRAINT event_type_catalog_pkey PRIMARY KEY (event_type, payload_version);
+
+
+--
 -- Name: exchange_holiday_snapshots exchange_holiday_snapshots_exchange_code_source_provider_up_key; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -13927,14 +14589,6 @@ ALTER TABLE ONLY public.external_systems
 
 ALTER TABLE ONLY public.external_systems
     ADD CONSTRAINT external_systems_pkey PRIMARY KEY (system_id);
-
-
---
--- Name: filings filings_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.filings
-    ADD CONSTRAINT filings_pkey PRIMARY KEY (filing_id);
 
 
 --
@@ -14175,46 +14829,6 @@ ALTER TABLE ONLY public.market_universe_members
 
 ALTER TABLE ONLY public.market_universes
     ADD CONSTRAINT market_universes_pkey PRIMARY KEY (universe_id);
-
-
---
--- Name: news_clusters news_clusters_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.news_clusters
-    ADD CONSTRAINT news_clusters_pkey PRIMARY KEY (cluster_id);
-
-
---
--- Name: news news_content_hash_key; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.news
-    ADD CONSTRAINT news_content_hash_key UNIQUE (content_hash);
-
-
---
--- Name: news_entities news_entities_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.news_entities
-    ADD CONSTRAINT news_entities_pkey PRIMARY KEY (news_entity_id);
-
-
---
--- Name: news_impacts news_impacts_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.news_impacts
-    ADD CONSTRAINT news_impacts_pkey PRIMARY KEY (impact_id);
-
-
---
--- Name: news news_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.news
-    ADD CONSTRAINT news_pkey PRIMARY KEY (news_id);
 
 
 --
@@ -14642,6 +15256,14 @@ ALTER TABLE ONLY public.users
 
 
 --
+-- Name: user_notification_delivery user_notification_delivery_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_notification_delivery
+    ADD CONSTRAINT user_notification_delivery_pkey PRIMARY KEY (user_id);
+
+
+--
 -- Name: user_roles user_roles_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -14770,6 +15392,55 @@ CREATE INDEX ix_entity_name_observations_normalized_lookup ON public.entity_name
 --
 
 CREATE INDEX ix_entity_name_observations_source_entity ON public.entity_name_observations USING btree (system_id, entity_id, last_observed_at DESC);
+
+
+--
+-- Name: ix_event_lake_entity; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_event_lake_entity ON public.event_lake USING btree (entity_id, event_type, stage, occurred_at DESC) WHERE (entity_id IS NOT NULL);
+
+
+--
+-- Name: ix_event_lake_event_day; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_event_lake_event_day ON public.event_lake USING btree (event_type, event_day);
+
+
+--
+-- Name: ix_event_lake_ingested_at; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_event_lake_ingested_at ON public.event_lake USING btree (ingested_at);
+
+
+--
+-- Name: ix_event_lake_latest; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_event_lake_latest ON public.event_lake USING btree (event_type, stage, source, event_key, entity_id, revision DESC);
+
+
+--
+-- Name: ix_event_lake_parent_event_ids; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_event_lake_parent_event_ids ON public.event_lake USING gin (parent_event_ids);
+
+
+--
+-- Name: ix_event_lake_subjects; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_event_lake_subjects ON public.event_lake USING gin (subjects);
+
+
+--
+-- Name: ix_event_lake_supersedes_event_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_event_lake_supersedes_event_id ON public.event_lake USING btree (supersedes_event_id);
 
 
 --
@@ -15018,27 +15689,6 @@ CREATE INDEX ix_market_universe_members_history ON public.market_universe_member
 
 
 --
--- Name: ix_news_entities_entity_news; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX ix_news_entities_entity_news ON public.news_entities USING btree (entity_id, news_id);
-
-
---
--- Name: ix_news_published_at; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX ix_news_published_at ON public.news USING btree (published_at DESC);
-
-
---
--- Name: ix_news_source_published; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX ix_news_source_published ON public.news USING btree (source_id, published_at DESC);
-
-
---
 -- Name: ix_notification_subscriptions_user; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -15221,13 +15871,6 @@ CREATE UNIQUE INDEX uq_cache_portfolio_theme_exposure ON public.cache_portfolio_
 
 
 --
--- Name: uq_catalyst_business_key; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE UNIQUE INDEX uq_catalyst_business_key ON public.catalysts USING btree (entity_id, catalyst_type, source, catalyst_day);
-
-
---
 -- Name: uq_entity_alias_entity_normalized; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -15267,13 +15910,6 @@ CREATE UNIQUE INDEX uq_entity_score ON public.entity_scores USING btree (entity_
 --
 
 CREATE UNIQUE INDEX uq_external_systems_code ON public.external_systems USING btree (code) WHERE (code IS NOT NULL);
-
-
---
--- Name: uq_filings; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE UNIQUE INDEX uq_filings ON public.filings USING btree (cik, accepted_at, filing_type);
 
 
 --
@@ -15330,20 +15966,6 @@ CREATE UNIQUE INDEX uq_market_universe_members_active ON public.market_universe_
 --
 
 CREATE UNIQUE INDEX uq_market_universes_code ON public.market_universes USING btree (upper(btrim((code)::text)));
-
-
---
--- Name: uq_news_entity; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE UNIQUE INDEX uq_news_entity ON public.news_entities USING btree (news_id, entity_id);
-
-
---
--- Name: uq_news_impact; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE UNIQUE INDEX uq_news_impact ON public.news_impacts USING btree (news_id, entity_id);
 
 
 --
@@ -15459,6 +16081,13 @@ CREATE TRIGGER trg_entity_impact_history_created_at BEFORE INSERT ON public.enti
 
 
 --
+-- Name: event_lake trg_event_lake_timestamps; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_event_lake_timestamps BEFORE INSERT OR DELETE OR UPDATE ON public.event_lake FOR EACH ROW EXECUTE FUNCTION public.event_lake_timestamps();
+
+
+--
 -- Name: exchange_rate_history trg_exchange_rate_history_created_at; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -15491,13 +16120,6 @@ CREATE TRIGGER trg_exchanges_created_at BEFORE INSERT ON public.exchanges FOR EA
 --
 
 CREATE TRIGGER trg_exchanges_updated_at BEFORE INSERT OR UPDATE ON public.exchanges FOR EACH ROW EXECUTE FUNCTION public.trg_set_updated_at();
-
-
---
--- Name: filings trg_filings_created_at; Type: TRIGGER; Schema: public; Owner: -
---
-
-CREATE TRIGGER trg_filings_created_at BEFORE INSERT ON public.filings FOR EACH ROW EXECUTE FUNCTION public.trg_set_created_at();
 
 
 --
@@ -15746,13 +16368,6 @@ CREATE TRIGGER trg_market_universes_updated_at BEFORE INSERT OR UPDATE ON public
 
 
 --
--- Name: news_clusters trg_news_clusters_created_at; Type: TRIGGER; Schema: public; Owner: -
---
-
-CREATE TRIGGER trg_news_clusters_created_at BEFORE INSERT ON public.news_clusters FOR EACH ROW EXECUTE FUNCTION public.trg_set_created_at();
-
-
---
 -- Name: notifications trg_notifications_created_at; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -15903,19 +16518,11 @@ ALTER TABLE ONLY public.alert_threshold_state
 
 
 --
--- Name: catalyst_history catalyst_history_catalyst_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: collection_intelligence_subscriptions collection_intelligence_subscriptions_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.catalyst_history
-    ADD CONSTRAINT catalyst_history_catalyst_id_fkey FOREIGN KEY (catalyst_id) REFERENCES public.catalysts(catalyst_id) ON DELETE CASCADE;
-
-
---
--- Name: catalysts catalysts_entity_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.catalysts
-    ADD CONSTRAINT catalysts_entity_id_fkey FOREIGN KEY (entity_id) REFERENCES public.entities(entity_id);
+ALTER TABLE ONLY public.collection_intelligence_subscriptions
+    ADD CONSTRAINT collection_intelligence_subscriptions_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(user_id) ON DELETE CASCADE;
 
 
 --
@@ -16055,6 +16662,30 @@ ALTER TABLE ONLY public.etf_constituents
 
 
 --
+-- Name: event_lake event_lake_entity_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.event_lake
+    ADD CONSTRAINT event_lake_entity_id_fkey FOREIGN KEY (entity_id) REFERENCES public.entities(entity_id);
+
+
+--
+-- Name: event_lake event_lake_event_type_payload_version_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.event_lake
+    ADD CONSTRAINT event_lake_event_type_payload_version_fkey FOREIGN KEY (event_type, payload_version) REFERENCES public.event_type_catalog(event_type, payload_version);
+
+
+--
+-- Name: event_lake event_lake_supersedes_event_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.event_lake
+    ADD CONSTRAINT event_lake_supersedes_event_id_fkey FOREIGN KEY (supersedes_event_id) REFERENCES public.event_lake(event_id);
+
+
+--
 -- Name: exchange_holiday_snapshots exchange_holiday_snapshots_exchange_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -16076,14 +16707,6 @@ ALTER TABLE ONLY public.exchange_source_mappings
 
 ALTER TABLE ONLY public.exchange_source_mappings
     ADD CONSTRAINT exchange_source_mappings_system_id_fkey FOREIGN KEY (system_id) REFERENCES public.external_systems(system_id) ON DELETE CASCADE;
-
-
---
--- Name: filings filings_entity_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.filings
-    ADD CONSTRAINT filings_entity_id_fkey FOREIGN KEY (entity_id) REFERENCES public.entities(entity_id);
 
 
 --
@@ -16359,54 +16982,6 @@ ALTER TABLE ONLY public.market_universes
 
 
 --
--- Name: news news_cluster_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.news
-    ADD CONSTRAINT news_cluster_id_fkey FOREIGN KEY (cluster_id) REFERENCES public.news_clusters(cluster_id);
-
-
---
--- Name: news_entities news_entities_entity_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.news_entities
-    ADD CONSTRAINT news_entities_entity_id_fkey FOREIGN KEY (entity_id) REFERENCES public.entities(entity_id) ON DELETE CASCADE;
-
-
---
--- Name: news_entities news_entities_news_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.news_entities
-    ADD CONSTRAINT news_entities_news_id_fkey FOREIGN KEY (news_id) REFERENCES public.news(news_id) ON DELETE CASCADE;
-
-
---
--- Name: news_impacts news_impacts_entity_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.news_impacts
-    ADD CONSTRAINT news_impacts_entity_id_fkey FOREIGN KEY (entity_id) REFERENCES public.entities(entity_id);
-
-
---
--- Name: news_impacts news_impacts_news_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.news_impacts
-    ADD CONSTRAINT news_impacts_news_id_fkey FOREIGN KEY (news_id) REFERENCES public.news(news_id);
-
-
---
--- Name: news news_source_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.news
-    ADD CONSTRAINT news_source_id_fkey FOREIGN KEY (source_id) REFERENCES public.news_sources(source_id);
-
-
---
 -- Name: notification_hashes notification_hashes_entity_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -16647,6 +17222,22 @@ ALTER TABLE ONLY public.trading_signals
 
 
 --
+-- Name: user_notification_delivery user_notification_delivery_default_source_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_notification_delivery
+    ADD CONSTRAINT user_notification_delivery_default_source_id_fkey FOREIGN KEY (default_source_id) REFERENCES public.user_sources(source_id);
+
+
+--
+-- Name: user_notification_delivery user_notification_delivery_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_notification_delivery
+    ADD CONSTRAINT user_notification_delivery_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(user_id) ON DELETE CASCADE;
+
+
+--
 -- Name: user_roles user_roles_role_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -16698,5 +17289,5 @@ ALTER TABLE ONLY public.watchlists
 -- PostgreSQL database dump complete
 --
 
-\unrestrict 0Y4orhDRfV8ccbY8e8rAmpdo1oboqqyL9KGGgY01F4mBMPQe2toPCAFbeVIUB5B
+\unrestrict yFG8RwNFGbOsBkrFvsWHgzE4fElBkF3SmbbBrvqioL1LjiQxg39lmlVm8I1bXwE
 

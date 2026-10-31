@@ -10,11 +10,14 @@ def collection_details(item: Mapping[str, Any]) -> str:
         allocation = item.get("allocationPct")
         details += (
             f"Peso nel portafoglio: {allocation:.2f}%\n"
-            if allocation is not None else "Peso nel portafoglio: non disponibile\n"
+            if allocation is not None
+            else "Peso nel portafoglio: non disponibile\n"
         )
         impact = item.get("portfolioImpactPct")
         if impact is not None:
-            details += f"Contributo giornaliero stimato: {impact:+.3f} punti percentuali\n"
+            details += (
+                f"Contributo giornaliero stimato: {impact:+.3f} punti percentuali\n"
+            )
     return details
 
 

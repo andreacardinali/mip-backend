@@ -30,16 +30,22 @@ class EnqueueTests(unittest.TestCase):
     def test_pause_blocks_even_an_explicit_destination(self):
         queue = self._queue()
         queue.repo = MagicMock()
-        queue.repo.resolve_target.return_value = NotificationTarget(None, None, "PAUSED")
+        queue.repo.resolve_target.return_value = NotificationTarget(
+            None, None, "PAUSED"
+        )
         result = self._enqueue(queue, source_id="destination")
         self.assertEqual(result.status, EnqueueStatus.DISABLED)
-        self.assertEqual(queue.repo.resolve_target.call_args.kwargs["source_id"], "destination")
+        self.assertEqual(
+            queue.repo.resolve_target.call_args.kwargs["source_id"], "destination"
+        )
         queue.repo.enqueue.assert_not_called()
 
     def test_destination_is_resolved_before_enqueue(self):
         queue = self._queue()
         queue.repo = MagicMock()
-        queue.repo.resolve_target.return_value = NotificationTarget("owned", "TELEGRAM", "RESOLVED")
+        queue.repo.resolve_target.return_value = NotificationTarget(
+            "owned", "TELEGRAM", "RESOLVED"
+        )
         queue.repo.enqueue.return_value = "notification"
         self.assertTrue(self._enqueue(queue, source_id="owned"))
         self.assertEqual(queue.repo.enqueue.call_args.kwargs["source_id"], "owned")
@@ -55,8 +61,12 @@ class EnqueueTests(unittest.TestCase):
         )
         for invalid in ("invalid", "", 1, True):
             with self.subTest(source_id=invalid), self.assertRaises(ValueError):
-                validate_rule_payload({"name": "Alert", "conditions": {"source_id": invalid}})
-        self.assertNotIn("source_id", validate_rule_payload({"name": "Alert"})["conditions"])
+                validate_rule_payload(
+                    {"name": "Alert", "conditions": {"source_id": invalid}}
+                )
+        self.assertNotIn(
+            "source_id", validate_rule_payload({"name": "Alert"})["conditions"]
+        )
 
     def _queue(
         self,
@@ -145,11 +155,22 @@ def notification_api():
     database.execute.return_value.all.return_value = []
     database.execute.return_value.one.return_value = SimpleNamespace(_mapping=delivery)
     session_factory = MagicMock(return_value=database)
-    with patch.dict(sys.modules, {
-        "db": SimpleNamespace(SessionLocal=session_factory),
-        "auth.security": SimpleNamespace(CurrentUser=dict, get_current_user=get_current_user),
-    }):
-        namespace = runpy.run_path(str(Path(__file__).resolve().parents[1] / "routers" / "notification_preferences.py"))
+    with patch.dict(
+        sys.modules,
+        {
+            "db": SimpleNamespace(SessionLocal=session_factory),
+            "auth.security": SimpleNamespace(
+                CurrentUser=dict, get_current_user=get_current_user
+            ),
+        },
+    ):
+        namespace = runpy.run_path(
+            str(
+                Path(__file__).resolve().parents[1]
+                / "routers"
+                / "notification_preferences.py"
+            )
+        )
     app = FastAPI()
     app.include_router(namespace["router"], prefix="/api/notification-preferences")
     with TestClient(app, raise_server_exceptions=False) as client:
@@ -160,14 +181,19 @@ def notification_api():
 @pytest.mark.parametrize("source_id", [None, "00000000-0000-0000-0000-000000000ABC"])
 def test_delivery_api_saves_authenticated_owner(notification_api, paused, source_id):
     client, database, _, authentication = notification_api
-    response = client.put("/api/notification-preferences/delivery", json={
-        "paused": paused, "default_source_id": source_id,
-    })
+    response = client.put(
+        "/api/notification-preferences/delivery",
+        json={
+            "paused": paused,
+            "default_source_id": source_id,
+        },
+    )
     assert response.status_code == 200
     statement, parameters = database.execute.call_args_list[0].args
     assert "sp_save_user_notification_delivery" in str(statement)
     assert parameters == {
-        "user_id": authentication["user"]["user_id"], "paused": paused,
+        "user_id": authentication["user"]["user_id"],
+        "paused": paused,
         "source_id": source_id.lower() if source_id else None,
     }
     assert response.json()["delivery"] == {"paused": False, "default_source_id": None}
@@ -176,15 +202,25 @@ def test_delivery_api_saves_authenticated_owner(notification_api, paused, source
     assert database.close.call_count == 2
 
 
-@pytest.mark.parametrize("payload", [
-    {}, {"paused": True}, {"paused": "false", "default_source_id": None},
-    {"paused": 0, "default_source_id": None},
-    {"paused": False, "default_source_id": "invalid"},
-    {"paused": False, "default_source_id": None, "user_id": "other"},
-])
-def test_delivery_api_rejects_invalid_payload_before_database(notification_api, payload):
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"paused": True},
+        {"paused": "false", "default_source_id": None},
+        {"paused": 0, "default_source_id": None},
+        {"paused": False, "default_source_id": "invalid"},
+        {"paused": False, "default_source_id": None, "user_id": "other"},
+    ],
+)
+def test_delivery_api_rejects_invalid_payload_before_database(
+    notification_api, payload
+):
     client, _, session_factory, _ = notification_api
-    assert client.put("/api/notification-preferences/delivery", json=payload).status_code == 422
+    assert (
+        client.put("/api/notification-preferences/delivery", json=payload).status_code
+        == 422
+    )
     session_factory.assert_not_called()
 
 
@@ -194,9 +230,13 @@ def test_delivery_api_rolls_back_database_errors(notification_api, sqlstate, sta
     error = RuntimeError("Database error")
     error.sqlstate = sqlstate
     database.execute.side_effect = DBAPIError("save", {}, error)
-    response = client.put("/api/notification-preferences/delivery", json={
-        "paused": False, "default_source_id": None,
-    })
+    response = client.put(
+        "/api/notification-preferences/delivery",
+        json={
+            "paused": False,
+            "default_source_id": None,
+        },
+    )
     assert response.status_code == status
     database.commit.assert_not_called()
     database.rollback.assert_called_once_with()
@@ -204,13 +244,20 @@ def test_delivery_api_rolls_back_database_errors(notification_api, sqlstate, sta
 
 
 @pytest.mark.parametrize("enabled", [True, False])
-def test_screener_summary_subscription_does_not_require_a_destination(notification_api, enabled):
+def test_screener_summary_subscription_does_not_require_a_destination(
+    notification_api, enabled
+):
     client, database, _, authentication = notification_api
-    response = client.put("/api/notification-preferences/screener-summary", json={"enabled": enabled})
+    response = client.put(
+        "/api/notification-preferences/screener-summary", json={"enabled": enabled}
+    )
     assert response.status_code == 200
     statement, parameters = database.execute.call_args_list[0].args
     assert "sp_save_user_screener_summary_subscription" in str(statement)
-    assert parameters == {"user_id": authentication["user"]["user_id"], "enabled": enabled}
+    assert parameters == {
+        "user_id": authentication["user"]["user_id"],
+        "enabled": enabled,
+    }
     database.commit.assert_called_once_with()
     database.rollback.assert_not_called()
 
@@ -219,8 +266,17 @@ def test_screener_summary_subscription_does_not_require_a_destination(notificati
 def test_notification_configuration_requires_authentication(notification_api, endpoint):
     client, _, session_factory, authentication = notification_api
     authentication["user"] = None
-    payload = {"paused": False, "default_source_id": None} if endpoint == "delivery" else {"enabled": True}
-    assert client.put(f"/api/notification-preferences/{endpoint}", json=payload).status_code == 401
+    payload = (
+        {"paused": False, "default_source_id": None}
+        if endpoint == "delivery"
+        else {"enabled": True}
+    )
+    assert (
+        client.put(
+            f"/api/notification-preferences/{endpoint}", json=payload
+        ).status_code
+        == 401
+    )
     session_factory.assert_not_called()
 
 

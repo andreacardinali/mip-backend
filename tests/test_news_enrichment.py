@@ -16,14 +16,19 @@ class NewsEnrichmentTests(unittest.TestCase):
     def test_shared_score_writer_uses_sp_without_committing(self):
         db = Mock()
         db.execute.return_value.scalar_one.return_value = 1
-        self.assertEqual(
-            _persist_scores(db, [NewsScore("entity", 0.5, -0.2, 0.8)]), 1
-        )
+        self.assertEqual(_persist_scores(db, [NewsScore("entity", 0.5, -0.2, 0.8)]), 1)
         statement, params = db.execute.call_args.args
         self.assertIn("public.sp_news_update_entity_scores", str(statement))
         self.assertEqual(
             json.loads(params["scores"]),
-            [{"news_entity_id": "entity", "relevance": 0.5, "sentiment": -0.2, "impact": 0.8}],
+            [
+                {
+                    "news_entity_id": "entity",
+                    "relevance": 0.5,
+                    "sentiment": -0.2,
+                    "impact": 0.8,
+                }
+            ],
         )
         db.commit.assert_not_called()
         db.rollback.assert_not_called()

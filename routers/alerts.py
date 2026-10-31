@@ -55,7 +55,9 @@ def _save_rule(payload: dict, user_id: str, rule_id: UUID | None):
         if source_id:
             source = get_source_config(database, user_id, source_id)
             if source is None or not (source["config"] or {}).get("enabled", True):
-                raise HTTPException(status_code=422, detail="Invalid notification destination")
+                raise HTTPException(
+                    status_code=422, detail="Invalid notification destination"
+                )
         saved_id = AlertRepository(database).save_user_rule(
             user_id, str(rule_id) if rule_id else None, validated
         )

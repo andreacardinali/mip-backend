@@ -10,8 +10,8 @@ from auth.security import CurrentUser, get_current_user
 from db import SessionLocal
 from notifications.credentials import encrypt_credential
 from notifications.models import NotificationDelivery
-from notifications.repository import get_source_config as _get_source_config
 from notifications.providers.telegram import TelegramProvider
+from notifications.repository import get_source_config as _get_source_config
 
 router = APIRouter()
 SUPPORTED_CHANNELS = [
@@ -57,7 +57,9 @@ def get_monitoring_collections(
     db = SessionLocal()
     try:
         rows = db.execute(
-            text("SELECT * FROM public.sp_list_monitoring_collections(CAST(:user_id AS uuid))"),
+            text(
+                "SELECT * FROM public.sp_list_monitoring_collections(CAST(:user_id AS uuid))"
+            ),
             {"user_id": current_user["user_id"]},
         ).all()
         return {"collections": [_serialize_row(row) for row in rows]}
@@ -75,12 +77,14 @@ def update_collection_intelligence(
     db = SessionLocal()
     try:
         saved = db.execute(
-            text("""
+            text(
+                """
                 SELECT public.sp_save_collection_intelligence(
                     CAST(:user_id AS uuid), :collection_type,
                     CAST(:collection_id AS uuid), CAST(:categories AS text[])
                 )
-            """),
+            """
+            ),
             {
                 "user_id": current_user["user_id"],
                 "collection_type": collection_type,
@@ -120,7 +124,9 @@ def get_notification_preferences(
             {"user_id": current_user["user_id"]},
         ).all()
         delivery = db.execute(
-            text("SELECT * FROM public.sp_get_user_notification_delivery(CAST(:user_id AS uuid))"),
+            text(
+                "SELECT * FROM public.sp_get_user_notification_delivery(CAST(:user_id AS uuid))"
+            ),
             {"user_id": current_user["user_id"]},
         ).one()
         return {
@@ -184,22 +190,33 @@ def update_notification_delivery(
     db = SessionLocal()
     try:
         db.execute(
-            text("""
+            text(
+                """
                 SELECT public.sp_save_user_notification_delivery(
                     CAST(:user_id AS uuid), :paused, CAST(:source_id AS uuid)
                 )
-            """),
+            """
+            ),
             {
                 "user_id": current_user["user_id"],
                 "paused": payload.paused,
-                "source_id": str(payload.default_source_id) if payload.default_source_id else None,
+                "source_id": (
+                    str(payload.default_source_id)
+                    if payload.default_source_id
+                    else None
+                ),
             },
         ).scalar_one()
         db.commit()
     except Exception as error:
         db.rollback()
-        if isinstance(error, DBAPIError) and getattr(error.orig, "sqlstate", None) == "22023":
-            raise HTTPException(status_code=422, detail="Invalid notification destination") from error
+        if (
+            isinstance(error, DBAPIError)
+            and getattr(error.orig, "sqlstate", None) == "22023"
+        ):
+            raise HTTPException(
+                status_code=422, detail="Invalid notification destination"
+            ) from error
         raise
     finally:
         db.close()
@@ -214,7 +231,9 @@ def update_screener_summary_subscription(
     db = SessionLocal()
     try:
         db.execute(
-            text("SELECT public.sp_save_user_screener_summary_subscription(CAST(:user_id AS uuid), :enabled)"),
+            text(
+                "SELECT public.sp_save_user_screener_summary_subscription(CAST(:user_id AS uuid), :enabled)"
+            ),
             {"user_id": current_user["user_id"], "enabled": payload.enabled},
         ).scalar_one()
         db.commit()

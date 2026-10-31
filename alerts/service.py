@@ -231,8 +231,11 @@ def evaluate_and_enqueue_market_alerts(
                 else m.context
             ),
             channel=m.rule.channel,
-                **({"source_id": m.rule.conditions["source_id"]}
-                    if m.rule.conditions.get("source_id") else {}),
+            **(
+                {"source_id": m.rule.conditions["source_id"]}
+                if m.rule.conditions.get("source_id")
+                else {}
+            ),
         )
         if result.created and result.notification_id:
             for identifier in ids:

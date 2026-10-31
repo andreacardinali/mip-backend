@@ -507,9 +507,9 @@ def test_screener_diagnostics_recovery_preserves_lock_and_run_identity() -> None
         encoding="utf-8"
     )
     schema = Path("mip_schema.sql").read_text(encoding="utf-8")
-    recovery = schema.split(
-        "CREATE FUNCTION public.sp_scheduler_recover_job_runs(", 1
-    )[1].split("$$;", 1)[0]
+    recovery = schema.split("CREATE FUNCTION public.sp_scheduler_recover_job_runs(", 1)[
+        1
+    ].split("$$;", 1)[0]
     anchor = "GET DIAGNOSTICS v_recovered = ROW_COUNT;"
     assert recovery.index("sp_scheduler_try_job_lock(p_job_id)") < recovery.index(
         anchor

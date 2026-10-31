@@ -8,14 +8,20 @@ from notifications.models import NotificationDelivery, NotificationTarget
 
 
 def get_source_config(db, user_id: str, source_id: str):
-    return db.execute(
-        text("""
+    return (
+        db.execute(
+            text(
+                """
             SELECT * FROM public.sp_get_user_notification_source_config(
                 CAST(:user_id AS uuid), CAST(:source_id AS uuid)
             )
-        """),
-        {"user_id": user_id, "source_id": source_id},
-    ).mappings().first()
+        """
+            ),
+            {"user_id": user_id, "source_id": source_id},
+        )
+        .mappings()
+        .first()
+    )
 
 
 class NotificationRepository:
