@@ -1,6 +1,8 @@
-from typing import Any
+from typing import Any, Literal
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy import text
 
 from auth.security import CurrentUser, get_current_user
@@ -43,6 +45,61 @@ def _get_source_config(db, user_id: str, source_id: str):
         .mappings()
         .first()
     )
+
+
+class CollectionIntelligencePayload(BaseModel):
+    enabled_categories: list[
+        Literal["DAILY_MOVER", "UPCOMING_CATALYST", "BREAKING_CATALYST", "NEWS"]
+    ]
+
+
+@router.get("/collections")
+def get_monitoring_collections(
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    db = SessionLocal()
+    try:
+        rows = db.execute(
+            text("SELECT * FROM public.sp_list_monitoring_collections(CAST(:user_id AS uuid))"),
+            {"user_id": current_user["user_id"]},
+        ).all()
+        return {"collections": [_serialize_row(row) for row in rows]}
+    finally:
+        db.close()
+
+
+@router.put("/collections/{collection_type}/{collection_id}")
+def update_collection_intelligence(
+    collection_type: Literal["PORTFOLIO", "WATCHLIST", "UNIVERSE"],
+    collection_id: UUID,
+    payload: CollectionIntelligencePayload,
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    db = SessionLocal()
+    try:
+        saved = db.execute(
+            text("""
+                SELECT public.sp_save_collection_intelligence(
+                    CAST(:user_id AS uuid), :collection_type,
+                    CAST(:collection_id AS uuid), CAST(:categories AS text[])
+                )
+            """),
+            {
+                "user_id": current_user["user_id"],
+                "collection_type": collection_type,
+                "collection_id": str(collection_id),
+                "categories": sorted(set(payload.enabled_categories)),
+            },
+        ).scalar_one()
+        if not saved:
+            raise HTTPException(status_code=404, detail="Collection not found")
+        db.commit()
+        return {"saved": True}
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
 
 
 @router.get("")

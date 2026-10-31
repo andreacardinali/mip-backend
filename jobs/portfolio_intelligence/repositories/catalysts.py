@@ -1,9 +1,48 @@
+import json
 from collections.abc import Mapping
 from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
+
+
+def save_intelligence_event(
+    db: Session,
+    *,
+    branch: str,
+    event_key: str,
+    entity_id: str,
+    instrument_id: str,
+    category: str,
+    payload: dict[str, Any],
+    evidence: dict[str, Any],
+) -> None:
+    try:
+        db.execute(
+            text(
+                """
+            SELECT public.sp_save_intelligence_event(
+                :branch, :event_key, CAST(:entity_id AS uuid),
+                CAST(:instrument_id AS uuid), :category,
+                CAST(:payload AS jsonb), CAST(:evidence AS jsonb)
+            )
+        """
+            ),
+            {
+                "branch": branch,
+                "event_key": event_key,
+                "entity_id": entity_id,
+                "instrument_id": instrument_id,
+                "category": category,
+                "payload": json.dumps(payload, default=str),
+                "evidence": json.dumps(evidence, default=str),
+            },
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
 
 
 def recent_catalysts(
@@ -21,7 +60,7 @@ def recent_catalysts(
             text(
                 """
                 SELECT *
-                FROM public.sp_get_recent_catalysts(
+                FROM public.sp_get_recent_intelligence_catalysts(
                     CAST(:ids AS uuid[]),
                     :days
                 )
@@ -104,6 +143,11 @@ def _catalyst_from_row(
         "importance": float(row["importance"] or 0),
         "title": row["title"],
         "source": row["source"],
-        "payload": row["raw_payload"],
-        "symbols": list(row["symbols"] or []),
+        "symbols": [
+            {
+                key: symbol.get(key)
+                for key in ("instrument_id", "symbol", "exchange", "currency")
+            }
+            for symbol in row["symbols"] or []
+        ],
     }

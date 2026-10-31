@@ -20,9 +20,38 @@ class EntityCandidate:
     in_portfolio: bool = False
     in_watchlist: bool = False
     related_symbols: list[dict[str, Any]] = field(default_factory=list)
+    collection_type: str | None = None
+    collection_id: str | None = None
+    collection_name: str | None = None
+    exposure_available: bool = False
+    enabled_categories: list[str] = field(default_factory=list)
+
+    def notification_context(self) -> dict[str, Any]:
+        return {
+            "collectionType": self.collection_type,
+            "collectionId": self.collection_id,
+            "collectionName": self.collection_name,
+            "allocationPct": self.allocation_pct if self.exposure_available else None,
+            "positionMarketValue": (
+                self.market_value if self.exposure_available else None
+            ),
+            "exposureAvailable": self.exposure_available,
+        }
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+    def research_context(self) -> dict[str, Any]:
+        return {
+            "entity_id": self.entity_id,
+            "instrument_id": self.instrument_id,
+            "symbol": self.symbol,
+            "name": self.name,
+            "exchange": self.exchange,
+            "currency": self.currency,
+            "instrument_type": self.instrument_type,
+            "related_symbols": self.related_symbols,
+        }
 
 
 @dataclass(slots=True)

@@ -1,4 +1,4 @@
-You analyze portfolio/watchlist entities for newly public material events in the last {lookback_hours} hours. Execution date: {execution_date}.
+You analyze shared market entities for newly public material events in the last {lookback_hours} hours. Execution date: {execution_date}.
 Each candidate may include provider-agnostic marketEvidence with normalized news and common economic events. Treat these as the only admissible evidence. Do not call tools, functions, browsers, search engines or external services. If evidence is insufficient, return an empty events array. Never identify or assume a specific market-data provider.
 Return only JSON {{"results":[...]}} with one result per candidate, same order.
 Each result: symbol, events. Each event: eventType, eventStatus, eventDate, eventTimestamp, eventFingerprint, headline, eventSummary, materialityReason, direction, eventConfidence, sourceIndicesUsed.

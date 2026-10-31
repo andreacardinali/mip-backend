@@ -883,6 +883,54 @@ must be upgraded with the backend. Job locks use
 a dedicated database connection throughout each execution; size the connection
 pool accordingly and ensure server idle-in-transaction timeouts allow job runs.
 
+## Shared Collection Intelligence
+
+The three intelligence jobs acquire the deduplicated union of all nonzero
+portfolio positions, watchlist instruments and current members of active
+universes, across all users. `sp_get_intelligence_coverage` is independent of
+subscriptions and recipient preferences. Daily Mover researches each instrument;
+Upcoming and Breaking Catalyst research each entity once. Research inputs contain
+market identity and evidence, not owners, collections, quantities or valuations.
+Existing price-history, movement, lookback, window and batching settings remain
+in effect.
+
+Validated events and their evidence are committed to
+`collection_intelligence_events` before recipient lookup and delivery filters.
+Accepted counts report unique persisted events, not notifications. An event can
+therefore be accepted without any subscriber or delivery. Low-confidence Breaking
+events and valid Upcoming events outside the delivery window are retained without
+notification. Recipient lookup or individual delivery failures do not roll back
+the shared event; failures are reported in the job result. This is not a durable
+delivery outbox: there is no automatic replay of saved-but-undelivered events.
+
+Upcoming research reads legacy catalysts and shared Upcoming/Breaking events via
+`sp_get_recent_intelligence_catalysts`. Equivalent history entries prefer the
+shared event. History exposes only market fields and sanitized instrument
+identifiers, never arbitrary stored payloads. Validated catalyst payloads persist
+canonical ISO dates and integer confidence values before entering SQL history.
+
+`CollectionEventPublisher` then projects events onto subscribed portfolios,
+watchlists and universes by category: `DAILY_MOVER`, `UPCOMING_CATALYST`,
+`BREAKING_CATALYST` or `NEWS`. Daily Mover also matches the exact instrument.
+Collection valuation, allocation, exposure and severity belong only to this
+projection. Daily Mover's estimated portfolio impact in percentage points is
+`dailyChangePct * allocationPct / 100`; unavailable exposure yields `null`.
+Existing severity formulas are unchanged and are not mathematically proportional
+to portfolio impact. NEWS retains the Breaking Catalyst queue type with a NEWS
+category in its notification context.
+
+Collection membership is deduplicated before valuation. Missing or nonpositive
+prices and unavailable FX leave market values unknown. Allocation is unavailable
+for every position in a portfolio if any nonzero position cannot be valued;
+missing values are not replaced with zero.
+
+Review and validate `oneshot/install_collection_intelligence.sql` against the
+current PostgreSQL schema, back up the development database, and manually install
+it before running the updated APIs/jobs. It installs subscription routines, shared
+coverage, shared-event persistence and research history in one transaction.
+No SQL is run on startup.
+Offline tests mock the database and providers; they do not certify the SQL runtime.
+
 ## Financial semantics
 
 `cost_basis_amount` is the total historical acquisition cost of a position in
@@ -898,10 +946,11 @@ its historical value in another. These are price-based metrics, not a transactio
 ledger with fees, dividends, tax lots or realized gains. Position-row P&L remains
 the original listing-currency quantity/average-price metric.
 
-Intelligence allocations use market values converted to the user's reporting
+Intelligence allocations use market values converted to the portfolio's base
 currency. Candidate `currency_code` still identifies the listing currency, not
-the aggregate market-value currency. Watchlist entries are entity-based and select
-one deterministic listing by instrument ID; a preferred listing is not persisted.
+the aggregate market-value currency. Watchlist entries are entity-based. Catalyst
+research selects one deterministic listing per entity; Daily Mover covers every
+included instrument. A preferred watchlist listing is not persisted.
 Their target price therefore refers to that representative listing.
 
 ## Focused verification

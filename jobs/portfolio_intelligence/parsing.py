@@ -55,11 +55,18 @@ def parse_upcoming_event(payload: Mapping[str, Any]) -> UpcomingEvent:
         event_date = date.fromisoformat(raw_date[:10])
     except ValueError as exc:
         raise PayloadValidationError("invalid eventDate") from exc
+    confidence = _confidence(payload)
+    normalized = dict(payload)
+    normalized.update(
+        eventType=event_type,
+        eventDate=event_date.isoformat(),
+        eventConfidence=confidence,
+    )
     return UpcomingEvent(
-        payload=dict(payload),
+        payload=normalized,
         event_type=event_type,
         event_date=event_date,
-        confidence=_confidence(payload),
+        confidence=confidence,
     )
 
 
@@ -70,12 +77,19 @@ def parse_breaking_event(payload: Mapping[str, Any]) -> BreakingEvent:
         event_day = date.fromisoformat(raw_date[:10]).isoformat()
     except ValueError as exc:
         raise PayloadValidationError("invalid eventDate") from exc
+    confidence = _confidence(payload)
+    normalized = dict(payload)
+    normalized.update(
+        eventType=event_type,
+        eventDate=event_day,
+        eventConfidence=confidence,
+    )
     return BreakingEvent(
-        payload=dict(payload),
+        payload=normalized,
         event_type=event_type,
         event_day=event_day,
         fingerprint=_required_text(payload, "eventFingerprint"),
-        confidence=_confidence(payload),
+        confidence=confidence,
     )
 
 

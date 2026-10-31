@@ -3,15 +3,17 @@ import logging
 from datetime import UTC, datetime
 
 from job_runtime.progress import BatchProgress
+from jobs.portfolio_intelligence.delivery import CollectionEventPublisher
 from jobs.portfolio_intelligence.evidence import (
     MarketEvidenceCollector,
     instrument_reference,
 )
-from jobs.portfolio_intelligence.incremental import IncrementalNotificationWriter
 from jobs.portfolio_intelligence.messages import format_daily_mover_message
 from jobs.portfolio_intelligence.models import BranchResult
 from jobs.portfolio_intelligence.parsing import parse_daily_validation
-from jobs.portfolio_intelligence.repositories.entities import load_candidates
+from jobs.portfolio_intelligence.repositories.entities import (
+    load_acquisition_candidates,
+)
 from jobs.portfolio_intelligence.scoring import daily_mover_severity
 from llm.base import LLMRequest
 from llm.evidence import select_sources
@@ -26,15 +28,13 @@ class DailyMoverBranch:
 
     def execute(self, context):
         result = BranchResult(branch=self.name)
-        entities = load_candidates(context.db)
+        entities = load_acquisition_candidates(context.db, self.name)
         result.candidate_count = len(entities)
         research_template = context.prompts.get("daily_research")
         validation_template = context.prompts.get("daily_validate")
         collector = MarketEvidenceCollector(context.market_data, context.config)
         economic_events = collector.common_economic_events()
-        writer = IncrementalNotificationWriter(
-            context.notification_queue, db=context.db
-        )
+        publisher = CollectionEventPublisher(context, self.name)
         progress = BatchProgress(
             job="portfolio_intelligence_daily_mover",
             total_items=len(entities),
@@ -66,15 +66,8 @@ class DailyMoverBranch:
                     progress.log_progress(logger)
                     continue
                 observed = {
-                    **entity.to_dict(),
+                    **entity.research_context(),
                     **snapshot.to_dict(),
-                    "allocationPct": entity.allocation_pct,
-                    "portfolioImpactPct": snapshot.daily_change_pct
-                    * entity.allocation_pct
-                    / 100.0,
-                    "severity": daily_mover_severity(
-                        snapshot.daily_change_pct, entity.allocation_pct
-                    ),
                     "marketEvidence": collector.for_daily_mover(
                         entity, economic_events=economic_events
                     ).to_dict(),
@@ -111,8 +104,8 @@ class DailyMoverBranch:
                     final.data, expected_symbol=entity.symbol
                 )
                 item = {
-                    **observed,
                     **validation.payload,
+                    **observed,
                     "entity_id": entity.entity_id,
                     "sourcesUsed": select_sources(
                         validation.source_indices, research.sources
@@ -121,21 +114,28 @@ class DailyMoverBranch:
                 observed_day = (
                     datetime.fromtimestamp(item["observedDate"], UTC).date().isoformat()
                 )
-                notification_key = f"DAILY_MOVER|{item['symbol']}|{observed_day}|{round(item['dailyChangePct'], 1)}"
-                if writer.enqueue(
-                    user_id=item["user_id"],
-                    notification_key=notification_key,
-                    notification_type=self.name,
-                    entity_id=item["entity_id"],
-                    symbol=item["symbol"],
-                    event_key=observed_day,
-                    severity=item["severity"],
-                    title=item.get("headline") or notification_key,
-                    message=format_daily_mover_message(item),
-                    context=item,
-                ):
-                    result.notification_count += 1
-                    result.accepted_count += 1
+                event_key = f"{entity.instrument_id}|{observed_day}|{round(item['dailyChangePct'], 1)}"
+                result.notification_count += publisher.publish(
+                    entity,
+                    event_key=event_key,
+                    category=self.name,
+                    payload=item,
+                    evidence={
+                        "marketEvidence": observed["marketEvidence"],
+                        "sourcesUsed": item["sourcesUsed"],
+                    },
+                    decorate=lambda recipient, change=snapshot.daily_change_pct: {
+                        "severity": daily_mover_severity(
+                            change, recipient.allocation_pct
+                        ),
+                        "portfolioImpactPct": (
+                            change * recipient.allocation_pct / 100.0
+                            if recipient.exposure_available
+                            else None
+                        ),
+                    },
+                    format_message=format_daily_mover_message,
+                )
             except Exception as exc:
                 failed = 1
                 result.add_error(f"{entity.symbol}: {exc}")
@@ -143,11 +143,14 @@ class DailyMoverBranch:
             progress.complete_batch(1, failed_items=failed)
             progress.log_progress(logger)
 
+        result.accepted_count = publisher.accepted_count
+        for error in publisher.errors:
+            result.add_error(error)
         result.diagnostics = {
             "entityErrors": len(result.errors),
             "marketEvidence": collector.diagnostics.to_dict(),
             "workload": progress.summary(),
-            **writer.to_dict(),
+            **publisher.writer.to_dict(),
         }
         progress.log_completed(logger)
         return result

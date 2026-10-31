@@ -5,8 +5,8 @@ from datetime import date, timedelta
 from job_runtime.collections import batched
 from job_runtime.progress import BatchProgress
 from jobs.portfolio_intelligence.batching import matched_batch_rows
+from jobs.portfolio_intelligence.delivery import CollectionEventPublisher
 from jobs.portfolio_intelligence.evidence import MarketEvidenceCollector
-from jobs.portfolio_intelligence.incremental import IncrementalNotificationWriter
 from jobs.portfolio_intelligence.messages import format_upcoming_catalyst_message
 from jobs.portfolio_intelligence.models import BranchResult
 from jobs.portfolio_intelligence.parsing import (
@@ -14,7 +14,9 @@ from jobs.portfolio_intelligence.parsing import (
     parse_upcoming_event,
 )
 from jobs.portfolio_intelligence.repositories.catalysts import recent_catalysts
-from jobs.portfolio_intelligence.repositories.entities import load_candidates
+from jobs.portfolio_intelligence.repositories.entities import (
+    load_acquisition_candidates,
+)
 from jobs.portfolio_intelligence.scoring import upcoming_catalyst_severity
 from llm.base import LLMRequest
 
@@ -26,7 +28,7 @@ class UpcomingCatalystBranch:
 
     def execute(self, context):
         result = BranchResult(branch=self.name)
-        candidates = load_candidates(context.db)
+        candidates = load_acquisition_candidates(context.db, self.name)
         result.candidate_count = len(candidates)
         today = date.today()
         end = today + timedelta(days=context.config.upcoming_window_days)
@@ -36,9 +38,7 @@ class UpcomingCatalystBranch:
         template = context.prompts.get("upcoming")
         collector = MarketEvidenceCollector(context.market_data, context.config)
         economic_events = collector.common_economic_events()
-        writer = IncrementalNotificationWriter(
-            context.notification_queue, db=context.db
-        )
+        publisher = CollectionEventPublisher(context, self.name)
         progress = BatchProgress(
             job="portfolio_intelligence_upcoming_catalyst",
             total_items=len(candidates),
@@ -49,7 +49,7 @@ class UpcomingCatalystBranch:
         for batch in batched(candidates, context.config.llm_request_max_candidates):
             payload = [
                 {
-                    **candidate.to_dict(),
+                    **candidate.research_context(),
                     "recentCatalysts": known.get(candidate.entity_id, []),
                     "marketEvidence": collector.for_upcoming(
                         candidate, today, end, economic_events=economic_events
@@ -82,50 +82,60 @@ class UpcomingCatalystBranch:
                         result.add_error(f"{source.symbol}: {exc}")
                         batch_failures += 1
                         continue
-                    if not today <= event.event_date <= end:
-                        continue
                     days = (event.event_date - today).days
-                    severity, score = upcoming_catalyst_severity(
-                        days, source.allocation_pct
-                    )
                     event_key = f"{source.entity_id}|{event.event_type}|{event.event_date.isoformat()}"
                     item = {
                         **event.payload,
-                        "user_id": source.user_id,
                         "entity_id": source.entity_id,
                         "symbol": source.symbol,
                         "relatedSymbols": source.related_symbols,
                         "name": source.name,
                         "eventKey": event_key,
                         "daysUntilEvent": days,
-                        "severity": severity,
-                        "severityScore": score,
                         "sources": response.sources,
                     }
-                    notification_key = f"UPCOMING_CATALYST|{event_key}"
-                    if writer.enqueue(
-                        user_id=item["user_id"],
-                        notification_key=notification_key,
-                        notification_type=self.name,
-                        entity_id=item["entity_id"],
-                        symbol=item["symbol"],
-                        event_key=event_key,
-                        severity=severity,
-                        title=item.get("headline") or event_key,
-                        message=format_upcoming_catalyst_message(item),
-                        context=item,
-                    ):
-                        result.notification_count += 1
-                        result.accepted_count += 1
+                    try:
+                        result.notification_count += publisher.publish(
+                            source,
+                            event_key=event_key,
+                            category=self.name,
+                            payload=item,
+                            evidence={
+                                "marketEvidence": payload[batch.index(source)][
+                                    "marketEvidence"
+                                ],
+                                "sources": response.sources,
+                            },
+                            decorate=lambda recipient, event_days=days: dict(
+                                zip(
+                                    ("severity", "severityScore"),
+                                    upcoming_catalyst_severity(
+                                        event_days, recipient.allocation_pct
+                                    ),
+                                    strict=True,
+                                )
+                            ),
+                            format_message=format_upcoming_catalyst_message,
+                            deliver=today <= event.event_date <= end,
+                        )
+                    except Exception as exc:
+                        result.add_error(f"{source.symbol}: {exc}")
+                        batch_failures += 1
+                        logger.exception(
+                            "Upcoming event persistence failed symbol=%s", source.symbol
+                        )
             progress.complete_batch(len(batch), failed_items=batch_failures)
             progress.log_progress(logger)
 
+        result.accepted_count = publisher.accepted_count
+        for error in publisher.errors:
+            result.add_error(error)
         result.diagnostics = {
             "windowStart": today.isoformat(),
             "windowEnd": end.isoformat(),
             "marketEvidence": collector.diagnostics.to_dict(),
             "workload": progress.summary(),
-            **writer.to_dict(),
+            **publisher.writer.to_dict(),
         }
         progress.log_completed(logger)
         return result

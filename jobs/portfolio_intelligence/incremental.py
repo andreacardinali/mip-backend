@@ -10,11 +10,17 @@ class IncrementalNotificationWriter:
         self.queue = queue
         self.db = db
         self.diagnostics = NotificationDiagnostics()
-        self._seen_keys: set[str] = set()
+        self._seen_keys: set[tuple[str | None, str]] = set()
         self.duplicate_count = 0
 
     def enqueue(self, *, notification_key: str, **values) -> bool:
-        if notification_key in self._seen_keys:
+        context = values.get("context") or {}
+        collection_type = context.get("collectionType")
+        collection_id = context.get("collectionId")
+        if collection_type and collection_id:
+            notification_key = f"{notification_key}|{collection_type}|{collection_id}"
+        seen_key = (values.get("user_id"), notification_key)
+        if seen_key in self._seen_keys:
             self.duplicate_count += 1
             return False
         try:
@@ -28,7 +34,7 @@ class IncrementalNotificationWriter:
             if self.db is not None:
                 self.db.rollback()
             raise
-        self._seen_keys.add(notification_key)
+        self._seen_keys.add(seen_key)
         return self.diagnostics.record(result)
 
     def to_dict(self) -> dict:

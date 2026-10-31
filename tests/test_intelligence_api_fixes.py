@@ -15,6 +15,29 @@ JOB_ID = "00000000-0000-0000-0000-000000000002"
 RUN_ID = "00000000-0000-0000-0000-000000000003"
 
 
+@pytest.mark.parametrize("owned", [True, False])
+def test_collection_intelligence_update_is_scoped_to_authenticated_user(monkeypatch, owned):
+    from routers import notification_preferences as module
+
+    database = MagicMock()
+    database.execute.return_value.scalar_one.return_value = owned
+    monkeypatch.setattr(module, "SessionLocal", lambda: database)
+    payload = module.CollectionIntelligencePayload(enabled_categories=["NEWS", "NEWS"])
+    if owned:
+        assert module.update_collection_intelligence("PORTFOLIO", UUID(JOB_ID), payload, {"user_id": USER_ID}) == {"saved": True}
+        database.commit.assert_called_once()
+    else:
+        with pytest.raises(HTTPException) as error:
+            module.update_collection_intelligence("PORTFOLIO", UUID(JOB_ID), payload, {"user_id": USER_ID})
+        assert error.value.status_code == 404
+        database.rollback.assert_called_once()
+        database.commit.assert_not_called()
+    parameters = database.execute.call_args.args[1]
+    assert parameters["user_id"] == USER_ID
+    assert parameters["categories"] == ["NEWS"]
+    database.close.assert_called_once()
+
+
 @pytest.mark.parametrize("operation", ["entities", "cache", "prices"])
 @pytest.mark.parametrize("authenticated", [False, True])
 def test_operational_http_apis_return_scheduler_ticket(
