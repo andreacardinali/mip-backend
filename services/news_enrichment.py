@@ -12,6 +12,7 @@ from llm.config import LLMConfig
 from llm.factory import create_provider
 from llm.fingerprint import fingerprint
 from prompting.repository import FileSystemPromptRepository
+from services.event_persistence import save_news_scores
 
 logger = logging.getLogger(__name__)
 PROMPTS = FileSystemPromptRepository(
@@ -145,12 +146,7 @@ def _parse_scores(data, expected_ids):
 
 def _persist_scores(db, scores):
     payload = [asdict(score) for score in scores]
-    return int(
-        db.execute(
-            text("SELECT public.sp_news_update_entity_scores(CAST(:scores AS jsonb))"),
-            {"scores": json.dumps(payload, separators=(",", ":"))},
-        ).scalar_one()
-    )
+    return save_news_scores(db, payload)
 
 
 def _score_batch(db, *, provider: LLMProvider, rows, max_tokens, stats):

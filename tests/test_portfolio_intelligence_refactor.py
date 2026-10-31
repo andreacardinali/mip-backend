@@ -26,6 +26,10 @@ from jobs.portfolio_intelligence.parsing import (
     parse_breaking_event,
     parse_upcoming_event,
 )
+from jobs.portfolio_intelligence.repositories.catalysts import (
+    save_intelligence_event,
+    upsert_catalyst,
+)
 from jobs.portfolio_intelligence.repositories.entities import (
     load_acquisition_candidates,
     load_candidates,
@@ -38,6 +42,77 @@ from notifications.models import EnqueueResult, EnqueueStatus
 
 
 class RefactorTests(unittest.TestCase):
+    def test_shared_intelligence_writer_preserves_payload_evidence_and_commit(self):
+        db = Mock()
+        payload = {"headline": "News", "eventConfidence": 85}
+        evidence = {"sources": [{"url": "source"}]}
+        save_intelligence_event(
+            db,
+            branch="BREAKING_CATALYST",
+            event_key="event",
+            entity_id="entity",
+            instrument_id="instrument",
+            category="NEWS",
+            payload=payload,
+            evidence=evidence,
+        )
+        statement, params = db.execute.call_args.args
+        self.assertIn("public.sp_save_intelligence_event", str(statement))
+        self.assertEqual(json.loads(params["payload"]), payload)
+        self.assertEqual(json.loads(params["evidence"]), evidence)
+        self.assertEqual(params["event_key"], "event")
+        self.assertNotIn("user_id", params)
+        db.commit.assert_called_once_with()
+        db.rollback.assert_not_called()
+
+    def test_shared_intelligence_writer_rolls_back_execute_or_commit_failure(self):
+        for operation in ("execute", "commit"):
+            with self.subTest(operation=operation):
+                db = Mock()
+                getattr(db, operation).side_effect = RuntimeError("write failed")
+                with self.assertRaisesRegex(RuntimeError, "write failed"):
+                    save_intelligence_event(
+                        db,
+                        branch="DAILY_MOVER",
+                        event_key="event",
+                        entity_id="entity",
+                        instrument_id="instrument",
+                        category="DAILY_MOVER",
+                        payload={},
+                        evidence={},
+                    )
+                db.rollback.assert_called_once_with()
+
+    def test_intelligence_catalyst_uses_shared_writer_and_preserves_date_only(self):
+        db = Mock()
+        db.execute.return_value.scalar_one.return_value = "catalyst-id"
+        payload = {"eventConfidence": 85}
+        result = upsert_catalyst(
+            db,
+            entity_id="entity",
+            source_symbol="TEST",
+            event_subtype="EARNINGS",
+            event_date=date(2026, 7, 1),
+            status="SCHEDULED",
+            importance="HIGH",
+            title="Earnings",
+            source="research",
+            payload=payload,
+        )
+        self.assertEqual(result, "catalyst-id")
+        statement, params = db.execute.call_args.args
+        self.assertIn("public.sp_upsert_catalyst", str(statement))
+        self.assertEqual(params["symbol"], "TEST")
+        self.assertEqual(params["entity_subtype"], "EARNINGS")
+        self.assertIsNone(params["entity_date"])
+        self.assertEqual(
+            json.loads(params["payload"]),
+            {"eventConfidence": 85, "date": "2026-07-01"},
+        )
+        self.assertEqual(payload, {"eventConfidence": 85})
+        db.commit.assert_not_called()
+        db.rollback.assert_not_called()
+
     def test_catalyst_payloads_persist_normalized_date_and_confidence(self):
         for parser in (parse_upcoming_event, parse_breaking_event):
             for confidence in (True, "85", 85.5):

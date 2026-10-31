@@ -1,9 +1,8 @@
 import logging
 from collections.abc import Callable
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from config.settings import settings
@@ -15,71 +14,17 @@ from jobs.fmp.normalizers import (
     normalize_filings_8k,
     normalize_splits,
 )
-from market_time.normalization import as_utc
+from services.event_persistence import save_catalyst, save_filing
 
 logger = logging.getLogger(__name__)
-
-
-CATALYST_SQL = text(
-    """
-    SELECT public.sp_upsert_catalyst(
-        p_entity_id => CAST(:entity_id AS uuid),
-        p_symbol => CAST(:symbol AS text),
-        p_entity_subtype => CAST(:entity_subtype AS text),
-        p_entity_date => CAST(:entity_date AS timestamptz),
-        p_entity_status => CAST(:status AS text),
-        p_importance => CAST(:importance AS text),
-        p_title => CAST(:title AS text),
-        p_source => CAST(:source AS text),
-        p_payload => CAST(:payload AS jsonb)
-    )
-    """
-)
-
-FILING_SQL = text(
-    """
-    SELECT sp_upsert_filing(
-        p_symbol => :symbol,
-        p_filing_type => :filing_type,
-        p_cik => :cik,
-        p_filing_date => :filing_date,
-        p_accepted_at => CAST(:accepted_at AS timestamptz),
-        p_title => :title,
-        p_source => :source,
-        p_raw_payload => CAST(:payload AS jsonb),
-        p_filing_subtype => :filing_subtype,
-        p_accession_number => :accession_number
-    )
-    """
-)
 
 
 def _upsert_catalysts(
     db: Session,
     rows: list[dict[str, Any]],
 ) -> int:
-    import json
-
     for row in rows:
-        value = row["entity_date"]
-        instant = as_utc(value) if isinstance(value, datetime) else None
-        if not isinstance(value, date):
-            raise ValueError("Catalyst requires a date or aware instant")
-        payload = dict(row["payload"])
-        if instant is None:
-            payload["date"] = value.isoformat()
-        db.execute(
-            CATALYST_SQL,
-            {
-                **row,
-                "entity_id": row.get("entity_id"),
-                "entity_date": instant,
-                "payload": json.dumps(
-                    payload,
-                    default=str,
-                ),
-            },
-        )
+        save_catalyst(db, row)
 
     return len(rows)
 
@@ -88,17 +33,8 @@ def _upsert_filings(
     db: Session,
     rows: list[dict[str, Any]],
 ) -> int:
-    import json
-
     for row in rows:
-        db.execute(
-            FILING_SQL,
-            {
-                **row,
-                "accepted_at": as_utc(row["accepted_at"]),
-                "payload": json.dumps(row["payload"]),
-            },
-        )
+        save_filing(db, row)
 
     return len(rows)
 

@@ -1,10 +1,11 @@
-import json
 from collections.abc import Mapping
 from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
+
+from services import event_persistence
 
 
 def save_intelligence_event(
@@ -19,25 +20,15 @@ def save_intelligence_event(
     evidence: dict[str, Any],
 ) -> None:
     try:
-        db.execute(
-            text(
-                """
-            SELECT public.sp_save_intelligence_event(
-                :branch, :event_key, CAST(:entity_id AS uuid),
-                CAST(:instrument_id AS uuid), :category,
-                CAST(:payload AS jsonb), CAST(:evidence AS jsonb)
-            )
-        """
-            ),
-            {
-                "branch": branch,
-                "event_key": event_key,
-                "entity_id": entity_id,
-                "instrument_id": instrument_id,
-                "category": category,
-                "payload": json.dumps(payload, default=str),
-                "evidence": json.dumps(evidence, default=str),
-            },
+        event_persistence.save_intelligence_event(
+            db,
+            branch=branch,
+            event_key=event_key,
+            entity_id=entity_id,
+            instrument_id=instrument_id,
+            category=category,
+            payload=payload,
+            evidence=evidence,
         )
         db.commit()
     except Exception:
@@ -97,34 +88,20 @@ def upsert_catalyst(
     source: str,
     payload: dict[str, Any],
 ) -> str:
-    catalyst_id = db.execute(
-        text(
-            """
-            SELECT public.sp_upsert_catalyst(
-                CAST(:entity_id AS uuid),
-                :source_symbol,
-                :event_subtype,
-                CAST(:event_date AS timestamptz),
-                :status,
-                :importance,
-                :title,
-                :source,
-                CAST(:payload AS jsonb)
-            )
-            """
-        ),
+    catalyst_id = event_persistence.save_catalyst(
+        db,
         {
             "entity_id": entity_id,
-            "source_symbol": source_symbol,
-            "event_subtype": event_subtype,
-            "event_date": event_date,
+            "symbol": source_symbol,
+            "entity_subtype": event_subtype,
+            "entity_date": event_date,
             "status": status,
             "importance": importance,
             "title": title,
             "source": source,
             "payload": payload,
         },
-    ).scalar_one()
+    )
 
     return str(catalyst_id)
 

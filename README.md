@@ -810,6 +810,66 @@ work only. Earlier commits survive even if failure reporting or a later stage
 cannot complete. AI request batching is retained, but a score persistence failure
 does not repeat the provider request.
 
+Event ingestion persistence is centralized in `services/event_persistence.py`.
+News articles, news enrichment scores, FMP catalysts and filings, and shared
+intelligence events use its typed Python entry points to call the existing
+PostgreSQL stored routines. Provider fetching, research, validation, scheduling
+and recipient selection remain outside this component. It does not commit or
+roll back: callers retain the transaction boundaries described above, including
+the intelligence repository's commit before recipient lookup. Both FMP and
+research catalysts share JSON serialization and UTC/date-only normalization;
+date-only events retain their date in the payload without inventing an instant.
+Every writer now calls `sp_save_event` first, then the existing domain projection
+SP, in the same caller-owned transaction. The domain archives and
+`collection_intelligence_events` remain available to their existing readers.
+
+### Unified event lake
+
+Before running these updated ingestion workers, review and manually install
+`oneshot/install_event_lake.sql` after backup and PostgreSQL validation. The file
+is transactional and does not run on startup. It creates `event_lake`, the
+extensible `event_type_catalog`, `sp_save_event(jsonb)` and timestamp triggers.
+No historical backfill, domain-table removal or live installation is automatic.
+The checked-in schema dump remains a snapshot of the live database, not an
+installer. Do not start the updated workers until the new SP has been installed.
+
+`services/event_contract.py` defines envelope version 1: event type and payload
+version, stage (`ACQUIRED`, `ENRICHED`, `VALIDATED`), source identity, semantic key,
+optional aware occurrence timestamp or date-only event day, observation time,
+subjects, parent event IDs, payload, raw payload, evidence and provenance.
+Subjects may be unresolved or multi-entity; parent IDs must reference lake rows.
+No recipient, owner, quantity, allocation or exposure belongs in this contract.
+Additional types or payload versions require a reviewed catalog registration with
+allowed stages and required payload field types, not an enum or table change.
+
+Deduplication is scoped to `(event_type, stage, source, event_key)`. A transaction
+advisory lock serializes concurrent observations of the same identity. Identical
+semantic content returns the latest event ID and updates `last_seen_at`; changed
+content creates an immutable revision linked through `supersedes_event_id`.
+The DB computes the hash from envelope/payload versions, provider identity,
+occurrence/day, canonical subjects and parent IDs, payload and evidence. Raw
+payload, provenance, observation and ingestion timestamps do not affect it.
+Adapters must keep operational metadata out of semantic payload and evidence.
+Different providers are not automatically reconciled into one economic event.
+
+Daily Mover identity uses instrument and observation day, not the changing price
+move. Upcoming Catalyst excludes the countdown and scan key from semantic content.
+Provider catalyst IDs take precedence over fiscal year/period; date fallback is
+explicitly recorded when neither exists. Date fallback deduplicates repeated
+scans but cannot reliably reconcile a rescheduled earnings event. `created_at`,
+`updated_at`, `ingested_at` and `last_seen_at` are managed by DB triggers, never
+assigned by Python. Only observation metadata can be updated; content updates and
+deletes are rejected. The SP does not commit; projection failure rolls back the
+lake write as part of the same unit. Replay and recipient-dependent severity
+remain separate, deferred work.
+
+Offline writer/contract checks: `.venv\Scripts\python.exe -m pytest
+tests/test_event_persistence.py tests/test_news_ingestion.py
+tests/test_news_enrichment.py tests/test_fmp_time.py
+tests/test_portfolio_intelligence_refactor.py`. Installer text checks are not
+PostgreSQL execution tests; DDL, trigger and concurrent revision behavior must
+also be verified in an isolated database before manual installation.
+
 Operations requiring a complete database-only view remain atomic: final quant
 eligibility/ranking updates and full universe membership replacement. These do
 not wrap third-party calls in one transaction across independent instruments.

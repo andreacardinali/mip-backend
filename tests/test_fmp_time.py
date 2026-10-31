@@ -63,7 +63,11 @@ def sync_module():
 
 def test_date_only_catalyst_has_no_fabricated_instant(sync_module):
     db = Mock()
-    row = {"symbol": "TEST", "entity_date": date(2026, 7, 1), "payload": {}}
+    row = {
+        "symbol": "TEST", "entity_date": date(2026, 7, 1), "payload": {},
+        "entity_subtype": "QUARTERLY_EARNINGS", "status": "EXPECTED",
+        "importance": "MEDIUM", "title": "TEST Earnings", "source": "FMP",
+    }
     assert sync_module["_upsert_catalysts"](db, [row]) == 1
     params = db.execute.call_args.args[1]
     assert params["entity_date"] is None
@@ -85,7 +89,11 @@ def test_persistence_rejects_naive_instants_before_database(sync_module):
 def test_filings_persist_explicit_timestamptz(sync_module):
     db = Mock()
     instant = datetime(2026, 7, 1, tzinfo=UTC)
-    sync_module["_upsert_filings"](db, [{"accepted_at": instant, "payload": {}}])
+    sync_module["_upsert_filings"](db, [{
+        "accepted_at": instant, "payload": {}, "symbol": "TEST", "cik": "123",
+        "filing_type": "8-K", "filing_subtype": "8-K", "accession_number": "123-1",
+        "filing_date": instant.date(), "title": "TEST Filing", "source": "FMP",
+    }])
     statement, params = db.execute.call_args.args
     assert "CAST(:accepted_at AS timestamptz)" in str(statement)
     assert params["accepted_at"] == instant

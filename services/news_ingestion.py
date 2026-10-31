@@ -1,5 +1,4 @@
 import hashlib
-import json
 import logging
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
@@ -14,6 +13,7 @@ from market_data.exceptions import AllProvidersFailedError, InstrumentNotFoundEr
 from market_data.models import InstrumentReference, NewsArticle
 from market_data.service import MarketDataService
 from market_time.normalization import as_utc
+from services.event_persistence import save_news_article
 
 logger = logging.getLogger(__name__)
 
@@ -117,27 +117,7 @@ def _persist_article(
     entity_id: str,
     article: NewsArticle,
 ) -> dict[str, Any]:
-    result = db.execute(
-        text(
-            """
-            SELECT public.sp_news_upsert_article(
-                CAST(:entity_id AS uuid),
-                CAST(:payload AS jsonb)
-            )
-            """
-        ),
-        {
-            "entity_id": entity_id,
-            "payload": json.dumps(
-                _article_payload(article),
-                ensure_ascii=False,
-            ),
-        },
-    ).scalar_one()
-
-    if isinstance(result, dict):
-        return result
-    return json.loads(result)
+    return save_news_article(db, entity_id=entity_id, payload=_article_payload(article))
 
 
 def _is_empty_news_result(error: AllProvidersFailedError) -> bool:

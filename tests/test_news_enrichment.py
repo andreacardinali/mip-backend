@@ -3,15 +3,39 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-from services.news_enrichment import EnrichmentStats, _parse_scores, _score_batch
+from services.news_enrichment import (
+    EnrichmentStats,
+    NewsScore,
+    _parse_scores,
+    _persist_scores,
+    _score_batch,
+)
 
 
 class NewsEnrichmentTests(unittest.TestCase):
+    def test_shared_score_writer_uses_sp_without_committing(self):
+        db = Mock()
+        db.execute.return_value.scalar_one.return_value = 1
+        self.assertEqual(
+            _persist_scores(db, [NewsScore("entity", 0.5, -0.2, 0.8)]), 1
+        )
+        statement, params = db.execute.call_args.args
+        self.assertIn("public.sp_news_update_entity_scores", str(statement))
+        self.assertEqual(
+            json.loads(params["scores"]),
+            [{"news_entity_id": "entity", "relevance": 0.5, "sentiment": -0.2, "impact": 0.8}],
+        )
+        db.commit.assert_not_called()
+        db.rollback.assert_not_called()
+
     def test_scores_commit_independently_without_repeating_llm_call(self):
         events = []
         db = Mock()
 
         def execute(statement, params):
+            if "public.sp_save_event" in str(statement):
+                self.assertEqual(json.loads(params["envelope"])["stage"], "ENRICHED")
+                return Mock(scalar_one=lambda: "lake-event-id")
             scores = json.loads(params["scores"])
             self.assertEqual(len(scores), 1)
             symbol = scores[0]["news_entity_id"]

@@ -1,9 +1,11 @@
+import json
 import unittest
 from contextlib import nullcontext
 from datetime import UTC, datetime
 from unittest.mock import Mock, patch
 
 from market_data.models import NewsArticle
+from services.event_persistence import save_news_article
 from services.news_ingestion import _external_id, _published_at, ingest_news
 
 
@@ -22,6 +24,32 @@ class R:
 
 
 class Tests(unittest.TestCase):
+    def test_shared_news_writer_uses_sp_and_leaves_transaction_to_caller(self):
+        payload = {"headline": "News", "external_id": "stable-id"}
+        expected = {"inserted": True, "associations_inserted": 1}
+        for result in (expected, json.dumps(expected)):
+            with self.subTest(result=result):
+                db = Mock()
+                db.execute.return_value = R(result)
+                self.assertEqual(
+                    save_news_article(db, entity_id="entity", payload=payload),
+                    expected,
+                )
+                statement, params = db.execute.call_args.args
+                self.assertIn("public.sp_news_upsert_article", str(statement))
+                self.assertEqual(params["entity_id"], "entity")
+                self.assertEqual(json.loads(params["payload"]), payload)
+                db.commit.assert_not_called()
+                db.rollback.assert_not_called()
+
+    def test_shared_news_writer_propagates_database_failure(self):
+        db = Mock()
+        db.execute.side_effect = RuntimeError("write failed")
+        with self.assertRaisesRegex(RuntimeError, "write failed"):
+            save_news_article(db, entity_id="entity", payload={})
+        db.commit.assert_not_called()
+        db.rollback.assert_not_called()
+
     def test_naive_news_timestamp_is_rejected(self):
         article = NewsArticle(headline="x", published_at=datetime(2026, 7, 1))
         with self.assertRaises(ValueError):
@@ -51,6 +79,7 @@ class Tests(unittest.TestCase):
                     }
                 ]
             ),
+            R("lake-event-id"),
             R({"inserted": True, "associations_inserted": 1}),
         ]
         md = Mock()
