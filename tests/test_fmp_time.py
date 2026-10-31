@@ -69,9 +69,14 @@ def test_date_only_catalyst_has_no_fabricated_instant(sync_module):
         "importance": "MEDIUM", "title": "TEST Earnings", "source": "FMP",
     }
     assert sync_module["_upsert_catalysts"](db, [row]) == 1
-    params = db.execute.call_args.args[1]
-    assert params["entity_date"] is None
-    assert json.loads(params["payload"])["date"] == "2026-07-01"
+    statement, params = db.execute.call_args.args
+    assert "sp_save_event(CAST(:envelope AS jsonb))" in str(statement)
+    envelope = json.loads(params["envelope"])
+    assert envelope["event_type"] == "CATALYST"
+    assert envelope["occurred_at"] is None
+    assert envelope["event_day"] == "2026-07-01"
+    assert envelope["payload"]["details"]["date"] == "2026-07-01"
+    assert envelope["raw_payload"] == {}
     assert row["payload"] == {}
 
 
@@ -86,7 +91,7 @@ def test_persistence_rejects_naive_instants_before_database(sync_module):
     db.execute.assert_not_called()
 
 
-def test_filings_persist_explicit_timestamptz(sync_module):
+def test_filings_persist_explicit_utc_in_lake_envelope(sync_module):
     db = Mock()
     instant = datetime(2026, 7, 1, tzinfo=UTC)
     sync_module["_upsert_filings"](db, [{
@@ -95,8 +100,14 @@ def test_filings_persist_explicit_timestamptz(sync_module):
         "filing_date": instant.date(), "title": "TEST Filing", "source": "FMP",
     }])
     statement, params = db.execute.call_args.args
-    assert "CAST(:accepted_at AS timestamptz)" in str(statement)
-    assert params["accepted_at"] == instant
+    assert "sp_save_event(CAST(:envelope AS jsonb))" in str(statement)
+    envelope = json.loads(params["envelope"])
+    assert envelope["event_type"] == "FILING"
+    assert datetime.fromisoformat(envelope["occurred_at"]) == instant
+    assert datetime.fromisoformat(envelope["occurred_at"]).tzinfo == UTC
+    assert datetime.fromisoformat(envelope["payload"]["accepted_at"]) == instant
+    assert envelope["event_day"] == instant.date().isoformat()
+    assert envelope["payload"]["filing_date"] == instant.date().isoformat()
 
 
 def test_source_commits_each_row_and_continues_after_persistence_failure(sync_module):
