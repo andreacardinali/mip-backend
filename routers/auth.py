@@ -1,3 +1,5 @@
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
 from fastapi import APIRouter, Depends, HTTPException
 from pwdlib import PasswordHash
 from sqlalchemy import text
@@ -7,7 +9,6 @@ from auth.security import CurrentUser, get_current_user
 from db import SessionLocal
 from market_data.factory import market_data
 from services.currencies import normalize_supported_currency
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 router = APIRouter()
 password_hash = PasswordHash.recommended()
@@ -51,7 +52,9 @@ def update_preferences(
     payload: dict,
     current_user: CurrentUser = Depends(get_current_user),
 ):
-    display_timezone = payload.get("display_timezone", current_user.get("display_timezone", "UTC"))
+    display_timezone = payload.get(
+        "display_timezone", current_user.get("display_timezone", "UTC")
+    )
     try:
         if not isinstance(display_timezone, str):
             raise ValueError("Invalid display timezone")

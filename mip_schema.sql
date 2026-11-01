@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict yFG8RwNFGbOsBkrFvsWHgzE4fElBkF3SmbbBrvqioL1LjiQxg39lmlVm8I1bXwE
+\restrict Q26CRdTq7nBijQWP683Pp6h3iNOjx7eqKq1LMOnHxGrUl6UX1XbB4EekvmBbmWS
 
 -- Dumped from database version 18.6 (Debian 18.6-1.pgdg13+2)
 -- Dumped by pg_dump version 18.6 (Debian 18.6-1.pgdg13+2)
@@ -110,6 +110,47 @@ CREATE TYPE public.trend_type AS ENUM (
     'BEARISH',
     'SIDEWAYS'
 );
+
+
+--
+-- Name: analytical_lake_timestamps(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.analytical_lake_timestamps() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+    v_now timestamptz := clock_timestamp();
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        IF current_setting('mip.analytical_lake_cleanup', true) IS DISTINCT FROM 'on'
+           OR to_regclass('pg_temp.analytical_lake_cleanup_candidates') IS NULL THEN
+            RAISE EXCEPTION 'Analytical revisions cannot be deleted';
+        END IF;
+        IF NOT EXISTS (
+            SELECT FROM pg_temp.analytical_lake_cleanup_candidates
+            WHERE event_id = OLD.event_id
+        ) THEN
+            RAISE EXCEPTION 'Analytical revision is outside the cleanup selection';
+        END IF;
+        RETURN OLD;
+    ELSIF TG_OP = 'INSERT' THEN
+        NEW.created_at := v_now;
+        NEW.updated_at := v_now;
+        NEW.ingested_at := v_now;
+        NEW.last_seen_at := v_now;
+    ELSE
+        IF (to_jsonb(NEW) - ARRAY['last_seen_at', 'updated_at'])
+            IS DISTINCT FROM (to_jsonb(OLD) - ARRAY['last_seen_at', 'updated_at']) THEN
+            RAISE EXCEPTION 'Analytical content is immutable; insert a revision';
+        END IF;
+        NEW.last_seen_at := greatest(OLD.last_seen_at, NEW.last_seen_at, v_now);
+        NEW.updated_at := v_now;
+    END IF;
+    RETURN NEW;
+END;
+$$;
 
 
 --
@@ -422,7 +463,7 @@ CREATE FUNCTION public.sp_alert_list_rule_candidates(p_rule_id uuid, p_limit int
                    'observed_at', e.created_at, 'evidence', e.payload
                ), e.created_at, 0, e.signal_event_id
         FROM scoped i
-        JOIN public.market_analysis_signal_events e USING (instrument_id)
+        JOIN public.market_analysis_lifecycle_events e USING (instrument_id)
         WHERE i.alert_type = 'SIGNAL_CHANGE' AND e.event_type <> 'OBSERVED'
           AND e.created_at BETWEEN now() - i.max_age AND now()
     )
@@ -1005,6 +1046,78 @@ $$;
 
 
 --
+-- Name: sp_cleanup_analytical_lake(integer, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_cleanup_analytical_lake(p_threshold_days integer, p_dry_run boolean DEFAULT true) RETURNS TABLE(cutoff_at timestamp with time zone, eligible_rows bigint, protected_rows bigint, deleted_rows bigint)
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    SET lock_timeout TO '10s'
+    AS $$
+DECLARE
+    v_setting text;
+BEGIN
+    IF p_threshold_days IS NULL OR p_threshold_days <= 0 OR p_dry_run IS NULL THEN
+        RAISE EXCEPTION 'Specify positive retention days and a non-null dry-run flag';
+    END IF;
+    LOCK TABLE public.trading_signals IN SHARE MODE;
+    LOCK TABLE public.event_lake IN ROW EXCLUSIVE MODE;
+    LOCK TABLE public.analytical_lake IN SHARE ROW EXCLUSIVE MODE;
+    cutoff_at := statement_timestamp() - make_interval(days => p_threshold_days);
+    deleted_rows := 0;
+    CREATE TEMP TABLE analytical_lake_cleanup_protected (
+        event_id uuid PRIMARY KEY
+    ) ON COMMIT DROP;
+    WITH RECURSIVE edges AS (
+        SELECT event_id, parent_id FROM public.analytical_lake
+        CROSS JOIN LATERAL unnest(parent_event_ids) parents(parent_id)
+        UNION
+        SELECT event_id, supersedes_event_id FROM public.analytical_lake
+        WHERE supersedes_event_id IS NOT NULL
+        UNION
+        SELECT supersedes_event_id, event_id FROM public.analytical_lake
+        WHERE supersedes_event_id IS NOT NULL
+    ), retained(event_id) AS (
+        SELECT event_id FROM public.analytical_lake WHERE last_seen_at >= cutoff_at
+            OR occurred_at >= statement_timestamp()
+            OR event_day >= (statement_timestamp() AT TIME ZONE 'UTC')::date
+        UNION
+        SELECT event_id FROM public.market_analysis_signal_lake
+        UNION
+        SELECT edges.parent_id FROM retained JOIN edges USING (event_id)
+    )
+    INSERT INTO pg_temp.analytical_lake_cleanup_protected
+    SELECT retained.event_id FROM retained
+    JOIN public.analytical_lake lake USING (event_id);
+    CREATE TEMP TABLE analytical_lake_cleanup_candidates (
+        event_id uuid PRIMARY KEY
+    ) ON COMMIT DROP;
+    INSERT INTO pg_temp.analytical_lake_cleanup_candidates
+    SELECT event_id FROM public.analytical_lake lake WHERE NOT EXISTS (
+        SELECT FROM pg_temp.analytical_lake_cleanup_protected retained
+        WHERE retained.event_id = lake.event_id
+    );
+    SELECT count(*) INTO eligible_rows FROM pg_temp.analytical_lake_cleanup_candidates;
+    SELECT count(*) INTO protected_rows FROM public.analytical_lake lake
+    JOIN pg_temp.analytical_lake_cleanup_protected USING (event_id)
+    WHERE lake.last_seen_at < cutoff_at;
+    IF NOT p_dry_run THEN
+        v_setting := current_setting('mip.analytical_lake_cleanup', true);
+        PERFORM set_config('mip.analytical_lake_cleanup', 'on', true);
+        DELETE FROM public.analytical_lake lake
+        USING pg_temp.analytical_lake_cleanup_candidates candidate
+        WHERE lake.event_id = candidate.event_id;
+        GET DIAGNOSTICS deleted_rows = ROW_COUNT;
+        PERFORM set_config('mip.analytical_lake_cleanup', coalesce(v_setting, ''), true);
+    END IF;
+    DROP TABLE pg_temp.analytical_lake_cleanup_candidates;
+    DROP TABLE pg_temp.analytical_lake_cleanup_protected;
+    RETURN NEXT;
+END;
+$$;
+
+
+--
 -- Name: sp_cleanup_event_lake(integer, boolean); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -1143,197 +1256,21 @@ $$;
 
 
 --
--- Name: sp_cleanup_llm_request_queue(integer, integer, integer, boolean, interval, text, boolean, bigint, bigint, bigint, bigint, bigint); Type: PROCEDURE; Schema: public; Owner: -
+-- Name: sp_cleanup_llm_request_queue(integer, integer, integer, boolean, interval, text, boolean, boolean); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE PROCEDURE public.sp_cleanup_llm_request_queue(IN p_completed_retention_days integer DEFAULT 7, IN p_failed_retention_days integer DEFAULT 30, IN p_abandoned_retention_days integer DEFAULT 30, IN p_include_orphans boolean DEFAULT false, IN p_orphan_age interval DEFAULT '01:00:00'::interval, IN p_queue_key text DEFAULT NULL::text, IN p_dry_run boolean DEFAULT true, INOUT p_completed_count bigint DEFAULT 0, INOUT p_failed_count bigint DEFAULT 0, INOUT p_abandoned_count bigint DEFAULT 0, INOUT p_orphaned_pending_count bigint DEFAULT 0, INOUT p_expired_processing_count bigint DEFAULT 0)
+CREATE FUNCTION public.sp_cleanup_llm_request_queue(p_completed_retention_days integer DEFAULT 7, p_failed_retention_days integer DEFAULT 30, p_abandoned_retention_days integer DEFAULT 30, p_include_orphans boolean DEFAULT false, p_orphan_age interval DEFAULT '01:00:00'::interval, p_queue_key text DEFAULT NULL::text, p_dry_run boolean DEFAULT true, p_purge_all boolean DEFAULT false, OUT p_completed_count bigint, OUT p_failed_count bigint, OUT p_abandoned_count bigint, OUT p_orphaned_pending_count bigint, OUT p_expired_processing_count bigint, OUT p_purged_count bigint) RETURNS record
     LANGUAGE plpgsql
     AS $$
 DECLARE
     v_lock_acquired boolean;
 BEGIN
-    IF p_completed_retention_days < 1 THEN
-        RAISE EXCEPTION
-            'p_completed_retention_days must be >= 1';
-    END IF;
-
-    IF p_failed_retention_days < 1 THEN
-        RAISE EXCEPTION
-            'p_failed_retention_days must be >= 1';
-    END IF;
-
-    IF p_abandoned_retention_days < 1 THEN
-        RAISE EXCEPTION
-            'p_abandoned_retention_days must be >= 1';
-    END IF;
-
-    IF p_orphan_age <= interval '0 seconds' THEN
-        RAISE EXCEPTION
-            'p_orphan_age must be greater than zero';
-    END IF;
-
-    /*
-     * Evita due cleanup concorrenti.
-     * Il lock viene rilasciato automaticamente al termine
-     * della transazione.
-     */
-    v_lock_acquired := pg_try_advisory_xact_lock(
-        hashtext('public.sp_cleanup_llm_request_queue')
-    );
-
-    IF NOT v_lock_acquired THEN
-        RAISE EXCEPTION
-            'Another LLM queue cleanup is already running';
-    END IF;
-
-    SELECT count(*)
-    INTO p_completed_count
-    FROM public.llm_request_queue q
-    WHERE q.status = 'COMPLETED'
-      AND coalesce(q.completed_at, q.created_at)
-          < now() - make_interval(
-              days => p_completed_retention_days
-          )
-      AND (
-          p_queue_key IS NULL
-          OR q.queue_key = p_queue_key
-      );
-
-    SELECT count(*)
-    INTO p_failed_count
-    FROM public.llm_request_queue q
-    WHERE q.status = 'FAILED'
-      AND coalesce(q.completed_at, q.created_at)
-          < now() - make_interval(
-              days => p_failed_retention_days
-          )
-      AND (
-          p_queue_key IS NULL
-          OR q.queue_key = p_queue_key
-      );
-
-    SELECT count(*)
-    INTO p_abandoned_count
-    FROM public.llm_request_queue q
-    WHERE q.status = 'ABANDONED'
-      AND coalesce(q.completed_at, q.created_at)
-          < now() - make_interval(
-              days => p_abandoned_retention_days
-          )
-      AND (
-          p_queue_key IS NULL
-          OR q.queue_key = p_queue_key
-      );
-
-    IF p_include_orphans THEN
-        SELECT count(*)
-        INTO p_orphaned_pending_count
-        FROM public.llm_request_queue q
-        WHERE q.status IN ('PENDING', 'RETRY')
-          AND q.created_at < now() - p_orphan_age
-          AND (
-              p_queue_key IS NULL
-              OR q.queue_key = p_queue_key
-          );
-
-        SELECT count(*)
-        INTO p_expired_processing_count
-        FROM public.llm_request_queue q
-        WHERE q.status = 'PROCESSING'
-          AND q.lease_expires_at IS NOT NULL
-          AND q.lease_expires_at < now()
-          AND (
-              p_queue_key IS NULL
-              OR q.queue_key = p_queue_key
-          );
-    END IF;
-
-    RAISE NOTICE
-        'LLM queue cleanup: completed=%, failed=%, abandoned=%, orphaned_pending=%, expired_processing=%, dry_run=%',
-        p_completed_count,
-        p_failed_count,
-        p_abandoned_count,
-        p_orphaned_pending_count,
-        p_expired_processing_count,
-        p_dry_run;
-
-    IF p_dry_run THEN
-        RETURN;
-    END IF;
-
-    DELETE FROM public.llm_request_queue q
-    WHERE q.status = 'COMPLETED'
-      AND coalesce(q.completed_at, q.created_at)
-          < now() - make_interval(
-              days => p_completed_retention_days
-          )
-      AND (
-          p_queue_key IS NULL
-          OR q.queue_key = p_queue_key
-      );
-
-    DELETE FROM public.llm_request_queue q
-    WHERE q.status = 'FAILED'
-      AND coalesce(q.completed_at, q.created_at)
-          < now() - make_interval(
-              days => p_failed_retention_days
-          )
-      AND (
-          p_queue_key IS NULL
-          OR q.queue_key = p_queue_key
-      );
-
-    DELETE FROM public.llm_request_queue q
-    WHERE q.status = 'ABANDONED'
-      AND coalesce(q.completed_at, q.created_at)
-          < now() - make_interval(
-              days => p_abandoned_retention_days
-          )
-      AND (
-          p_queue_key IS NULL
-          OR q.queue_key = p_queue_key
-      );
-
-    IF p_include_orphans THEN
-        /*
-         * PENDING e RETRY molto vecchie possono appartenere
-         * a processi terminati prima dell'esecuzione.
-         */
-        DELETE FROM public.llm_request_queue q
-        WHERE q.status IN ('PENDING', 'RETRY')
-          AND q.created_at < now() - p_orphan_age
-          AND (
-              p_queue_key IS NULL
-              OR q.queue_key = p_queue_key
-          );
-
-        /*
-         * Una PROCESSING viene rimossa solo se la lease
-         * è valorizzata ed è già scaduta.
-         */
-        DELETE FROM public.llm_request_queue q
-        WHERE q.status = 'PROCESSING'
-          AND q.lease_expires_at IS NOT NULL
-          AND q.lease_expires_at < now()
-          AND (
-              p_queue_key IS NULL
-              OR q.queue_key = p_queue_key
-          );
-    END IF;
-END;
-$$;
-
-
---
--- Name: sp_cleanup_llm_request_queue(integer, integer, integer, boolean, interval, text, boolean, boolean, bigint, bigint, bigint, bigint, bigint, bigint); Type: PROCEDURE; Schema: public; Owner: -
---
-
-CREATE PROCEDURE public.sp_cleanup_llm_request_queue(IN p_completed_retention_days integer DEFAULT 7, IN p_failed_retention_days integer DEFAULT 30, IN p_abandoned_retention_days integer DEFAULT 30, IN p_include_orphans boolean DEFAULT false, IN p_orphan_age interval DEFAULT '01:00:00'::interval, IN p_queue_key text DEFAULT NULL::text, IN p_dry_run boolean DEFAULT true, IN p_purge_all boolean DEFAULT false, INOUT p_completed_count bigint DEFAULT 0, INOUT p_failed_count bigint DEFAULT 0, INOUT p_abandoned_count bigint DEFAULT 0, INOUT p_orphaned_pending_count bigint DEFAULT 0, INOUT p_expired_processing_count bigint DEFAULT 0, INOUT p_purged_count bigint DEFAULT 0)
-    LANGUAGE plpgsql
-    AS $$
-DECLARE
-    v_lock_acquired boolean;
-BEGIN
+    p_completed_count := 0;
+    p_failed_count := 0;
+    p_abandoned_count := 0;
+    p_orphaned_pending_count := 0;
+    p_expired_processing_count := 0;
+    p_purged_count := 0;
     IF p_completed_retention_days < 1 THEN
         RAISE EXCEPTION
             'p_completed_retention_days must be >= 1';
@@ -1671,6 +1608,12 @@ BEGIN
     WHERE entity_id = p_target_entity_id
     FOR UPDATE;
 
+
+    IF EXISTS (SELECT FROM public.analytical_lake
+        WHERE entity_id = p_source_entity_id) THEN
+        RAISE EXCEPTION 'Cannot consolidate an entity referenced by immutable analytical history';
+    END IF;
+
     IF NOT p_force
        AND v_source.entity_type IS DISTINCT FROM v_target.entity_type
     THEN
@@ -1826,179 +1769,12 @@ BEGIN
      * Tables where duplicate rows can be dropped safely after transferring
      * their information.
      */
-    INSERT INTO entity_sectors (
-        entity_id,
-        sector_id,
-        weight
-    )
-    SELECT
-        p_target_entity_id,
-        sector_id,
-        weight
-    FROM entity_sectors
-    WHERE entity_id = p_source_entity_id
-    ON CONFLICT (entity_id, sector_id)
-    DO UPDATE SET
-        weight = GREATEST(
-            COALESCE(entity_sectors.weight, 0),
-            COALESCE(EXCLUDED.weight, 0)
-        );
-
-    DELETE FROM entity_sectors
-    WHERE entity_id = p_source_entity_id;
-
-    INSERT INTO entity_tags (
-        entity_id,
-        tag_id
-    )
-    SELECT
-        p_target_entity_id,
-        tag_id
-    FROM entity_tags
-    WHERE entity_id = p_source_entity_id
-    ON CONFLICT (entity_id, tag_id) DO NOTHING;
-
-    DELETE FROM entity_tags
-    WHERE entity_id = p_source_entity_id;
-
-    INSERT INTO entity_metrics (
-        entity_id,
-        metric_name,
-        metric_value,
-        metric_date
-    )
-    SELECT
-        p_target_entity_id,
-        metric_name,
-        metric_value,
-        metric_date
-    FROM entity_metrics
-    WHERE entity_id = p_source_entity_id
-    ON CONFLICT (
-        entity_id,
-        metric_name,
-        metric_date
-    )
-    DO UPDATE SET
-        metric_value = COALESCE(
-            EXCLUDED.metric_value,
-            entity_metrics.metric_value
-        );
-
-    DELETE FROM entity_metrics
-    WHERE entity_id = p_source_entity_id;
-
     /*
      * Simple entity references.
      */
-    UPDATE etf_constituents
-    SET entity_id = p_target_entity_id
-    WHERE entity_id = p_source_entity_id;
-
-    UPDATE instrument_entity_exposure
-    SET entity_id = p_target_entity_id
-    WHERE entity_id = p_source_entity_id;
-
     UPDATE notifications
     SET entity_id = p_target_entity_id
     WHERE entity_id = p_source_entity_id;
-
-    UPDATE notification_hashes
-    SET entity_id = p_target_entity_id
-    WHERE entity_id = p_source_entity_id;
-
-    UPDATE insider_transactions
-    SET entity_id = p_target_entity_id
-    WHERE entity_id = p_source_entity_id;
-
-    UPDATE signal_factors
-    SET entity_id = p_target_entity_id
-    WHERE entity_id = p_source_entity_id;
-
-    INSERT INTO signal_history (
-        entity_id,
-        overall_score,
-        signal,
-        trend,
-        confidence,
-        reason,
-        created_at
-    )
-    SELECT
-        p_target_entity_id,
-        overall_score,
-        signal,
-        trend,
-        confidence,
-        reason,
-        created_at
-    FROM signal_history
-    WHERE entity_id = p_source_entity_id;
-
-    DELETE FROM signal_history
-    WHERE entity_id = p_source_entity_id;
-
-    INSERT INTO signals (
-        entity_id,
-        overall_score,
-        signal,
-        trend,
-        confidence,
-        last_reason
-    )
-    SELECT
-        p_target_entity_id,
-        overall_score,
-        signal,
-        trend,
-        confidence,
-        last_reason
-    FROM signals
-    WHERE entity_id = p_source_entity_id
-    ON CONFLICT (entity_id)
-    DO NOTHING;
-
-    DELETE FROM signals
-    WHERE entity_id = p_source_entity_id;
-
-    UPDATE portfolio_impacts
-    SET entity_id = p_target_entity_id
-    WHERE entity_id = p_source_entity_id;
-
-    UPDATE entity_impact_history
-    SET entity_id = p_target_entity_id
-    WHERE entity_id = p_source_entity_id;
-
-    /*
-     * Cache rows are derived. Preserve the target and discard conflicting
-     * source rows, so they can be recalculated.
-     */
-    UPDATE cache_portfolio_exposure source
-    SET entity_id = p_target_entity_id
-    WHERE source.entity_id = p_source_entity_id
-      AND NOT EXISTS (
-          SELECT 1
-          FROM cache_portfolio_exposure target
-          WHERE target.portfolio_id = source.portfolio_id
-            AND target.entity_id = p_target_entity_id
-      );
-
-    DELETE FROM cache_portfolio_exposure
-    WHERE entity_id = p_source_entity_id;
-
-    /*
-     * Entity relationships.
-     */
-    UPDATE entity_relationships
-    SET source_entity_id = p_target_entity_id
-    WHERE source_entity_id = p_source_entity_id;
-
-    UPDATE entity_relationships
-    SET target_entity_id = p_target_entity_id
-    WHERE target_entity_id = p_source_entity_id;
-
-    DELETE FROM entity_relationships
-    WHERE source_entity_id = target_entity_id;
 
     /*
      * Prefer target metadata, fill only missing fields.
@@ -2323,103 +2099,6 @@ BEGIN
     WHERE instrument_id = p_source_instrument_id;
 
     /*
-     * Portfolio holding snapshots:
-     * preserve one row per portfolio/instrument/date.
-     */
-    INSERT INTO portfolio_holdings_snapshots (
-        portfolio_id,
-        instrument_id,
-        snapshot_date,
-        quantity,
-        market_value,
-        weight,
-        created_at
-    )
-    SELECT
-        source.portfolio_id,
-        p_target_instrument_id,
-        source.snapshot_date,
-        source.quantity,
-        source.market_value,
-        source.weight,
-        source.created_at
-    FROM portfolio_holdings_snapshots source
-    WHERE source.instrument_id = p_source_instrument_id
-    ON CONFLICT (
-        portfolio_id,
-        instrument_id,
-        snapshot_date
-    )
-    DO UPDATE SET
-        quantity = COALESCE(
-            portfolio_holdings_snapshots.quantity,
-            0
-        ) + COALESCE(EXCLUDED.quantity, 0),
-        market_value = COALESCE(
-            portfolio_holdings_snapshots.market_value,
-            0
-        ) + COALESCE(EXCLUDED.market_value, 0),
-        weight = COALESCE(
-            portfolio_holdings_snapshots.weight,
-            EXCLUDED.weight
-        );
-
-    GET DIAGNOSTICS v_moved_snapshots = ROW_COUNT;
-
-    DELETE FROM portfolio_holdings_snapshots
-    WHERE instrument_id = p_source_instrument_id;
-
-    /*
-     * ETF constituents where this instrument is the ETF.
-     */
-    UPDATE etf_constituents
-    SET etf_instrument_id = p_target_instrument_id
-    WHERE etf_instrument_id = p_source_instrument_id;
-
-    /*
-     * Exposure mappings.
-     */
-    UPDATE instrument_entity_exposure source
-    SET instrument_id = p_target_instrument_id
-    WHERE source.instrument_id = p_source_instrument_id
-      AND NOT EXISTS (
-          SELECT 1
-          FROM instrument_entity_exposure target
-          WHERE target.instrument_id = p_target_instrument_id
-            AND target.entity_id = source.entity_id
-            AND target.effective_date
-                IS NOT DISTINCT FROM source.effective_date
-      );
-
-    DELETE FROM instrument_entity_exposure
-    WHERE instrument_id = p_source_instrument_id;
-
-    /*
-     * Parent/child relations. Delete self-relations and duplicate edges.
-     */
-    UPDATE instrument_relations
-    SET parent_instrument_id = p_target_instrument_id
-    WHERE parent_instrument_id = p_source_instrument_id;
-
-    UPDATE instrument_relations
-    SET child_instrument_id = p_target_instrument_id
-    WHERE child_instrument_id = p_source_instrument_id;
-
-    DELETE FROM instrument_relations
-    WHERE parent_instrument_id = child_instrument_id;
-
-    DELETE FROM instrument_relations duplicate
-    USING instrument_relations canonical
-    WHERE duplicate.relation_id <> canonical.relation_id
-      AND duplicate.parent_instrument_id =
-          canonical.parent_instrument_id
-      AND duplicate.child_instrument_id =
-          canonical.child_instrument_id
-      AND duplicate.relation_type
-          IS NOT DISTINCT FROM canonical.relation_type
-      AND duplicate.relation_id > canonical.relation_id;
-
-    /*
      * Price refresh queue has UNIQUE(instrument_id).
      */
     SELECT *
@@ -2464,38 +2143,6 @@ BEGIN
             WHERE instrument_id = p_source_instrument_id;
         END IF;
     END IF;
-
-    /*
-     * Preserve aliases. The source symbol is useful when providers use
-     * alternative representations.
-     */
-    INSERT INTO instrument_aliases (
-        instrument_id,
-        alias_symbol
-    )
-    SELECT
-        p_target_instrument_id,
-        alias_symbol
-    FROM instrument_aliases
-    WHERE instrument_id = p_source_instrument_id
-    ON CONFLICT (instrument_id, upper(btrim((alias_symbol)::text))) WHERE ((instrument_id IS NOT NULL) AND (NULLIF(btrim((alias_symbol)::text), ''::text) IS NOT NULL)) DO NOTHING;
-
-    IF v_source.symbol IS DISTINCT FROM v_target.symbol THEN
-        INSERT INTO instrument_aliases (
-            instrument_id,
-            alias_symbol
-        )
-        VALUES (
-            p_target_instrument_id,
-            v_source.symbol
-        )
-        ON CONFLICT (instrument_id, upper(btrim((alias_symbol)::text))) WHERE ((instrument_id IS NOT NULL) AND (NULLIF(btrim((alias_symbol)::text), ''::text) IS NOT NULL)) DO NOTHING;
-    END IF;
-
-    DELETE FROM instrument_aliases
-    WHERE instrument_id = p_source_instrument_id;
-
-
 
     /*
      * Record the operation before removing the source.
@@ -4608,6 +4255,17 @@ CREATE FUNCTION public.sp_get_user_context(p_user_id uuid) RETURNS TABLE(user_id
 
 
 --
+-- Name: sp_get_user_display_timezone(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_get_user_display_timezone(p_user_id uuid) RETURNS text
+    LANGUAGE sql STABLE
+    AS $$
+    SELECT display_timezone FROM public.users WHERE user_id = p_user_id;
+$$;
+
+
+--
 -- Name: sp_get_user_entities(uuid, character varying, text, integer); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -4779,12 +4437,6 @@ $$;
 --
 -- Name: sp_get_user_entity_overview(uuid, uuid); Type: FUNCTION; Schema: public; Owner: -
 --
-
-CREATE FUNCTION public.sp_get_user_display_timezone(p_user_id uuid)
-RETURNS text LANGUAGE sql STABLE AS $$
-    SELECT display_timezone FROM public.users WHERE user_id = p_user_id;
-$$;
-
 
 CREATE FUNCTION public.sp_get_user_entity_overview(p_user_id uuid, p_entity_id uuid) RETURNS jsonb
     LANGUAGE sql STABLE
@@ -5649,6 +5301,60 @@ $$;
 
 
 --
+-- Name: sp_market_analysis_apply_lake_enrichment(uuid, character varying, numeric, jsonb, numeric, uuid, jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_market_analysis_apply_lake_enrichment(p_signal_id uuid, p_enrichment_fingerprint character varying, p_llm_score numeric, p_llm_analysis jsonb, p_composite_score numeric DEFAULT NULL::numeric, p_assessment_event_id uuid DEFAULT NULL::uuid, p_input_signal jsonb DEFAULT NULL::jsonb) RETURNS boolean
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+    v_signal public.trading_signals%ROWTYPE;
+    v_entity_id uuid;
+    v_event_id uuid;
+BEGIN
+    SELECT * INTO v_signal FROM public.trading_signals
+    WHERE signal_id = p_signal_id FOR UPDATE;
+    IF NOT FOUND OR v_signal.status NOT IN ('CANDIDATE', 'CONFIRMED')
+        OR (v_signal.evidence->>'assessment_event_id')::uuid
+            IS DISTINCT FROM p_assessment_event_id THEN
+        RETURN false;
+    END IF;
+    IF p_input_signal IS NULL OR jsonb_typeof(p_input_signal) <> 'object'
+        OR p_input_signal->>'signal_id' IS DISTINCT FROM p_signal_id::text THEN
+        RAISE EXCEPTION 'Enrichment requires the exact input sent to the model';
+    END IF;
+    IF NOT public.sp_market_analysis_apply_llm_enrichment(p_signal_id,
+        p_enrichment_fingerprint, p_llm_score, p_llm_analysis, p_composite_score) THEN
+        RETURN false;
+    END IF;
+    SELECT entity_id INTO v_entity_id FROM public.instruments
+    WHERE instrument_id = v_signal.instrument_id;
+    v_event_id := public.sp_save_analytical_event(jsonb_build_object(
+        'schema_version', 1, 'payload_version', 1,
+        'event_type', 'SIGNAL_ENRICHMENT', 'stage', 'ENRICHED', 'source', 'MIP',
+        'event_key', jsonb_build_array(p_signal_id, p_assessment_event_id,
+            p_enrichment_fingerprint)::text,
+        'occurred_at', v_signal.observed_at, 'observed_at', clock_timestamp(),
+        'subjects', jsonb_build_array(jsonb_build_object(
+            'instrument_id', v_signal.instrument_id::text, 'entity_id', v_entity_id::text)),
+        'parent_event_ids', CASE WHEN p_assessment_event_id IS NULL THEN '[]'::jsonb
+            ELSE jsonb_build_array(p_assessment_event_id) END,
+        'payload', jsonb_build_object('signal_id', p_signal_id::text,
+            'enrichment_fingerprint', p_enrichment_fingerprint,
+            'llm_score', p_llm_score, 'composite_score', p_composite_score,
+            'llm_analysis', p_llm_analysis),
+        'evidence', jsonb_build_object('input_signal', p_input_signal),
+        'provenance', '{}'::jsonb
+    ));
+    INSERT INTO public.market_analysis_signal_lake VALUES (p_signal_id, v_event_id)
+    ON CONFLICT DO NOTHING;
+    RETURN true;
+END;
+$$;
+
+
+--
 -- Name: sp_market_analysis_apply_llm_enrichment(uuid, character varying, numeric, jsonb, numeric); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -5704,8 +5410,8 @@ CREATE FUNCTION public.sp_market_analysis_close_missing_signals(p_observed_befor
     AS $$
 DECLARE n integer;
 BEGIN
- WITH latest AS (SELECT DISTINCT ON(instrument_id,strategy_code,timeframe) * FROM public.market_analysis_signal_events ORDER BY instrument_id,strategy_code,timeframe,observed_at DESC), inserted AS (
- INSERT INTO public.market_analysis_signal_events(signal_id,instrument_id,strategy_code,timeframe,previous_status,new_status,previous_direction,new_direction,event_type,reason,observed_at,payload)
+ WITH latest AS (SELECT DISTINCT ON(instrument_id,strategy_code,timeframe) * FROM public.market_analysis_lifecycle_events ORDER BY instrument_id,strategy_code,timeframe,observed_at DESC), inserted AS (
+ INSERT INTO public.market_analysis_lifecycle_events(signal_id,instrument_id,strategy_code,timeframe,previous_status,new_status,previous_direction,new_direction,event_type,reason,observed_at,payload)
  SELECT signal_id,instrument_id,strategy_code,timeframe,new_status,'EXPIRED',new_direction,new_direction,'EXPIRED','not observed in subsequent scan',now(),'{}'::jsonb FROM latest WHERE new_status IN('CANDIDATE','CONFIRMED') AND observed_at < p_observed_before-make_interval(mins=>GREATEST(p_stability_minutes,0)) RETURNING signal_id)
  UPDATE public.trading_signals SET status='EXPIRED' WHERE signal_id IN(SELECT signal_id FROM inserted); GET DIAGNOSTICS n=ROW_COUNT; RETURN n;
 END;$$;
@@ -5740,7 +5446,7 @@ BEGIN
           AND s.observed_at < evaluation.observed_at - make_interval(mins => GREATEST(p_stability_minutes, 0))
         FOR UPDATE OF s
     LOOP
-        INSERT INTO public.market_analysis_signal_events(
+        INSERT INTO public.market_analysis_lifecycle_events(
             signal_id, instrument_id, strategy_code, timeframe,
             previous_status, new_status, previous_direction, new_direction,
             event_type, reason, observed_at, payload
@@ -5793,6 +5499,26 @@ CREATE FUNCTION public.sp_market_analysis_get_universe(p_code character varying)
     WHERE UPPER(mu.code) = UPPER(BTRIM(p_code))
       AND mu.active = true
     LIMIT 1;
+$$;
+
+
+--
+-- Name: sp_market_analysis_link_scan_event(uuid, uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_market_analysis_link_scan_event(p_run_id uuid, p_event_id uuid) RETURNS void
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+BEGIN
+    IF NOT EXISTS (SELECT FROM public.analytical_lake
+        WHERE event_id = p_event_id
+          AND event_type IN ('MARKET_OBSERVATION', 'SIGNAL_ASSESSMENT')) THEN
+        RAISE EXCEPTION 'Scan links require an observation or assessment';
+    END IF;
+    INSERT INTO public.market_analysis_scan_events VALUES (p_run_id, p_event_id)
+    ON CONFLICT DO NOTHING;
+END;
 $$;
 
 
@@ -5951,7 +5677,7 @@ $_$;
 CREATE FUNCTION public.sp_market_analysis_list_signal_events(p_instrument_id uuid, p_strategy_code character varying DEFAULT NULL::character varying, p_limit integer DEFAULT 100) RETURNS SETOF jsonb
     LANGUAGE sql STABLE
     AS $$
- SELECT to_jsonb(e) FROM public.market_analysis_signal_events e WHERE e.instrument_id=p_instrument_id AND(p_strategy_code IS NULL OR e.strategy_code=p_strategy_code) ORDER BY e.observed_at DESC,e.created_at DESC LIMIT LEAST(GREATEST(p_limit,1),1000);
+ SELECT to_jsonb(e) FROM public.market_analysis_lifecycle_events e WHERE e.instrument_id=p_instrument_id AND(p_strategy_code IS NULL OR e.strategy_code=p_strategy_code) ORDER BY e.observed_at DESC,e.created_at DESC LIMIT LEAST(GREATEST(p_limit,1),1000);
 $$;
 
 
@@ -5965,10 +5691,10 @@ CREATE FUNCTION public.sp_market_analysis_list_signal_performance(p_instrument_i
     WITH cycles AS (
         SELECT entry.*, terminal.event_type AS end_reason,
             terminal.observed_at AS exit_at, terminal.payload AS exit_payload
-        FROM public.market_analysis_signal_events entry
+        FROM public.market_analysis_lifecycle_events entry
         LEFT JOIN LATERAL (
             SELECT event_type, observed_at, payload
-            FROM public.market_analysis_signal_events next_event
+            FROM public.market_analysis_lifecycle_events next_event
             WHERE next_event.instrument_id = entry.instrument_id
               AND next_event.strategy_code = entry.strategy_code
               AND next_event.timeframe = entry.timeframe
@@ -6132,7 +5858,7 @@ BEGIN
             ORDER BY signal.signal_id
             FOR UPDATE
         LOOP
-            INSERT INTO public.market_analysis_signal_events (
+            INSERT INTO public.market_analysis_lifecycle_events (
                 signal_id, instrument_id, strategy_code, timeframe,
                 previous_status, new_status, previous_direction, new_direction,
                 event_type, observed_at, reason, payload
@@ -6150,7 +5876,7 @@ BEGIN
 
     SELECT event.*
     INTO v_previous
-    FROM public.market_analysis_signal_events event
+    FROM public.market_analysis_lifecycle_events event
     WHERE event.instrument_id = v_signal.instrument_id
       AND event.strategy_code = v_signal.strategy_code
       AND event.timeframe = v_signal.timeframe
@@ -6159,7 +5885,7 @@ BEGIN
 
     SELECT event.*
     INTO v_generation
-    FROM public.market_analysis_signal_events event
+    FROM public.market_analysis_lifecycle_events event
     WHERE event.instrument_id = v_signal.instrument_id
       AND event.strategy_code = v_signal.strategy_code
       AND event.timeframe = v_signal.timeframe
@@ -6216,7 +5942,7 @@ BEGIN
         );
     END IF;
 
-    INSERT INTO public.market_analysis_signal_events (
+    INSERT INTO public.market_analysis_lifecycle_events (
         signal_id,
         instrument_id,
         strategy_code,
@@ -9994,6 +9720,159 @@ $$;
 
 
 --
+-- Name: sp_save_analytical_event(jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_save_analytical_event(p_envelope jsonb) RETURNS uuid
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    SET "TimeZone" TO 'UTC'
+    SET "DateStyle" TO 'ISO, YMD'
+    AS $_$
+DECLARE
+    v_type public.event_type_catalog%ROWTYPE;
+    v_previous public.analytical_lake%ROWTYPE;
+    v_field record;
+    v_event_id uuid;
+    v_entity_id uuid;
+    v_subjects jsonb;
+    v_parents uuid[];
+    v_hash text;
+    v_event_type text := p_envelope->>'event_type';
+    v_stage text := p_envelope->>'stage';
+    v_source text := p_envelope->>'source';
+    v_key text := p_envelope->>'event_key';
+    v_occurred_at timestamptz := (p_envelope->>'occurred_at')::timestamptz;
+    v_event_day date := (p_envelope->>'event_day')::date;
+BEGIN
+    IF jsonb_typeof(p_envelope) IS DISTINCT FROM 'object'
+        OR (p_envelope->>'schema_version')::integer IS DISTINCT FROM 1
+        OR nullif(btrim(v_source), '') IS NULL
+        OR nullif(btrim(v_key), '') IS NULL
+        OR v_event_type IS NULL
+        OR v_event_type NOT IN ('MARKET_OBSERVATION', 'SIGNAL_ASSESSMENT',
+            'SIGNAL_ENRICHMENT', 'SIGNAL_LIFECYCLE') THEN
+        RAISE EXCEPTION 'Invalid analytical envelope';
+    END IF;
+    SELECT * INTO v_type FROM public.event_type_catalog
+    WHERE event_type = v_event_type
+      AND payload_version = (p_envelope->>'payload_version')::integer;
+    IF NOT FOUND OR v_stage IS NULL OR NOT v_stage = ANY(v_type.allowed_stages) THEN
+        RAISE EXCEPTION 'Unregistered analytical type/version or stage';
+    END IF;
+    FOREACH v_key IN ARRAY ARRAY['payload', 'evidence', 'provenance'] LOOP
+        IF jsonb_typeof(p_envelope->v_key) IS DISTINCT FROM 'object' THEN
+            RAISE EXCEPTION '% must be an object', v_key;
+        END IF;
+    END LOOP;
+    v_key := p_envelope->>'event_key';
+    IF jsonb_typeof(p_envelope->'subjects') IS DISTINCT FROM 'array'
+        OR jsonb_typeof(p_envelope->'parent_event_ids') IS DISTINCT FROM 'array'
+        OR (p_envelope->'raw_payload' <> 'null'::jsonb
+            AND jsonb_typeof(p_envelope->'raw_payload') <> 'object') THEN
+        RAISE EXCEPTION 'Invalid subjects, parents or raw payload';
+    END IF;
+    IF EXISTS (SELECT FROM jsonb_array_elements(p_envelope->'subjects') AS item(value)
+        WHERE jsonb_typeof(value) <> 'object') THEN
+        RAISE EXCEPTION 'Subjects must be objects';
+    END IF;
+    FOR v_field IN SELECT * FROM jsonb_each_text(v_type.required_payload_types) LOOP
+        IF jsonb_typeof(p_envelope->'payload'->v_field.key)
+            IS DISTINCT FROM v_field.value THEN
+            RAISE EXCEPTION 'Invalid % payload field %', v_event_type, v_field.key;
+        END IF;
+    END LOOP;
+    IF ((p_envelope->>'occurred_at') IS NOT NULL
+        AND (p_envelope->>'occurred_at') !~ '(Z|[+-][0-9]{2}:[0-9]{2})$')
+        OR ((p_envelope->>'observed_at') IS NOT NULL
+        AND (p_envelope->>'observed_at') !~ '(Z|[+-][0-9]{2}:[0-9]{2})$') THEN
+        RAISE EXCEPTION 'Instants require an explicit UTC offset';
+    END IF;
+    IF (SELECT count(DISTINCT value->>'instrument_id')
+        FROM jsonb_array_elements(p_envelope->'subjects')) <> 1
+        OR EXISTS (SELECT FROM jsonb_array_elements(p_envelope->'subjects')
+            WHERE value->>'instrument_id' IS NULL) THEN
+        RAISE EXCEPTION 'Analytical events require one exact instrument';
+    END IF;
+    IF (SELECT count(DISTINCT value->>'entity_id')
+        FROM jsonb_array_elements(p_envelope->'subjects')) > 1 THEN
+        RAISE EXCEPTION 'Analytical events cannot span entities';
+    END IF;
+    IF EXISTS (
+        SELECT FROM jsonb_array_elements(p_envelope->'subjects') subject
+        LEFT JOIN public.instruments instrument
+            ON instrument.instrument_id = (subject->>'instrument_id')::uuid
+        WHERE instrument.instrument_id IS NULL
+            OR ((subject->>'entity_id') IS NOT NULL AND instrument.entity_id
+                IS DISTINCT FROM (subject->>'entity_id')::uuid)
+    ) THEN
+        RAISE EXCEPTION 'Unknown instrument or inconsistent parent entity';
+    END IF;
+    SELECT coalesce(jsonb_agg(value ORDER BY value), '[]'::jsonb)
+    INTO v_subjects FROM (SELECT DISTINCT value
+        FROM jsonb_array_elements(p_envelope->'subjects')) subjects;
+    SELECT (value->>'entity_id')::uuid INTO v_entity_id
+    FROM jsonb_array_elements(v_subjects) WHERE value->>'entity_id' IS NOT NULL LIMIT 1;
+    SELECT coalesce(array_agg(DISTINCT value::uuid ORDER BY value::uuid), '{}'::uuid[])
+    INTO v_parents FROM jsonb_array_elements_text(p_envelope->'parent_event_ids');
+    LOCK TABLE public.event_lake IN ROW EXCLUSIVE MODE;
+    LOCK TABLE public.analytical_lake IN ROW EXCLUSIVE MODE;
+    IF EXISTS (SELECT FROM unnest(v_parents) parent(event_id)
+        WHERE NOT EXISTS (SELECT FROM public.analytical_lake lake
+            WHERE lake.event_id = parent.event_id)
+          AND NOT EXISTS (SELECT FROM public.event_lake lake
+            WHERE lake.event_id = parent.event_id)) THEN
+        RAISE EXCEPTION 'Unknown parent event';
+    END IF;
+    IF v_event_type = 'SIGNAL_ASSESSMENT' AND (
+        p_envelope->'payload'->>'outcome' NOT IN ('SIGNAL', 'NO_SIGNAL')
+        OR NOT EXISTS (SELECT FROM public.analytical_lake observation
+            WHERE observation.event_id = ANY(v_parents)
+              AND observation.event_type = 'MARKET_OBSERVATION'
+              AND observation.subjects = v_subjects)
+    ) THEN
+        RAISE EXCEPTION 'Assessment requires its exact instrument observation';
+    END IF;
+    v_hash := encode(sha256(convert_to(jsonb_build_object(
+        'schema_version', 1, 'payload_version', v_type.payload_version,
+        'source_event_id', p_envelope->>'source_event_id',
+        'occurred_at', v_occurred_at, 'event_day', v_event_day,
+        'subjects', v_subjects, 'parent_event_ids', v_parents,
+        'payload', p_envelope->'payload', 'evidence', p_envelope->'evidence'
+    )::text, 'UTF8')), 'hex');
+    PERFORM pg_advisory_xact_lock(hashtextextended(jsonb_build_array(
+        'analytical', v_event_type, v_stage, v_source, v_key, v_entity_id)::text, 0));
+    SELECT * INTO v_previous FROM public.analytical_lake
+    WHERE event_type = v_event_type AND stage = v_stage AND source = v_source
+      AND event_key = v_key AND entity_id IS NOT DISTINCT FROM v_entity_id
+    ORDER BY revision DESC LIMIT 1;
+    IF FOUND AND v_previous.content_hash = v_hash THEN
+        UPDATE public.analytical_lake SET last_seen_at = clock_timestamp()
+        WHERE event_id = v_previous.event_id;
+        RETURN v_previous.event_id;
+    END IF;
+    INSERT INTO public.analytical_lake (
+        entity_id, schema_version, event_type, payload_version, stage, source,
+        source_event_id, event_key, revision, supersedes_event_id, content_hash,
+        occurred_at, event_day, observed_at, subjects, parent_event_ids,
+        payload, raw_payload, evidence, provenance
+    ) VALUES (
+        v_entity_id, 1, v_type.event_type, v_type.payload_version, v_stage, v_source,
+        p_envelope->>'source_event_id', v_key, coalesce(v_previous.revision, 0) + 1,
+        v_previous.event_id, v_hash, v_occurred_at, v_event_day,
+        coalesce((p_envelope->>'observed_at')::timestamptz, clock_timestamp()),
+        v_subjects, v_parents, p_envelope->'payload',
+        nullif(p_envelope->'raw_payload', 'null'::jsonb),
+        p_envelope->'evidence', p_envelope->'provenance'
+    ) RETURNING event_id INTO v_event_id;
+    INSERT INTO public.analytical_event_evidence (analytical_event_id, event_id)
+    SELECT v_event_id, event_id FROM public.event_lake WHERE event_id = ANY(v_parents);
+    RETURN v_event_id;
+END;
+$_$;
+
+
+--
 -- Name: sp_save_collection_intelligence(uuid, text, uuid, text[]); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -10022,6 +9901,24 @@ $$;
 --
 
 CREATE FUNCTION public.sp_save_event(p_envelope jsonb) RETURNS uuid
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+BEGIN
+    IF p_envelope->>'event_type' IN ('MARKET_OBSERVATION', 'SIGNAL_ASSESSMENT',
+        'SIGNAL_ENRICHMENT', 'SIGNAL_LIFECYCLE') THEN
+        RAISE EXCEPTION 'Analytical events belong in analytical_lake';
+    END IF;
+    RETURN public.sp_save_informational_event(p_envelope);
+END;
+$$;
+
+
+--
+-- Name: sp_save_informational_event(jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_save_informational_event(p_envelope jsonb) RETURNS uuid
     LANGUAGE plpgsql
     SET search_path TO 'pg_catalog', 'public'
     SET "TimeZone" TO 'UTC'
@@ -11307,12 +11204,12 @@ $$;
 
 
 --
--- Name: sp_upsert_asset_profile(jsonb, uuid, uuid, boolean); Type: FUNCTION; Schema: public; Owner: -
+-- Name: sp_update_user_preferences(uuid, character, text); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.sp_update_user_preferences(
-    p_user_id uuid, p_reporting_currency character, p_display_timezone text
-) RETURNS jsonb LANGUAGE sql AS $$
+CREATE FUNCTION public.sp_update_user_preferences(p_user_id uuid, p_reporting_currency character, p_display_timezone text) RETURNS jsonb
+    LANGUAGE sql
+    AS $$
     WITH updated AS (
         UPDATE public.users
         SET reporting_currency = p_reporting_currency,
@@ -11323,6 +11220,10 @@ CREATE FUNCTION public.sp_update_user_preferences(
     SELECT to_jsonb(updated) FROM updated;
 $$;
 
+
+--
+-- Name: sp_upsert_asset_profile(jsonb, uuid, uuid, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
 
 CREATE FUNCTION public.sp_upsert_asset_profile(p_payload jsonb, p_entity_id uuid DEFAULT NULL::uuid, p_instrument_id uuid DEFAULT NULL::uuid, p_create_if_missing boolean DEFAULT true) RETURNS TABLE(entity_id uuid, instrument_id uuid, imported boolean, action character varying)
     LANGUAGE plpgsql
@@ -12519,17 +12420,136 @@ $$;
 
 
 --
--- Name: trg_market_analysis_capture_performance_price(); Type: FUNCTION; Schema: public; Owner: -
+-- Name: trg_market_analysis_archive_lifecycle(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.trg_market_analysis_capture_performance_price() RETURNS trigger
+CREATE FUNCTION public.trg_market_analysis_archive_lifecycle() RETURNS trigger
     LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
     AS $$
+DECLARE
+    v_signal public.trading_signals%ROWTYPE;
+    v_snapshot jsonb;
+    v_entity_id uuid;
+    v_assessment_id uuid;
+    v_parents jsonb := '[]'::jsonb;
+    v_event_id uuid;
 BEGIN
+    SELECT * INTO STRICT v_signal FROM public.trading_signals
+    WHERE signal_id = NEW.signal_id FOR UPDATE;
+    IF NEW.instrument_id IS DISTINCT FROM v_signal.instrument_id
+        OR NEW.strategy_code IS DISTINCT FROM v_signal.strategy_code
+        OR NEW.timeframe IS DISTINCT FROM v_signal.timeframe THEN
+        RAISE EXCEPTION 'Lifecycle transition must match its exact trading signal';
+    END IF;
+    IF NEW.event_type IS NULL
+        OR NEW.event_type NOT IN ('CREATED', 'OBSERVED', 'CONFIRMED',
+            'DIRECTION_CHANGED', 'CLOSED', 'EXPIRED')
+        OR NEW.new_status IS NULL OR NEW.new_direction IS NULL
+        OR NEW.observed_at IS NULL THEN
+        RAISE EXCEPTION 'Incomplete lifecycle transition';
+    END IF;
+    NEW.signal_event_id := coalesce(NEW.signal_event_id, gen_random_uuid());
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'analytical-lifecycle:' || NEW.signal_event_id, 0));
+    IF EXISTS (SELECT FROM public.analytical_lake
+        WHERE event_type = 'SIGNAL_LIFECYCLE'
+          AND payload->'lifecycle_event'->>'signal_event_id' = NEW.signal_event_id::text) THEN
+        RAISE EXCEPTION 'Lifecycle event ID already archived: %', NEW.signal_event_id;
+    END IF;
+    NEW.created_at := clock_timestamp();
+    NEW.updated_at := NEW.created_at;
+    NEW.performance_recorded_at := NEW.created_at;
+    NEW.payload := coalesce(NEW.payload, '{}'::jsonb);
     NEW.payload := NEW.payload || jsonb_build_object('performance',
         public.sp_market_analysis_performance_price(
-            NEW.instrument_id, NEW.observed_at, NEW.payload, true
-        ) || jsonb_build_object('historical_backfill', false));
+            NEW.instrument_id, NEW.observed_at, NEW.payload, true)
+        || jsonb_build_object('historical_backfill', false));
+    SELECT entity_id INTO v_entity_id FROM public.instruments
+    WHERE instrument_id = NEW.instrument_id;
+    v_assessment_id := (v_signal.evidence->>'assessment_event_id')::uuid;
+    IF v_assessment_id IS NOT NULL THEN
+        IF NOT EXISTS (SELECT FROM public.analytical_lake
+            WHERE event_id = v_assessment_id AND event_type = 'SIGNAL_ASSESSMENT'
+              AND subjects @> jsonb_build_array(jsonb_build_object(
+                  'instrument_id', NEW.instrument_id::text))) THEN
+            RAISE EXCEPTION 'Lifecycle transition requires its exact instrument assessment';
+        END IF;
+        v_parents := jsonb_build_array(v_assessment_id);
+    END IF;
+    v_snapshot := (to_jsonb(v_signal) - ARRAY['created_at', 'updated_at'])
+        || jsonb_build_object('status', NEW.new_status, 'direction', NEW.new_direction);
+    v_event_id := public.sp_save_analytical_event(jsonb_build_object(
+        'schema_version', 1, 'payload_version', 1,
+        'event_type', 'SIGNAL_LIFECYCLE', 'stage', 'VALIDATED', 'source', 'MIP',
+        'event_key', 'lifecycle:' || NEW.signal_event_id,
+        'occurred_at', NEW.observed_at, 'observed_at', NEW.created_at,
+        'event_day', (NEW.observed_at AT TIME ZONE 'UTC')::date,
+        'subjects', jsonb_build_array(jsonb_build_object(
+            'instrument_id', NEW.instrument_id, 'entity_id', v_entity_id)),
+        'parent_event_ids', v_parents,
+        'payload', jsonb_build_object('signal_id', NEW.signal_id,
+            'signal', v_snapshot, 'lifecycle_event', to_jsonb(NEW),
+            'legacy_without_assessment', v_assessment_id IS NULL),
+        'evidence', '{}'::jsonb, 'provenance', '{}'::jsonb));
+    INSERT INTO public.market_analysis_signal_lake (signal_id, event_id)
+    VALUES (NEW.signal_id, v_event_id) ON CONFLICT DO NOTHING;
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: trg_market_analysis_capture_lake(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.trg_market_analysis_capture_lake() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+    v_assessment_id uuid := (NEW.evidence->>'assessment_event_id')::uuid;
+    v_event_id uuid;
+    v_entity_id uuid;
+    v_snapshot jsonb := to_jsonb(NEW) - ARRAY['created_at', 'updated_at'];
+BEGIN
+    IF TG_OP = 'UPDATE' AND v_snapshot =
+        (to_jsonb(OLD) - ARRAY['created_at', 'updated_at'])
+        AND EXISTS (
+            SELECT FROM public.market_analysis_signal_lake link
+            JOIN public.analytical_lake lake ON lake.event_id = link.event_id
+            WHERE link.signal_id = NEW.signal_id
+                AND lake.event_type = 'SIGNAL_LIFECYCLE'
+        ) THEN
+        RETURN NEW;
+    END IF;
+    SELECT entity_id INTO v_entity_id FROM public.instruments
+    WHERE instrument_id = NEW.instrument_id;
+    IF v_assessment_id IS NOT NULL THEN
+        IF NOT EXISTS (SELECT FROM public.analytical_lake
+            WHERE event_id = v_assessment_id AND event_type = 'SIGNAL_ASSESSMENT'
+                AND subjects @> jsonb_build_array(jsonb_build_object(
+                    'instrument_id', NEW.instrument_id::text))) THEN
+            RAISE EXCEPTION 'Signal requires its exact instrument assessment';
+        END IF;
+        INSERT INTO public.market_analysis_signal_lake VALUES (NEW.signal_id, v_assessment_id)
+        ON CONFLICT DO NOTHING;
+    END IF;
+    v_event_id := public.sp_save_analytical_event(jsonb_build_object(
+        'schema_version', 1, 'payload_version', 1,
+        'event_type', 'SIGNAL_LIFECYCLE', 'stage', 'VALIDATED', 'source', 'MIP',
+        'event_key', NEW.signal_id::text,
+        'occurred_at', NEW.observed_at, 'observed_at', clock_timestamp(),
+        'subjects', jsonb_build_array(jsonb_build_object(
+            'instrument_id', NEW.instrument_id::text, 'entity_id', v_entity_id::text)),
+        'parent_event_ids', CASE WHEN v_assessment_id IS NULL THEN '[]'::jsonb
+            ELSE jsonb_build_array(v_assessment_id) END,
+        'payload', jsonb_build_object('signal_id', NEW.signal_id::text,
+            'signal', v_snapshot, 'legacy_without_assessment', v_assessment_id IS NULL),
+        'evidence', '{}'::jsonb, 'provenance', '{}'::jsonb
+    ));
+    INSERT INTO public.market_analysis_signal_lake VALUES (NEW.signal_id, v_event_id)
+    ON CONFLICT DO NOTHING;
     RETURN NEW;
 END;
 $$;
@@ -12733,53 +12753,92 @@ CREATE TABLE public.alert_threshold_state (
 
 
 --
--- Name: api_sources; Type: TABLE; Schema: public; Owner: -
+-- Name: analytical_event_evidence; Type: TABLE; Schema: public; Owner: -
 --
 
-CREATE TABLE public.api_sources (
-    api_source_id uuid DEFAULT gen_random_uuid() NOT NULL,
-    name character varying(100),
-    base_url text
+CREATE TABLE public.analytical_event_evidence (
+    analytical_event_id uuid NOT NULL,
+    event_id uuid NOT NULL
 );
 
 
 --
--- Name: cache_portfolio_exposure; Type: TABLE; Schema: public; Owner: -
+-- Name: analytical_lake; Type: TABLE; Schema: public; Owner: -
 --
 
-CREATE TABLE public.cache_portfolio_exposure (
-    cache_id uuid DEFAULT gen_random_uuid() CONSTRAINT portfolio_exposure_cache_cache_id_not_null NOT NULL,
-    portfolio_id uuid,
+CREATE TABLE public.analytical_lake (
+    event_id uuid DEFAULT gen_random_uuid() CONSTRAINT event_lake_event_id_not_null NOT NULL,
+    schema_version integer CONSTRAINT event_lake_schema_version_not_null NOT NULL,
+    event_type text CONSTRAINT event_lake_event_type_not_null NOT NULL,
+    payload_version integer CONSTRAINT event_lake_payload_version_not_null NOT NULL,
+    stage text CONSTRAINT event_lake_stage_not_null NOT NULL,
+    source text CONSTRAINT event_lake_source_not_null NOT NULL,
+    source_event_id text,
+    event_key text CONSTRAINT event_lake_event_key_not_null NOT NULL,
+    revision integer CONSTRAINT event_lake_revision_not_null NOT NULL,
+    supersedes_event_id uuid,
+    content_hash text CONSTRAINT event_lake_content_hash_not_null NOT NULL,
+    occurred_at timestamp with time zone,
+    event_day date,
+    observed_at timestamp with time zone CONSTRAINT event_lake_observed_at_not_null NOT NULL,
+    ingested_at timestamp with time zone CONSTRAINT event_lake_ingested_at_not_null NOT NULL,
+    subjects jsonb CONSTRAINT event_lake_subjects_not_null NOT NULL,
+    parent_event_ids uuid[] DEFAULT '{}'::uuid[] CONSTRAINT event_lake_parent_event_ids_not_null NOT NULL,
+    payload jsonb CONSTRAINT event_lake_payload_not_null NOT NULL,
+    raw_payload jsonb,
+    evidence jsonb CONSTRAINT event_lake_evidence_not_null NOT NULL,
+    provenance jsonb CONSTRAINT event_lake_provenance_not_null NOT NULL,
+    created_at timestamp with time zone CONSTRAINT event_lake_created_at_not_null NOT NULL,
+    updated_at timestamp with time zone CONSTRAINT event_lake_updated_at_not_null NOT NULL,
+    last_seen_at timestamp with time zone CONSTRAINT event_lake_last_seen_at_not_null NOT NULL,
     entity_id uuid,
-    exposure_pct numeric(10,4),
-    calculated_at timestamp with time zone DEFAULT now() NOT NULL
+    CONSTRAINT event_lake_check CHECK (((revision = 1) = (supersedes_event_id IS NULL))),
+    CONSTRAINT event_lake_content_hash_check CHECK ((content_hash ~ '^[a-f0-9]{64}$'::text)),
+    CONSTRAINT event_lake_event_key_check CHECK ((btrim(event_key) <> ''::text)),
+    CONSTRAINT event_lake_evidence_check CHECK ((jsonb_typeof(evidence) = 'object'::text)),
+    CONSTRAINT event_lake_payload_check CHECK ((jsonb_typeof(payload) = 'object'::text)),
+    CONSTRAINT event_lake_provenance_check CHECK ((jsonb_typeof(provenance) = 'object'::text)),
+    CONSTRAINT event_lake_raw_payload_check CHECK ((jsonb_typeof(raw_payload) = 'object'::text)),
+    CONSTRAINT event_lake_revision_check CHECK ((revision > 0)),
+    CONSTRAINT event_lake_schema_version_check CHECK ((schema_version = 1)),
+    CONSTRAINT event_lake_source_check CHECK ((btrim(source) <> ''::text)),
+    CONSTRAINT event_lake_stage_check CHECK ((stage = ANY (ARRAY['ACQUIRED'::text, 'ENRICHED'::text, 'VALIDATED'::text]))),
+    CONSTRAINT event_lake_subjects_check CHECK ((jsonb_typeof(subjects) = 'array'::text))
 );
 
 
 --
--- Name: cache_portfolio_sector_exposure; Type: TABLE; Schema: public; Owner: -
+-- Name: analytical_lake_latest; Type: VIEW; Schema: public; Owner: -
 --
 
-CREATE TABLE public.cache_portfolio_sector_exposure (
-    id uuid DEFAULT gen_random_uuid() CONSTRAINT portfolio_sector_exposure_id_not_null NOT NULL,
-    portfolio_id uuid,
-    sector_id uuid,
-    exposure_pct numeric(10,4),
-    calculated_at timestamp with time zone DEFAULT now() NOT NULL
-);
-
-
---
--- Name: cache_portfolio_theme_exposure; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.cache_portfolio_theme_exposure (
-    id uuid DEFAULT gen_random_uuid() CONSTRAINT portfolio_theme_exposure_id_not_null NOT NULL,
-    portfolio_id uuid,
-    tag_id uuid,
-    exposure_pct numeric(10,4),
-    calculated_at timestamp with time zone DEFAULT now() NOT NULL
-);
+CREATE VIEW public.analytical_lake_latest AS
+ SELECT DISTINCT ON (event_type, stage, source, event_key, entity_id) event_id,
+    schema_version,
+    event_type,
+    payload_version,
+    stage,
+    source,
+    source_event_id,
+    event_key,
+    revision,
+    supersedes_event_id,
+    content_hash,
+    occurred_at,
+    event_day,
+    observed_at,
+    ingested_at,
+    subjects,
+    parent_event_ids,
+    payload,
+    raw_payload,
+    evidence,
+    provenance,
+    created_at,
+    updated_at,
+    last_seen_at,
+    entity_id
+   FROM public.analytical_lake
+  ORDER BY event_type, stage, source, event_key, entity_id, revision DESC;
 
 
 --
@@ -12840,32 +12899,6 @@ CREATE TABLE public.entity_identities (
 
 
 --
--- Name: entity_impact_history; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.entity_impact_history (
-    id uuid DEFAULT gen_random_uuid() CONSTRAINT impact_history_id_not_null NOT NULL,
-    portfolio_id uuid,
-    entity_id uuid,
-    impact_score numeric,
-    created_at timestamp with time zone DEFAULT now()
-);
-
-
---
--- Name: entity_metrics; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.entity_metrics (
-    metric_id uuid DEFAULT gen_random_uuid() NOT NULL,
-    entity_id uuid,
-    metric_name character varying(100),
-    metric_value numeric,
-    metric_date date
-);
-
-
---
 -- Name: entity_name_observations; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -12888,67 +12921,6 @@ CREATE TABLE public.entity_name_observations (
     CONSTRAINT ck_entity_name_observations_dates CHECK ((last_observed_at >= first_observed_at)),
     CONSTRAINT ck_entity_name_observations_name CHECK ((btrim((observed_name)::text) <> ''::text)),
     CONSTRAINT ck_entity_name_observations_normalized_name CHECK (((normalized_name IS NOT NULL) AND (btrim(normalized_name) <> ''::text)))
-);
-
-
---
--- Name: entity_relationships; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.entity_relationships (
-    relationship_id uuid DEFAULT gen_random_uuid() NOT NULL,
-    source_entity_id uuid,
-    target_entity_id uuid,
-    relation_type character varying(50),
-    strength numeric(5,2)
-);
-
-
---
--- Name: entity_scores; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.entity_scores (
-    entity_score_id uuid DEFAULT gen_random_uuid() NOT NULL,
-    entity_id uuid,
-    component_id uuid,
-    score numeric,
-    confidence numeric,
-    calculated_at timestamp with time zone
-);
-
-
---
--- Name: entity_sectors; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.entity_sectors (
-    entity_id uuid NOT NULL,
-    sector_id uuid NOT NULL,
-    weight numeric(5,2)
-);
-
-
---
--- Name: entity_tags; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.entity_tags (
-    entity_id uuid NOT NULL,
-    tag_id uuid NOT NULL
-);
-
-
---
--- Name: etf_constituents; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.etf_constituents (
-    constituent_id uuid DEFAULT gen_random_uuid() NOT NULL,
-    etf_instrument_id uuid,
-    entity_id uuid,
-    weight numeric(10,6),
-    effective_date date
 );
 
 
@@ -13190,32 +13162,6 @@ CREATE TABLE public.identity_types (
 
 
 --
--- Name: insider_transactions; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.insider_transactions (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    entity_id uuid,
-    insider_name character varying(255),
-    transaction_type character varying(20),
-    shares numeric,
-    price numeric,
-    transaction_date date
-);
-
-
---
--- Name: instrument_aliases; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.instrument_aliases (
-    alias_id uuid DEFAULT gen_random_uuid() NOT NULL,
-    instrument_id uuid,
-    alias_symbol character varying(100)
-);
-
-
---
 -- Name: instrument_consolidation_audit; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -13233,19 +13179,6 @@ CREATE TABLE public.instrument_consolidation_audit (
 
 
 --
--- Name: instrument_entity_exposure; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.instrument_entity_exposure (
-    exposure_id uuid DEFAULT gen_random_uuid() CONSTRAINT instrument_exposure_exposure_id_not_null NOT NULL,
-    instrument_id uuid,
-    entity_id uuid,
-    weight numeric(10,6),
-    effective_date date
-);
-
-
---
 -- Name: instrument_identities; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -13255,19 +13188,6 @@ CREATE TABLE public.instrument_identities (
     is_primary boolean DEFAULT false NOT NULL,
     verified_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL
-);
-
-
---
--- Name: instrument_relations; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.instrument_relations (
-    relation_id uuid DEFAULT gen_random_uuid() NOT NULL,
-    parent_instrument_id uuid,
-    child_instrument_id uuid,
-    relation_type character varying(50),
-    weight numeric(10,4)
 );
 
 
@@ -13367,6 +13287,42 @@ CREATE TABLE public.llm_response_cache (
 
 
 --
+-- Name: market_analysis_lifecycle_events; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.market_analysis_lifecycle_events AS
+ SELECT record.signal_event_id,
+    record.signal_id,
+    record.instrument_id,
+    record.strategy_code,
+    record.timeframe,
+    record.previous_status,
+    record.new_status,
+    record.previous_direction,
+    record.new_direction,
+    record.event_type,
+    record.reason,
+    record.observed_at,
+    record.payload,
+    record.created_at,
+    record.updated_at,
+    record.performance_recorded_at
+   FROM (public.analytical_lake lake
+     CROSS JOIN LATERAL jsonb_to_record((lake.payload -> 'lifecycle_event'::text)) record(signal_event_id uuid, signal_id uuid, instrument_id uuid, strategy_code character varying, timeframe character varying, previous_status character varying, new_status character varying, previous_direction character varying, new_direction character varying, event_type character varying, reason character varying, observed_at timestamp with time zone, payload jsonb, created_at timestamp with time zone, updated_at timestamp with time zone, performance_recorded_at timestamp with time zone))
+  WHERE ((lake.event_type = 'SIGNAL_LIFECYCLE'::text) AND (lake.payload ? 'lifecycle_event'::text));
+
+
+--
+-- Name: market_analysis_scan_events; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.market_analysis_scan_events (
+    run_id uuid NOT NULL,
+    event_id uuid NOT NULL
+);
+
+
+--
 -- Name: market_analysis_scan_failures; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -13400,26 +13356,12 @@ CREATE TABLE public.market_analysis_scan_runs (
 
 
 --
--- Name: market_analysis_signal_events; Type: TABLE; Schema: public; Owner: -
+-- Name: market_analysis_signal_lake; Type: TABLE; Schema: public; Owner: -
 --
 
-CREATE TABLE public.market_analysis_signal_events (
-    signal_event_id uuid DEFAULT gen_random_uuid() NOT NULL,
+CREATE TABLE public.market_analysis_signal_lake (
     signal_id uuid NOT NULL,
-    instrument_id uuid NOT NULL,
-    strategy_code character varying NOT NULL,
-    timeframe character varying NOT NULL,
-    previous_status character varying,
-    new_status character varying NOT NULL,
-    previous_direction character varying,
-    new_direction character varying NOT NULL,
-    event_type character varying NOT NULL,
-    reason character varying,
-    observed_at timestamp with time zone NOT NULL,
-    payload jsonb DEFAULT '{}'::jsonb NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    performance_recorded_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL
+    event_id uuid NOT NULL
 );
 
 
@@ -13726,28 +13668,6 @@ CREATE TABLE public.news_sources (
 
 
 --
--- Name: notification_hashes; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.notification_hashes (
-    hash character varying(64) NOT NULL,
-    entity_id uuid
-);
-
-
---
--- Name: notification_rules; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.notification_rules (
-    rule_id uuid DEFAULT gen_random_uuid() NOT NULL,
-    rule_name character varying(100),
-    event_type character varying(50),
-    threshold numeric
-);
-
-
---
 -- Name: notification_subscriptions; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -13762,18 +13682,6 @@ CREATE TABLE public.notification_subscriptions (
     enabled boolean DEFAULT true NOT NULL,
     severity_min character varying(20),
     config jsonb DEFAULT '{}'::jsonb NOT NULL
-);
-
-
---
--- Name: notification_templates; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.notification_templates (
-    template_id uuid DEFAULT gen_random_uuid() NOT NULL,
-    template_name character varying(100),
-    subject_template text,
-    body_template text
 );
 
 
@@ -13806,52 +13714,6 @@ CREATE TABLE public.notifications (
     processing_started_at timestamp with time zone,
     last_error text,
     delivered_message_id text
-);
-
-
---
--- Name: portfolio_holdings_snapshots; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.portfolio_holdings_snapshots (
-    holding_snapshot_id uuid DEFAULT gen_random_uuid() NOT NULL,
-    portfolio_id uuid NOT NULL,
-    instrument_id uuid NOT NULL,
-    snapshot_date date NOT NULL,
-    quantity numeric(20,8),
-    market_value numeric(20,2),
-    weight numeric(10,4),
-    created_at timestamp with time zone DEFAULT now() NOT NULL
-);
-
-
---
--- Name: portfolio_impacts; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.portfolio_impacts (
-    impact_id uuid DEFAULT gen_random_uuid() NOT NULL,
-    portfolio_id uuid,
-    entity_id uuid,
-    impact_score numeric,
-    calculated_at timestamp with time zone
-);
-
-
---
--- Name: portfolio_snapshots; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.portfolio_snapshots (
-    snapshot_id uuid DEFAULT gen_random_uuid() NOT NULL,
-    portfolio_id uuid NOT NULL,
-    snapshot_date date NOT NULL,
-    market_value numeric(20,2),
-    cost_basis numeric(20,2),
-    unrealized_pnl numeric(20,2),
-    unrealized_pnl_pct numeric(10,4),
-    cash_value numeric(20,2),
-    created_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
 
@@ -13994,31 +13856,6 @@ CREATE TABLE public.schema_version (
 
 
 --
--- Name: scoring_components; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.scoring_components (
-    component_id uuid DEFAULT gen_random_uuid() NOT NULL,
-    code character varying(50),
-    description text,
-    default_weight numeric
-);
-
-
---
--- Name: sector_sentiment; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.sector_sentiment (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    sector_id uuid,
-    sentiment_score numeric,
-    confidence numeric,
-    calculated_at timestamp with time zone
-);
-
-
---
 -- Name: sectors; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -14026,88 +13863,6 @@ CREATE TABLE public.sectors (
     sector_id uuid DEFAULT gen_random_uuid() NOT NULL,
     name character varying(100) NOT NULL,
     description text
-);
-
-
---
--- Name: signal_factors; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.signal_factors (
-    signal_factor_id uuid DEFAULT gen_random_uuid() NOT NULL,
-    entity_id uuid,
-    factor_name character varying(100),
-    factor_score numeric,
-    factor_weight numeric
-);
-
-
---
--- Name: signal_history; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.signal_history (
-    history_id uuid DEFAULT gen_random_uuid() NOT NULL,
-    entity_id uuid,
-    overall_score numeric,
-    signal public.signal_type,
-    trend public.trend_type,
-    confidence numeric,
-    reason text,
-    created_at timestamp with time zone DEFAULT now()
-);
-
-
---
--- Name: signals; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.signals (
-    entity_id uuid NOT NULL,
-    overall_score numeric,
-    signal public.signal_type,
-    trend public.trend_type,
-    confidence numeric,
-    last_reason text
-);
-
-
---
--- Name: sync_jobs; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.sync_jobs (
-    sync_job_id uuid DEFAULT gen_random_uuid() NOT NULL,
-    system_id uuid,
-    job_name character varying(100),
-    last_run timestamp with time zone,
-    status character varying(20)
-);
-
-
---
--- Name: sync_log; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.sync_log (
-    sync_log_id uuid DEFAULT gen_random_uuid() NOT NULL,
-    system_id uuid,
-    object_type character varying(50),
-    status character varying(20),
-    details jsonb
-);
-
-
---
--- Name: sync_mapping; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.sync_mapping (
-    mapping_id uuid DEFAULT gen_random_uuid() NOT NULL,
-    system_id uuid,
-    internal_type character varying(50),
-    internal_id uuid,
-    external_id character varying(255)
 );
 
 
@@ -14124,39 +13879,6 @@ CREATE TABLE public.system_audit_log (
     old_value jsonb,
     new_value jsonb,
     created_at timestamp with time zone DEFAULT now()
-);
-
-
---
--- Name: system_jobs; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.system_jobs (
-    job_id uuid DEFAULT gen_random_uuid() NOT NULL,
-    job_name character varying(100),
-    last_run timestamp with time zone,
-    status character varying(20)
-);
-
-
---
--- Name: system_settings; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.system_settings (
-    setting_key character varying(100) NOT NULL,
-    setting_value text
-);
-
-
---
--- Name: tags; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.tags (
-    tag_id uuid DEFAULT gen_random_uuid() NOT NULL,
-    name character varying(100) NOT NULL,
-    category character varying(50)
 );
 
 
@@ -14257,11 +13979,11 @@ CREATE TABLE public.users (
     display_name character varying(255),
     reporting_currency character(3) DEFAULT 'EUR'::bpchar NOT NULL,
     timezone character varying(50) DEFAULT 'Europe/Rome'::character varying,
-    display_timezone text DEFAULT 'UTC'::text NOT NULL,
     is_active boolean DEFAULT true NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     password_hash text,
+    display_timezone text DEFAULT 'UTC'::text NOT NULL,
     CONSTRAINT ck_users_reporting_currency CHECK ((((reporting_currency)::text = upper((reporting_currency)::text)) AND (reporting_currency ~ '^[A-Z]{3}$'::text)))
 );
 
@@ -14429,19 +14151,19 @@ ALTER TABLE ONLY public.alert_threshold_state
 
 
 --
--- Name: api_sources api_sources_name_key; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: analytical_event_evidence analytical_event_evidence_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.api_sources
-    ADD CONSTRAINT api_sources_name_key UNIQUE (name);
+ALTER TABLE ONLY public.analytical_event_evidence
+    ADD CONSTRAINT analytical_event_evidence_pkey PRIMARY KEY (analytical_event_id, event_id);
 
 
 --
--- Name: api_sources api_sources_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: analytical_lake analytical_lake_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.api_sources
-    ADD CONSTRAINT api_sources_pkey PRIMARY KEY (api_source_id);
+ALTER TABLE ONLY public.analytical_lake
+    ADD CONSTRAINT analytical_lake_pkey PRIMARY KEY (event_id);
 
 
 --
@@ -14477,59 +14199,11 @@ ALTER TABLE ONLY public.entity_identities
 
 
 --
--- Name: entity_metrics entity_metrics_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.entity_metrics
-    ADD CONSTRAINT entity_metrics_pkey PRIMARY KEY (metric_id);
-
-
---
 -- Name: entity_name_observations entity_name_observations_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.entity_name_observations
     ADD CONSTRAINT entity_name_observations_pkey PRIMARY KEY (entity_name_observation_id);
-
-
---
--- Name: entity_relationships entity_relationships_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.entity_relationships
-    ADD CONSTRAINT entity_relationships_pkey PRIMARY KEY (relationship_id);
-
-
---
--- Name: entity_scores entity_scores_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.entity_scores
-    ADD CONSTRAINT entity_scores_pkey PRIMARY KEY (entity_score_id);
-
-
---
--- Name: entity_sectors entity_sectors_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.entity_sectors
-    ADD CONSTRAINT entity_sectors_pkey PRIMARY KEY (entity_id, sector_id);
-
-
---
--- Name: entity_tags entity_tags_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.entity_tags
-    ADD CONSTRAINT entity_tags_pkey PRIMARY KEY (entity_id, tag_id);
-
-
---
--- Name: etf_constituents etf_constituents_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.etf_constituents
-    ADD CONSTRAINT etf_constituents_pkey PRIMARY KEY (constituent_id);
 
 
 --
@@ -14637,30 +14311,6 @@ ALTER TABLE ONLY public.identity_types
 
 
 --
--- Name: entity_impact_history impact_history_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.entity_impact_history
-    ADD CONSTRAINT impact_history_pkey PRIMARY KEY (id);
-
-
---
--- Name: insider_transactions insider_transactions_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.insider_transactions
-    ADD CONSTRAINT insider_transactions_pkey PRIMARY KEY (id);
-
-
---
--- Name: instrument_aliases instrument_aliases_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.instrument_aliases
-    ADD CONSTRAINT instrument_aliases_pkey PRIMARY KEY (alias_id);
-
-
---
 -- Name: instrument_consolidation_audit instrument_consolidation_audit_duplicate_instrument_id_key; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -14677,27 +14327,11 @@ ALTER TABLE ONLY public.instrument_consolidation_audit
 
 
 --
--- Name: instrument_entity_exposure instrument_exposure_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.instrument_entity_exposure
-    ADD CONSTRAINT instrument_exposure_pkey PRIMARY KEY (exposure_id);
-
-
---
 -- Name: instrument_identities instrument_identities_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.instrument_identities
     ADD CONSTRAINT instrument_identities_pkey PRIMARY KEY (instrument_id, identity_id);
-
-
---
--- Name: instrument_relations instrument_relations_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.instrument_relations
-    ADD CONSTRAINT instrument_relations_pkey PRIMARY KEY (relation_id);
 
 
 --
@@ -14733,6 +14367,14 @@ ALTER TABLE ONLY public.llm_response_cache
 
 
 --
+-- Name: market_analysis_scan_events market_analysis_scan_events_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.market_analysis_scan_events
+    ADD CONSTRAINT market_analysis_scan_events_pkey PRIMARY KEY (run_id, event_id);
+
+
+--
 -- Name: market_analysis_scan_failures market_analysis_scan_failures_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -14749,11 +14391,11 @@ ALTER TABLE ONLY public.market_analysis_scan_runs
 
 
 --
--- Name: market_analysis_signal_events market_analysis_signal_events_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: market_analysis_signal_lake market_analysis_signal_lake_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.market_analysis_signal_events
-    ADD CONSTRAINT market_analysis_signal_events_pkey PRIMARY KEY (signal_event_id);
+ALTER TABLE ONLY public.market_analysis_signal_lake
+    ADD CONSTRAINT market_analysis_signal_lake_pkey PRIMARY KEY (signal_id, event_id);
 
 
 --
@@ -14869,35 +14511,11 @@ ALTER TABLE ONLY public.news_sources
 
 
 --
--- Name: notification_hashes notification_hashes_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.notification_hashes
-    ADD CONSTRAINT notification_hashes_pkey PRIMARY KEY (hash);
-
-
---
--- Name: notification_rules notification_rules_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.notification_rules
-    ADD CONSTRAINT notification_rules_pkey PRIMARY KEY (rule_id);
-
-
---
 -- Name: notification_subscriptions notification_subscriptions_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.notification_subscriptions
     ADD CONSTRAINT notification_subscriptions_pkey PRIMARY KEY (subscription_id);
-
-
---
--- Name: notification_templates notification_templates_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.notification_templates
-    ADD CONSTRAINT notification_templates_pkey PRIMARY KEY (template_id);
 
 
 --
@@ -14914,54 +14532,6 @@ ALTER TABLE ONLY public.notifications
 
 ALTER TABLE ONLY public.exchange_rate_history
     ADD CONSTRAINT pk_exchange_rate_history PRIMARY KEY (currency_code, rate_date);
-
-
---
--- Name: cache_portfolio_exposure portfolio_exposure_cache_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.cache_portfolio_exposure
-    ADD CONSTRAINT portfolio_exposure_cache_pkey PRIMARY KEY (cache_id);
-
-
---
--- Name: portfolio_holdings_snapshots portfolio_holdings_snapshots_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.portfolio_holdings_snapshots
-    ADD CONSTRAINT portfolio_holdings_snapshots_pkey PRIMARY KEY (holding_snapshot_id);
-
-
---
--- Name: portfolio_impacts portfolio_impacts_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.portfolio_impacts
-    ADD CONSTRAINT portfolio_impacts_pkey PRIMARY KEY (impact_id);
-
-
---
--- Name: cache_portfolio_sector_exposure portfolio_sector_exposure_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.cache_portfolio_sector_exposure
-    ADD CONSTRAINT portfolio_sector_exposure_pkey PRIMARY KEY (id);
-
-
---
--- Name: portfolio_snapshots portfolio_snapshots_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.portfolio_snapshots
-    ADD CONSTRAINT portfolio_snapshots_pkey PRIMARY KEY (snapshot_id);
-
-
---
--- Name: cache_portfolio_theme_exposure portfolio_theme_exposure_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.cache_portfolio_theme_exposure
-    ADD CONSTRAINT portfolio_theme_exposure_pkey PRIMARY KEY (id);
 
 
 --
@@ -15045,30 +14615,6 @@ ALTER TABLE ONLY public.schema_version
 
 
 --
--- Name: scoring_components scoring_components_code_key; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.scoring_components
-    ADD CONSTRAINT scoring_components_code_key UNIQUE (code);
-
-
---
--- Name: scoring_components scoring_components_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.scoring_components
-    ADD CONSTRAINT scoring_components_pkey PRIMARY KEY (component_id);
-
-
---
--- Name: sector_sentiment sector_sentiment_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.sector_sentiment
-    ADD CONSTRAINT sector_sentiment_pkey PRIMARY KEY (id);
-
-
---
 -- Name: sectors sectors_name_key; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -15085,91 +14631,11 @@ ALTER TABLE ONLY public.sectors
 
 
 --
--- Name: signal_factors signal_factors_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.signal_factors
-    ADD CONSTRAINT signal_factors_pkey PRIMARY KEY (signal_factor_id);
-
-
---
--- Name: signal_history signal_history_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.signal_history
-    ADD CONSTRAINT signal_history_pkey PRIMARY KEY (history_id);
-
-
---
--- Name: signals signals_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.signals
-    ADD CONSTRAINT signals_pkey PRIMARY KEY (entity_id);
-
-
---
--- Name: sync_jobs sync_jobs_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.sync_jobs
-    ADD CONSTRAINT sync_jobs_pkey PRIMARY KEY (sync_job_id);
-
-
---
--- Name: sync_log sync_log_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.sync_log
-    ADD CONSTRAINT sync_log_pkey PRIMARY KEY (sync_log_id);
-
-
---
--- Name: sync_mapping sync_mapping_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.sync_mapping
-    ADD CONSTRAINT sync_mapping_pkey PRIMARY KEY (mapping_id);
-
-
---
 -- Name: system_audit_log system_audit_log_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.system_audit_log
     ADD CONSTRAINT system_audit_log_pkey PRIMARY KEY (audit_id);
-
-
---
--- Name: system_jobs system_jobs_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.system_jobs
-    ADD CONSTRAINT system_jobs_pkey PRIMARY KEY (job_id);
-
-
---
--- Name: system_settings system_settings_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.system_settings
-    ADD CONSTRAINT system_settings_pkey PRIMARY KEY (setting_key);
-
-
---
--- Name: tags tags_name_key; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.tags
-    ADD CONSTRAINT tags_name_key UNIQUE (name);
-
-
---
--- Name: tags tags_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.tags
-    ADD CONSTRAINT tags_pkey PRIMARY KEY (tag_id);
 
 
 --
@@ -15322,6 +14788,34 @@ ALTER TABLE ONLY public.watchlist_items
 
 ALTER TABLE ONLY public.watchlists
     ADD CONSTRAINT watchlists_pkey PRIMARY KEY (watchlist_id);
+
+
+--
+-- Name: analytical_lake_observed_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX analytical_lake_observed_idx ON public.analytical_lake USING btree (observed_at);
+
+
+--
+-- Name: analytical_lake_parents_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX analytical_lake_parents_idx ON public.analytical_lake USING gin (parent_event_ids);
+
+
+--
+-- Name: analytical_lake_revision_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX analytical_lake_revision_idx ON public.analytical_lake USING btree (event_type, stage, source, event_key, entity_id, revision) NULLS NOT DISTINCT;
+
+
+--
+-- Name: analytical_lake_subjects_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX analytical_lake_subjects_idx ON public.analytical_lake USING gin (subjects);
 
 
 --
@@ -15479,27 +14973,6 @@ CREATE INDEX ix_exchange_source_mappings_exchange ON public.exchange_source_mapp
 
 
 --
--- Name: ix_holding_snapshots_date; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX ix_holding_snapshots_date ON public.portfolio_holdings_snapshots USING btree (snapshot_date);
-
-
---
--- Name: ix_holding_snapshots_instrument; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX ix_holding_snapshots_instrument ON public.portfolio_holdings_snapshots USING btree (instrument_id);
-
-
---
--- Name: ix_holding_snapshots_portfolio; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX ix_holding_snapshots_portfolio ON public.portfolio_holdings_snapshots USING btree (portfolio_id);
-
-
---
 -- Name: ix_identities_normalized_value; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -15518,13 +14991,6 @@ CREATE INDEX ix_identity_observations_system_identity ON public.identity_observa
 --
 
 CREATE INDEX ix_identity_types_kind_code ON public.identity_types USING btree (target_kind, code);
-
-
---
--- Name: ix_instrument_alias_normalized_lookup; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX ix_instrument_alias_normalized_lookup ON public.instrument_aliases USING btree (upper(btrim((alias_symbol)::text))) WHERE (NULLIF(btrim((alias_symbol)::text), ''::text) IS NOT NULL);
 
 
 --
@@ -15616,13 +15082,6 @@ CREATE INDEX ix_llm_response_cache_provider_model ON public.llm_response_cache U
 --
 
 CREATE INDEX ix_market_analysis_scan_runs_universe_started ON public.market_analysis_scan_runs USING btree (universe_id, started_at DESC);
-
-
---
--- Name: ix_market_analysis_signal_events_lookup; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX ix_market_analysis_signal_events_lookup ON public.market_analysis_signal_events USING btree (instrument_id, strategy_code, timeframe, observed_at DESC);
 
 
 --
@@ -15752,20 +15211,6 @@ CREATE INDEX ix_notifications_user_symbol ON public.notifications USING btree (u
 
 
 --
--- Name: ix_portfolio_snapshots_date; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX ix_portfolio_snapshots_date ON public.portfolio_snapshots USING btree (snapshot_date);
-
-
---
--- Name: ix_portfolio_snapshots_portfolio; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX ix_portfolio_snapshots_portfolio ON public.portfolio_snapshots USING btree (portfolio_id);
-
-
---
 -- Name: ix_portfolios_user; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -15798,27 +15243,6 @@ CREATE INDEX ix_scheduler_job_run_logs_run ON public.scheduler_job_run_logs USIN
 --
 
 CREATE INDEX ix_scheduler_manual_run_pending ON public.scheduler_manual_run_requests USING btree (status, requested_at);
-
-
---
--- Name: ix_signal_events_performance_cycles; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX ix_signal_events_performance_cycles ON public.market_analysis_signal_events USING btree (instrument_id, strategy_code, timeframe, performance_recorded_at, signal_event_id);
-
-
---
--- Name: ix_sync_mapping_external_lookup; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX ix_sync_mapping_external_lookup ON public.sync_mapping USING btree (system_id, internal_type, external_id) WHERE ((system_id IS NOT NULL) AND (external_id IS NOT NULL));
-
-
---
--- Name: ix_sync_mapping_internal_lookup; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX ix_sync_mapping_internal_lookup ON public.sync_mapping USING btree (internal_type, internal_id) WHERE (internal_id IS NOT NULL);
 
 
 --
@@ -15864,31 +15288,17 @@ CREATE INDEX ix_watchlists_user ON public.watchlists USING btree (user_id);
 
 
 --
+-- Name: market_analysis_signal_lake_event_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX market_analysis_signal_lake_event_idx ON public.market_analysis_signal_lake USING btree (event_id);
+
+
+--
 -- Name: uq_alert_events_rule_instrument_fingerprint; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE UNIQUE INDEX uq_alert_events_rule_instrument_fingerprint ON public.alert_events USING btree (rule_id, instrument_id, fingerprint);
-
-
---
--- Name: uq_cache_portfolio_exposure; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE UNIQUE INDEX uq_cache_portfolio_exposure ON public.cache_portfolio_exposure USING btree (portfolio_id, entity_id);
-
-
---
--- Name: uq_cache_portfolio_sector_exposure; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE UNIQUE INDEX uq_cache_portfolio_sector_exposure ON public.cache_portfolio_sector_exposure USING btree (portfolio_id, sector_id);
-
-
---
--- Name: uq_cache_portfolio_theme_exposure; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE UNIQUE INDEX uq_cache_portfolio_theme_exposure ON public.cache_portfolio_theme_exposure USING btree (portfolio_id, tag_id);
 
 
 --
@@ -15906,13 +15316,6 @@ CREATE UNIQUE INDEX uq_entity_alias_normalized ON public.entity_aliases USING bt
 
 
 --
--- Name: uq_entity_metric; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE UNIQUE INDEX uq_entity_metric ON public.entity_metrics USING btree (entity_id, metric_name, metric_date);
-
-
---
 -- Name: uq_entity_name_observation; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -15920,24 +15323,10 @@ CREATE UNIQUE INDEX uq_entity_name_observation ON public.entity_name_observation
 
 
 --
--- Name: uq_entity_score; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE UNIQUE INDEX uq_entity_score ON public.entity_scores USING btree (entity_id, component_id);
-
-
---
 -- Name: uq_external_systems_code; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE UNIQUE INDEX uq_external_systems_code ON public.external_systems USING btree (code) WHERE (code IS NOT NULL);
-
-
---
--- Name: uq_holding_snapshot; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE UNIQUE INDEX uq_holding_snapshot ON public.portfolio_holdings_snapshots USING btree (portfolio_id, instrument_id, snapshot_date);
 
 
 --
@@ -15952,13 +15341,6 @@ CREATE UNIQUE INDEX uq_identity_observation_source ON public.identity_observatio
 --
 
 CREATE UNIQUE INDEX uq_identity_types_kind_code ON public.identity_types USING btree (target_kind, code);
-
-
---
--- Name: uq_instrument_alias_normalized; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE UNIQUE INDEX uq_instrument_alias_normalized ON public.instrument_aliases USING btree (instrument_id, upper(btrim((alias_symbol)::text))) WHERE ((instrument_id IS NOT NULL) AND (NULLIF(btrim((alias_symbol)::text), ''::text) IS NOT NULL));
 
 
 --
@@ -16011,13 +15393,6 @@ CREATE UNIQUE INDEX uq_portfolio_name ON public.portfolios USING btree (user_id,
 
 
 --
--- Name: uq_portfolio_snapshot; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE UNIQUE INDEX uq_portfolio_snapshot ON public.portfolio_snapshots USING btree (portfolio_id, snapshot_date);
-
-
---
 -- Name: uq_position; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -16060,6 +15435,13 @@ CREATE UNIQUE INDEX ux_scheduler_jobs_job_key ON public.scheduler_jobs USING btr
 
 
 --
+-- Name: analytical_lake analytical_lake_timestamps; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER analytical_lake_timestamps BEFORE INSERT OR DELETE OR UPDATE ON public.analytical_lake FOR EACH ROW EXECUTE FUNCTION public.analytical_lake_timestamps();
+
+
+--
 -- Name: alert_events trg_alert_events_updated_at; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -16092,13 +15474,6 @@ CREATE TRIGGER trg_entities_updated_at BEFORE INSERT OR UPDATE ON public.entitie
 --
 
 CREATE CONSTRAINT TRIGGER trg_entities_validate_canonical_name AFTER INSERT OR UPDATE OF canonical_name_observation_id ON public.entities DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.trg_validate_entity_canonical_name();
-
-
---
--- Name: entity_impact_history trg_entity_impact_history_created_at; Type: TRIGGER; Schema: public; Owner: -
---
-
-CREATE TRIGGER trg_entity_impact_history_created_at BEFORE INSERT ON public.entity_impact_history FOR EACH ROW EXECUTE FUNCTION public.trg_set_created_at();
 
 
 --
@@ -16186,10 +15561,17 @@ CREATE TRIGGER trg_llm_response_cache_timestamps BEFORE INSERT OR UPDATE ON publ
 
 
 --
--- Name: market_analysis_signal_events trg_market_analysis_capture_performance_price; Type: TRIGGER; Schema: public; Owner: -
+-- Name: market_analysis_lifecycle_events trg_market_analysis_archive_lifecycle; Type: TRIGGER; Schema: public; Owner: -
 --
 
-CREATE TRIGGER trg_market_analysis_capture_performance_price BEFORE INSERT ON public.market_analysis_signal_events FOR EACH ROW EXECUTE FUNCTION public.trg_market_analysis_capture_performance_price();
+CREATE TRIGGER trg_market_analysis_archive_lifecycle INSTEAD OF INSERT ON public.market_analysis_lifecycle_events FOR EACH ROW EXECUTE FUNCTION public.trg_market_analysis_archive_lifecycle();
+
+
+--
+-- Name: trading_signals trg_market_analysis_capture_lake; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_market_analysis_capture_lake AFTER INSERT OR UPDATE ON public.trading_signals FOR EACH ROW EXECUTE FUNCTION public.trg_market_analysis_capture_lake();
 
 
 --
@@ -16218,20 +15600,6 @@ CREATE TRIGGER trg_market_analysis_scan_runs_created_at BEFORE INSERT ON public.
 --
 
 CREATE TRIGGER trg_market_analysis_scan_runs_updated_at BEFORE INSERT OR UPDATE ON public.market_analysis_scan_runs FOR EACH ROW EXECUTE FUNCTION public.trg_set_updated_at();
-
-
---
--- Name: market_analysis_signal_events trg_market_analysis_signal_events_created_at; Type: TRIGGER; Schema: public; Owner: -
---
-
-CREATE TRIGGER trg_market_analysis_signal_events_created_at BEFORE INSERT ON public.market_analysis_signal_events FOR EACH ROW EXECUTE FUNCTION public.trg_set_created_at();
-
-
---
--- Name: market_analysis_signal_events trg_market_analysis_signal_events_updated_at; Type: TRIGGER; Schema: public; Owner: -
---
-
-CREATE TRIGGER trg_market_analysis_signal_events_updated_at BEFORE INSERT OR UPDATE ON public.market_analysis_signal_events FOR EACH ROW EXECUTE FUNCTION public.trg_set_updated_at();
 
 
 --
@@ -16403,20 +15771,6 @@ CREATE TRIGGER trg_notifications_updated_at BEFORE INSERT OR UPDATE ON public.no
 
 
 --
--- Name: portfolio_holdings_snapshots trg_portfolio_holdings_snapshots_created_at; Type: TRIGGER; Schema: public; Owner: -
---
-
-CREATE TRIGGER trg_portfolio_holdings_snapshots_created_at BEFORE INSERT ON public.portfolio_holdings_snapshots FOR EACH ROW EXECUTE FUNCTION public.trg_set_created_at();
-
-
---
--- Name: portfolio_snapshots trg_portfolio_snapshots_created_at; Type: TRIGGER; Schema: public; Owner: -
---
-
-CREATE TRIGGER trg_portfolio_snapshots_created_at BEFORE INSERT ON public.portfolio_snapshots FOR EACH ROW EXECUTE FUNCTION public.trg_set_created_at();
-
-
---
 -- Name: portfolios trg_portfolios_created_at; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -16456,13 +15810,6 @@ CREATE TRIGGER trg_scheduler_jobs_created_at BEFORE INSERT ON public.scheduler_j
 --
 
 CREATE TRIGGER trg_scheduler_jobs_updated_at BEFORE INSERT OR UPDATE ON public.scheduler_jobs FOR EACH ROW EXECUTE FUNCTION public.trg_set_updated_at();
-
-
---
--- Name: signal_history trg_signal_history_created_at; Type: TRIGGER; Schema: public; Owner: -
---
-
-CREATE TRIGGER trg_signal_history_created_at BEFORE INSERT ON public.signal_history FOR EACH ROW EXECUTE FUNCTION public.trg_set_created_at();
 
 
 --
@@ -16539,6 +15886,46 @@ ALTER TABLE ONLY public.alert_threshold_state
 
 
 --
+-- Name: analytical_event_evidence analytical_event_evidence_analytical_event_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.analytical_event_evidence
+    ADD CONSTRAINT analytical_event_evidence_analytical_event_id_fkey FOREIGN KEY (analytical_event_id) REFERENCES public.analytical_lake(event_id) ON DELETE CASCADE;
+
+
+--
+-- Name: analytical_event_evidence analytical_event_evidence_event_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.analytical_event_evidence
+    ADD CONSTRAINT analytical_event_evidence_event_id_fkey FOREIGN KEY (event_id) REFERENCES public.event_lake(event_id);
+
+
+--
+-- Name: analytical_lake analytical_lake_entity_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.analytical_lake
+    ADD CONSTRAINT analytical_lake_entity_id_fkey FOREIGN KEY (entity_id) REFERENCES public.entities(entity_id);
+
+
+--
+-- Name: analytical_lake analytical_lake_event_type_payload_version_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.analytical_lake
+    ADD CONSTRAINT analytical_lake_event_type_payload_version_fkey FOREIGN KEY (event_type, payload_version) REFERENCES public.event_type_catalog(event_type, payload_version);
+
+
+--
+-- Name: analytical_lake analytical_lake_supersedes_event_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.analytical_lake
+    ADD CONSTRAINT analytical_lake_supersedes_event_id_fkey FOREIGN KEY (supersedes_event_id) REFERENCES public.analytical_lake(event_id);
+
+
+--
 -- Name: collection_intelligence_subscriptions collection_intelligence_subscriptions_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -16579,14 +15966,6 @@ ALTER TABLE ONLY public.entity_identities
 
 
 --
--- Name: entity_metrics entity_metrics_entity_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.entity_metrics
-    ADD CONSTRAINT entity_metrics_entity_id_fkey FOREIGN KEY (entity_id) REFERENCES public.entities(entity_id);
-
-
---
 -- Name: entity_name_observations entity_name_observations_entity_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -16600,86 +15979,6 @@ ALTER TABLE ONLY public.entity_name_observations
 
 ALTER TABLE ONLY public.entity_name_observations
     ADD CONSTRAINT entity_name_observations_system_id_fkey FOREIGN KEY (system_id) REFERENCES public.external_systems(system_id) ON DELETE RESTRICT;
-
-
---
--- Name: entity_relationships entity_relationships_source_entity_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.entity_relationships
-    ADD CONSTRAINT entity_relationships_source_entity_id_fkey FOREIGN KEY (source_entity_id) REFERENCES public.entities(entity_id);
-
-
---
--- Name: entity_relationships entity_relationships_target_entity_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.entity_relationships
-    ADD CONSTRAINT entity_relationships_target_entity_id_fkey FOREIGN KEY (target_entity_id) REFERENCES public.entities(entity_id);
-
-
---
--- Name: entity_scores entity_scores_component_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.entity_scores
-    ADD CONSTRAINT entity_scores_component_id_fkey FOREIGN KEY (component_id) REFERENCES public.scoring_components(component_id);
-
-
---
--- Name: entity_scores entity_scores_entity_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.entity_scores
-    ADD CONSTRAINT entity_scores_entity_id_fkey FOREIGN KEY (entity_id) REFERENCES public.entities(entity_id);
-
-
---
--- Name: entity_sectors entity_sectors_entity_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.entity_sectors
-    ADD CONSTRAINT entity_sectors_entity_id_fkey FOREIGN KEY (entity_id) REFERENCES public.entities(entity_id) ON DELETE CASCADE;
-
-
---
--- Name: entity_sectors entity_sectors_sector_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.entity_sectors
-    ADD CONSTRAINT entity_sectors_sector_id_fkey FOREIGN KEY (sector_id) REFERENCES public.sectors(sector_id) ON DELETE CASCADE;
-
-
---
--- Name: entity_tags entity_tags_entity_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.entity_tags
-    ADD CONSTRAINT entity_tags_entity_id_fkey FOREIGN KEY (entity_id) REFERENCES public.entities(entity_id) ON DELETE CASCADE;
-
-
---
--- Name: entity_tags entity_tags_tag_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.entity_tags
-    ADD CONSTRAINT entity_tags_tag_id_fkey FOREIGN KEY (tag_id) REFERENCES public.tags(tag_id) ON DELETE CASCADE;
-
-
---
--- Name: etf_constituents etf_constituents_entity_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.etf_constituents
-    ADD CONSTRAINT etf_constituents_entity_id_fkey FOREIGN KEY (entity_id) REFERENCES public.entities(entity_id);
-
-
---
--- Name: etf_constituents etf_constituents_etf_instrument_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.etf_constituents
-    ADD CONSTRAINT etf_constituents_etf_instrument_id_fkey FOREIGN KEY (etf_instrument_id) REFERENCES public.instruments(instrument_id);
 
 
 --
@@ -16763,46 +16062,6 @@ ALTER TABLE ONLY public.identity_observations
 
 
 --
--- Name: entity_impact_history impact_history_entity_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.entity_impact_history
-    ADD CONSTRAINT impact_history_entity_id_fkey FOREIGN KEY (entity_id) REFERENCES public.entities(entity_id);
-
-
---
--- Name: insider_transactions insider_transactions_entity_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.insider_transactions
-    ADD CONSTRAINT insider_transactions_entity_id_fkey FOREIGN KEY (entity_id) REFERENCES public.entities(entity_id);
-
-
---
--- Name: instrument_aliases instrument_aliases_instrument_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.instrument_aliases
-    ADD CONSTRAINT instrument_aliases_instrument_id_fkey FOREIGN KEY (instrument_id) REFERENCES public.instruments(instrument_id) ON DELETE CASCADE;
-
-
---
--- Name: instrument_entity_exposure instrument_exposure_entity_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.instrument_entity_exposure
-    ADD CONSTRAINT instrument_exposure_entity_id_fkey FOREIGN KEY (entity_id) REFERENCES public.entities(entity_id);
-
-
---
--- Name: instrument_entity_exposure instrument_exposure_instrument_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.instrument_entity_exposure
-    ADD CONSTRAINT instrument_exposure_instrument_id_fkey FOREIGN KEY (instrument_id) REFERENCES public.instruments(instrument_id);
-
-
---
 -- Name: instrument_identities instrument_identities_identity_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -16819,22 +16078,6 @@ ALTER TABLE ONLY public.instrument_identities
 
 
 --
--- Name: instrument_relations instrument_relations_child_instrument_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.instrument_relations
-    ADD CONSTRAINT instrument_relations_child_instrument_id_fkey FOREIGN KEY (child_instrument_id) REFERENCES public.instruments(instrument_id);
-
-
---
--- Name: instrument_relations instrument_relations_parent_instrument_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.instrument_relations
-    ADD CONSTRAINT instrument_relations_parent_instrument_id_fkey FOREIGN KEY (parent_instrument_id) REFERENCES public.instruments(instrument_id);
-
-
---
 -- Name: instruments instruments_entity_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -16848,6 +16091,22 @@ ALTER TABLE ONLY public.instruments
 
 ALTER TABLE ONLY public.instruments
     ADD CONSTRAINT instruments_price_source_id_fkey FOREIGN KEY (price_source_id) REFERENCES public.external_systems(system_id);
+
+
+--
+-- Name: market_analysis_scan_events market_analysis_scan_events_event_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.market_analysis_scan_events
+    ADD CONSTRAINT market_analysis_scan_events_event_id_fkey FOREIGN KEY (event_id) REFERENCES public.analytical_lake(event_id) ON DELETE CASCADE;
+
+
+--
+-- Name: market_analysis_scan_events market_analysis_scan_events_run_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.market_analysis_scan_events
+    ADD CONSTRAINT market_analysis_scan_events_run_id_fkey FOREIGN KEY (run_id) REFERENCES public.market_analysis_scan_runs(run_id) ON DELETE CASCADE;
 
 
 --
@@ -16875,11 +16134,19 @@ ALTER TABLE ONLY public.market_analysis_scan_runs
 
 
 --
--- Name: market_analysis_signal_events market_analysis_signal_events_signal_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: market_analysis_signal_lake market_analysis_signal_lake_event_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.market_analysis_signal_events
-    ADD CONSTRAINT market_analysis_signal_events_signal_id_fkey FOREIGN KEY (signal_id) REFERENCES public.trading_signals(signal_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.market_analysis_signal_lake
+    ADD CONSTRAINT market_analysis_signal_lake_event_id_fkey FOREIGN KEY (event_id) REFERENCES public.analytical_lake(event_id);
+
+
+--
+-- Name: market_analysis_signal_lake market_analysis_signal_lake_signal_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.market_analysis_signal_lake
+    ADD CONSTRAINT market_analysis_signal_lake_signal_id_fkey FOREIGN KEY (signal_id) REFERENCES public.trading_signals(signal_id) ON DELETE CASCADE;
 
 
 --
@@ -17003,14 +16270,6 @@ ALTER TABLE ONLY public.market_universes
 
 
 --
--- Name: notification_hashes notification_hashes_entity_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.notification_hashes
-    ADD CONSTRAINT notification_hashes_entity_id_fkey FOREIGN KEY (entity_id) REFERENCES public.entities(entity_id);
-
-
---
 -- Name: notification_subscriptions notification_subscriptions_source_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -17048,62 +16307,6 @@ ALTER TABLE ONLY public.notifications
 
 ALTER TABLE ONLY public.notifications
     ADD CONSTRAINT notifications_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(user_id) ON DELETE CASCADE;
-
-
---
--- Name: cache_portfolio_exposure portfolio_exposure_cache_entity_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.cache_portfolio_exposure
-    ADD CONSTRAINT portfolio_exposure_cache_entity_id_fkey FOREIGN KEY (entity_id) REFERENCES public.entities(entity_id);
-
-
---
--- Name: portfolio_holdings_snapshots portfolio_holdings_snapshots_instrument_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.portfolio_holdings_snapshots
-    ADD CONSTRAINT portfolio_holdings_snapshots_instrument_id_fkey FOREIGN KEY (instrument_id) REFERENCES public.instruments(instrument_id) ON DELETE RESTRICT;
-
-
---
--- Name: portfolio_holdings_snapshots portfolio_holdings_snapshots_portfolio_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.portfolio_holdings_snapshots
-    ADD CONSTRAINT portfolio_holdings_snapshots_portfolio_id_fkey FOREIGN KEY (portfolio_id) REFERENCES public.portfolios(portfolio_id) ON DELETE CASCADE;
-
-
---
--- Name: portfolio_impacts portfolio_impacts_entity_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.portfolio_impacts
-    ADD CONSTRAINT portfolio_impacts_entity_id_fkey FOREIGN KEY (entity_id) REFERENCES public.entities(entity_id);
-
-
---
--- Name: cache_portfolio_sector_exposure portfolio_sector_exposure_sector_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.cache_portfolio_sector_exposure
-    ADD CONSTRAINT portfolio_sector_exposure_sector_id_fkey FOREIGN KEY (sector_id) REFERENCES public.sectors(sector_id);
-
-
---
--- Name: portfolio_snapshots portfolio_snapshots_portfolio_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.portfolio_snapshots
-    ADD CONSTRAINT portfolio_snapshots_portfolio_id_fkey FOREIGN KEY (portfolio_id) REFERENCES public.portfolios(portfolio_id) ON DELETE CASCADE;
-
-
---
--- Name: cache_portfolio_theme_exposure portfolio_theme_exposure_tag_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.cache_portfolio_theme_exposure
-    ADD CONSTRAINT portfolio_theme_exposure_tag_id_fkey FOREIGN KEY (tag_id) REFERENCES public.tags(tag_id);
 
 
 --
@@ -17160,62 +16363,6 @@ ALTER TABLE ONLY public.scheduler_manual_run_requests
 
 ALTER TABLE ONLY public.scheduler_manual_run_requests
     ADD CONSTRAINT scheduler_manual_run_requests_requested_by_fkey FOREIGN KEY (requested_by) REFERENCES public.users(user_id) ON DELETE SET NULL;
-
-
---
--- Name: sector_sentiment sector_sentiment_sector_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.sector_sentiment
-    ADD CONSTRAINT sector_sentiment_sector_id_fkey FOREIGN KEY (sector_id) REFERENCES public.sectors(sector_id);
-
-
---
--- Name: signal_factors signal_factors_entity_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.signal_factors
-    ADD CONSTRAINT signal_factors_entity_id_fkey FOREIGN KEY (entity_id) REFERENCES public.entities(entity_id);
-
-
---
--- Name: signal_history signal_history_entity_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.signal_history
-    ADD CONSTRAINT signal_history_entity_id_fkey FOREIGN KEY (entity_id) REFERENCES public.entities(entity_id);
-
-
---
--- Name: signals signals_entity_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.signals
-    ADD CONSTRAINT signals_entity_id_fkey FOREIGN KEY (entity_id) REFERENCES public.entities(entity_id);
-
-
---
--- Name: sync_jobs sync_jobs_system_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.sync_jobs
-    ADD CONSTRAINT sync_jobs_system_id_fkey FOREIGN KEY (system_id) REFERENCES public.external_systems(system_id);
-
-
---
--- Name: sync_log sync_log_system_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.sync_log
-    ADD CONSTRAINT sync_log_system_id_fkey FOREIGN KEY (system_id) REFERENCES public.external_systems(system_id);
-
-
---
--- Name: sync_mapping sync_mapping_system_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.sync_mapping
-    ADD CONSTRAINT sync_mapping_system_id_fkey FOREIGN KEY (system_id) REFERENCES public.external_systems(system_id);
 
 
 --
@@ -17310,5 +16457,5 @@ ALTER TABLE ONLY public.watchlists
 -- PostgreSQL database dump complete
 --
 
-\unrestrict yFG8RwNFGbOsBkrFvsWHgzE4fElBkF3SmbbBrvqioL1LjiQxg39lmlVm8I1bXwE
+\unrestrict Q26CRdTq7nBijQWP683Pp6h3iNOjx7eqKq1LMOnHxGrUl6UX1XbB4EekvmBbmWS
 

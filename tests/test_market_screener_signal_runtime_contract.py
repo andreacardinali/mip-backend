@@ -47,9 +47,7 @@ def test_screener_summary_preference_is_opt_in(name) -> None:
     routine = schema_function(name)
     assert "'SCREENER_SUMMARY'" in routine
     if name == "sp_get_user_notification_preferences":
-        assert re.search(
-            r"'SCREENER_SUMMARY'.*?::text, false\)", routine, re.DOTALL
-        )
+        assert re.search(r"'SCREENER_SUMMARY'.*?::text, false\)", routine, re.DOTALL)
     elif name == "sp_market_screener_summary_recipients":
         assert "ns.portfolio_id IS NULL" in routine
         assert "ns.enabled = true" in routine
@@ -194,7 +192,9 @@ def test_opportunity_filters_and_limit_are_applied_by_sql(watchlist_match) -> No
 def test_watchlist_filter_applies_before_limit() -> None:
     routines = [
         routine
-        for routine in schema_functions("sp_market_screener_list_filtered_opportunities")
+        for routine in schema_functions(
+            "sp_market_screener_list_filtered_opportunities"
+        )
         if "p_watchlist_match boolean" in routine.split("RETURNS", 1)[0]
     ]
     assert len(routines) == 1
@@ -389,7 +389,10 @@ def test_analysis_lock_preserves_session_and_transaction_scopes() -> None:
     assert "pg_try_advisory_lock(hashtext('market_screener_analysis'))" in session_lock
     assert "pg_advisory_unlock(hashtext('market_screener_analysis'))" in session_lock
     assert "pg_try_advisory_xact_lock(" not in session_lock
-    assert "pg_try_advisory_xact_lock(hashtext('market_screener_analysis'))" in transaction_lock
+    assert (
+        "pg_try_advisory_xact_lock(hashtext('market_screener_analysis'))"
+        in transaction_lock
+    )
 
 
 def test_scheduler_progress_preserves_context_and_domain_fallback() -> None:
@@ -416,7 +419,9 @@ def test_screener_diagnostics_recovery_preserves_lock_and_run_identity() -> None
     assert "screener.job_run_id = job_run.job_run_id" in recovery
     assert "job_run.job_id = p_job_id AND screener.status = 'RUNNING'" in recovery
     assert "job_run.status IN ('FAILED', 'SUCCESS', 'PARTIAL')" in recovery
-    assert recovery.index(anchor) < recovery.index("UPDATE public.market_screener_runs screener")
+    assert recovery.index(anchor) < recovery.index(
+        "UPDATE public.market_screener_runs screener"
+    )
 
 
 def test_screener_diagnostics_reader_handles_only_interrupted_linked_runs() -> None:
@@ -448,9 +453,7 @@ def test_context_members_preserve_owner_scope_and_filter_before_limit() -> None:
     assert "pos.quantity <> 0" in members
     assert "mum.valid_to IS NULL" in members
     assert "p_context_type = 'ENTITY' AND i.entity_id = p_context_id" in members
-    assert (
-        "p_context_type = 'INSTRUMENT' AND i.instrument_id = p_context_id" in members
-    )
+    assert "p_context_type = 'INSTRUMENT' AND i.instrument_id = p_context_id" in members
     assert "p_user_id IS NULL OR NOT EXISTS" in members
     assert (
         "CREATE UNIQUE INDEX uq_market_universes_code ON public.market_universes "
@@ -460,7 +463,9 @@ def test_context_members_preserve_owner_scope_and_filter_before_limit() -> None:
     assert "ON CONFLICT (code)" not in preparation
     assert len(filtered) == 2
     for routine in filtered:
-        assert routine.index("o.consensus_direction = p_consensus_direction") < routine.index("LIMIT least")
+        assert routine.index(
+            "o.consensus_direction = p_consensus_direction"
+        ) < routine.index("LIMIT least")
 
 
 @pytest.mark.parametrize(
@@ -663,7 +668,9 @@ def test_manual_context_scan_records_history_with_transaction_boundaries(
         with pytest.raises(RuntimeError, match="provider unavailable"):
             analyze(db, **kwargs)
         assert calls == [
-            "members", "lock", "start",
+            "members",
+            "lock",
+            "start",
             *(["progress", "commit"] if incremental else []),
             "scan",
         ]
@@ -685,7 +692,11 @@ def test_manual_context_scan_records_history_with_transaction_boundaries(
             "scan",
             *(["ranking", "progress", "commit"] if incremental and ai_enabled else []),
             *(["ai"] if ai_enabled else []),
-            *(["progress", "commit", "progress", "commit"] if incremental and ai_enabled and outcome != "ai_failure" else []),
+            *(
+                ["progress", "commit", "progress", "commit"]
+                if incremental and ai_enabled and outcome != "ai_failure"
+                else []
+            ),
             "ranking",
             "snapshot",
             "complete",
@@ -694,9 +705,12 @@ def test_manual_context_scan_records_history_with_transaction_boundaries(
         if incremental and ai_enabled:
             expected_progress.append(("LLM_ENRICHMENT", 0, 0))
             if outcome != "ai_failure":
-                expected_progress.extend([
-                    ("LLM_ENRICHMENT", 0, 1), ("LLM_ENRICHMENT", 1, 1),
-                ])
+                expected_progress.extend(
+                    [
+                        ("LLM_ENRICHMENT", 0, 1),
+                        ("LLM_ENRICHMENT", 1, 1),
+                    ]
+                )
         assert [
             (update["phase"], update["completed"], update["total"])
             for update in progress_updates

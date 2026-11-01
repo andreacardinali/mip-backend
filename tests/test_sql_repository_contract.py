@@ -173,7 +173,9 @@ def test_alert_management_actions_preserve_owner_and_conditions(name):
         assert "conditions =" not in routine
     else:
         assert "DELETE FROM public.alert_rules" in routine
-        assert "REFERENCES public.alert_rules(rule_id) ON DELETE CASCADE" in schema_sql()
+        assert (
+            "REFERENCES public.alert_rules(rule_id) ON DELETE CASCADE" in schema_sql()
+        )
 
 
 def test_alert_event_history_preserves_owner_scope_and_pagination():
@@ -197,10 +199,7 @@ def test_alert_notification_skip_preserves_status_and_unnotified_guard():
     assert "p_status IS NULL OR p_status NOT IN" in routine
     for status in ("DISABLED", "PREFERENCE_DISABLED", "SOURCE_NOT_FOUND", "DUPLICATE"):
         assert f"'{status}'" in routine
-    assert (
-        "WHERE alert_event_id = p_event_id AND notification_id IS NULL"
-        in routine
-    )
+    assert "WHERE alert_event_id = p_event_id AND notification_id IS NULL" in routine
     assert (
         "jsonb_set(payload, '{notification_skip_reason}', to_jsonb(p_status))"
         in routine

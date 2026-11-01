@@ -7,9 +7,13 @@ def test_enrichment_schema_contract_delegates_wrappers_to_shared_selection():
     shared = next(sql for sql in definitions if "p_min_interval_minutes integer" in sql)
     assert "{quant,llm_eligible}" in shared
     assert "s.strategy_code <> 'SWING_EXIT'" in shared
-    scoped = next(sql for sql in definitions if "p_instrument_ids uuid[]) RETURNS" in sql)
+    scoped = next(
+        sql for sql in definitions if "p_instrument_ids uuid[]) RETURNS" in sql
+    )
     assert "p_instrument_ids, 30" in scoped
-    unscoped = next(sql for sql in definitions if "p_limit integer DEFAULT 25) RETURNS" in sql)
+    unscoped = next(
+        sql for sql in definitions if "p_limit integer DEFAULT 25) RETURNS" in sql
+    )
     assert "p_enrichment_fingerprint, p_limit, NULL::uuid[]" in unscoped
 
 
