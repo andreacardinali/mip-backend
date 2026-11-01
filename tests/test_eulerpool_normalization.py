@@ -18,7 +18,6 @@ from market_data.exchange_sync import (
 from market_data.models import ExchangeReference, InstrumentReference
 from market_data.providers.eulerpool import EulerpoolProvider
 from market_time.repository import SQLExchangeRepository
-from oneshot.apply_exchange_registry import migration_statements
 from scheduler_repository import SchedulerRepository
 from scripts.sync_exchanges import main as sync_exchanges_main
 
@@ -822,77 +821,6 @@ def test_holiday_repository_uses_stored_function_and_restores_snapshot():
         "fetched_at": snapshot.fetched_at,
     }
     assert repository.latest("XNYS", "eulerpool") == snapshot
-
-
-def test_holiday_migration_preserves_existing_exchanges_and_utc_types():
-    statements = migration_statements()
-    assert len(statements) == 10
-    assert "timestamp with time zone" in statements[1]
-    assert "as_of date" in statements[1]
-    assert "UNIQUE (exchange_code, source, provider_updated_at)" in statements[2]
-    assert "PRIMARY KEY (snapshot_id)" in statements[3]
-    assert "REFERENCES public.exchanges(exchange)" in statements[4]
-    assert "INSERT INTO public.exchanges" not in statements[5]
-    assert "exchange_source_mappings" in statements[5]
-    assert "exchange_code <> p_exchange_code" in statements[5]
-    assert "ON CONFLICT" in statements[5]
-    assert "Provider exchange identity conflicts" in statements[5]
-    assert "without changing its version" in statements[5]
-    assert "sp_upsert_exchange" in statements[6]
-    assert "sp_sync_exchange_catalog" in statements[7]
-    assert "CASCADE" not in "\n".join(statements)
-
-
-def test_holiday_catalog_upgrade_preserves_registry_and_replaces_functions():
-    statements = migration_statements(upgrade=True)
-    assert len(statements) == 9
-    assert (
-        "DROP CONSTRAINT exchange_holiday_snapshots_exchange_code_check"
-        in statements[1]
-    )
-    assert "ALTER COLUMN exchange_code TYPE character varying(20)" in statements[2]
-    assert "^[A-Z0-9]{4,20}$" in statements[3]
-    assert all(
-        statement.startswith("CREATE OR REPLACE FUNCTION")
-        for statement in statements[4:-1]
-    )
-    assert "Noncanonical existing exchanges" in statements[6]
-    assert "CREATE TABLE" not in "\n".join(statements)
-    assert "DELETE FROM" not in "\n".join(statements)
-
-
-def test_exchange_job_migration_only_preserves_identity_schedule_and_history():
-    statements = migration_statements(rename_job_only=True)
-    assert len(statements) == 3
-    assert statements[-1] == "SELECT public.sp_migrate_exchange_sync_job();"
-    function = statements[1]
-    assert "LOCK TABLE public.scheduler_jobs IN SHARE ROW EXCLUSIVE MODE" in function
-    assert "RAISE EXCEPTION" in function
-    assert "WHERE job_key = 'eulerpool_exchange_holidays'" in function
-    assert "job_key = 'eulerpool_exchange_sync'" in function
-    assert "python_module = 'jobs.eulerpool_exchange_sync'" in function
-    assignments = function.split("UPDATE public.scheduler_jobs", 1)[1].split(
-        "WHERE", 1
-    )[0]
-    for field in (
-        "job_id",
-        "enabled",
-        "cron_expression",
-        "trigger_type",
-        "interval_minutes",
-        "created_at",
-        "last_run_at",
-        "next_run_at",
-    ):
-        assert field not in assignments
-    assert "DELETE" not in function
-    assert "INSERT" not in function
-    assert "ALTER TABLE" not in "\n".join(statements)
-
-
-def test_exchange_migration_rejects_combined_modes():
-    with pytest.raises(ValueError, match="either registry upgrade"):
-        migration_statements(upgrade=True, rename_job_only=True)
 
 
 def test_holiday_repository_syncs_full_eulerpool_catalog_through_stored_function():

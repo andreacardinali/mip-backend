@@ -9,16 +9,11 @@ from uuid import UUID
 
 import pytest
 
+from tests.schema_contract import schema_function, schema_functions, schema_sql
 
-def test_screener_analysis_timestamp_matches_schema_and_replaces_visible_rank() -> None:
-    schema = Path("mip_schema.sql").read_text(encoding="utf-8")
-    installer = Path("oneshot/install_screener_analysis_timestamp.sql").read_text(
-        encoding="utf-8"
-    )
-    signature = "FUNCTION public.sp_market_screener_enrich_opportunity_payload"
-    schema_body = schema.split(signature, 1)[1].split("$$;", 1)[0]
-    installer_body = installer.split(signature, 1)[1].split("$$;", 1)[0]
-    assert " ".join(schema_body.split()) == " ".join(installer_body.split())
+
+def test_screener_analysis_timestamp_replaces_visible_rank() -> None:
+    schema_body = schema_function("sp_market_screener_enrich_opportunity_payload")
     timestamp_body = schema_body.split("'last_analysis_at', (", 1)[1].split(
         "'strategy_code'", 1
     )[0]
@@ -48,26 +43,16 @@ def test_screener_analysis_timestamp_matches_schema_and_replaces_visible_rank() 
         "sp_market_screener_summary_recipients",
     ],
 )
-def test_screener_summary_preference_is_opt_in_and_matches_schema(name) -> None:
-    installer = Path("oneshot/install_screener_summary_notifications.sql").read_text(
-        encoding="utf-8"
-    )
-    schema = Path("mip_schema.sql").read_text(encoding="utf-8")
-    pattern = rf"FUNCTION public\.{name}\(.*?\$\$;"
-    installed = re.search(pattern, installer, re.DOTALL)
-    snapshot = re.search(pattern, schema, re.DOTALL)
-    assert installed is not None and snapshot is not None
-    installed_body = installed.group().split("$$", 1)[1]
-    snapshot_body = snapshot.group().split("$$", 1)[1]
-    assert " ".join(installed_body.split()) == " ".join(snapshot_body.split())
-    assert "'SCREENER_SUMMARY'" in installed_body
+def test_screener_summary_preference_is_opt_in(name) -> None:
+    routine = schema_function(name)
+    assert "'SCREENER_SUMMARY'" in routine
     if name == "sp_get_user_notification_preferences":
         assert re.search(
-            r"'SCREENER_SUMMARY'.*?::text, false\)", installed_body, re.DOTALL
+            r"'SCREENER_SUMMARY'.*?::text, false\)", routine, re.DOTALL
         )
     elif name == "sp_market_screener_summary_recipients":
-        assert "ns.portfolio_id IS NULL" in installed_body
-        assert "ns.enabled = true" in installed_body
+        assert "ns.portfolio_id IS NULL" in routine
+        assert "ns.enabled = true" in routine
 
 
 @pytest.mark.parametrize(
@@ -206,23 +191,21 @@ def test_opportunity_filters_and_limit_are_applied_by_sql(watchlist_match) -> No
     )
 
 
-def test_watchlist_filter_installer_matches_schema_and_filters_before_limit() -> None:
-    schema = Path("mip_schema.sql").read_text(encoding="utf-8")
-    installer = Path("oneshot/install_screener_watchlist_filter.sql").read_text(
-        encoding="utf-8"
-    )
-    pattern = r"FUNCTION public\.sp_market_screener_list_filtered_opportunities\([^\n]*p_watchlist_match boolean\).*?AS\s+\$\$(.*?)\$\$;"
-    bodies = [
-        re.search(pattern, sql, re.DOTALL).group(1) for sql in (schema, installer)
+def test_watchlist_filter_applies_before_limit() -> None:
+    routines = [
+        routine
+        for routine in schema_functions("sp_market_screener_list_filtered_opportunities")
+        if "p_watchlist_match boolean" in routine.split("RETURNS", 1)[0]
     ]
-    assert bodies[0] == bodies[1]
+    assert len(routines) == 1
+    routine = routines[0]
     assert (
         "sp_get_user_entity_asset_match(p_user_id, coalesce(o.entity_id, i.entity_id), o.instrument_id)"
-        in bodies[0]
+        in routine
     )
-    assert bodies[0].index("p_watchlist_match IS NULL") < bodies[0].index("LIMIT least")
-    assert "2147483647" in bodies[0]
-    assert "->> 'in_watchlist'" in bodies[0]
+    assert routine.index("p_watchlist_match IS NULL") < routine.index("LIMIT least")
+    assert "2147483647" in routine
+    assert "->> 'in_watchlist'" in routine
 
 
 @pytest.mark.parametrize(
@@ -383,10 +366,8 @@ def test_pipeline_request_rejects_invalid_parameters(payload) -> None:
         MarketScreenerPipelineRequest.model_validate(payload)
 
 
-def test_snapshot_changes_installer_compares_successful_unfiltered_snapshots() -> None:
-    sql = Path("oneshot/install_screener_snapshot_changes.sql").read_text(
-        encoding="utf-8"
-    )
+def test_snapshot_changes_compare_successful_unfiltered_snapshots() -> None:
+    sql = schema_function("sp_market_screener_snapshot_changes")
     assert sql.count("r.status = 'SUCCESS'") == 2
     assert sql.count("r.phase_results->'analysis_scan'->>'status' = 'SUCCESS'") == 2
     assert sql.count("r.phase_results->'ranking'->>'status' = 'SUCCESS'") == 2
@@ -401,94 +382,51 @@ def test_snapshot_changes_installer_compares_successful_unfiltered_snapshots() -
     assert "previous_snapshot_id" in sql
 
 
-def test_performance_installer_preserves_asof_prices_and_direction_cycles() -> None:
-    sql = Path("oneshot/install_signal_performance_history.sql").read_text(
-        encoding="utf-8"
-    )
-    assert "BEFORE INSERT ON public.market_analysis_signal_events" in sql
+def test_performance_preserves_asof_prices_and_direction_cycles() -> None:
+    schema = schema_sql()
+    capture = schema_function("trg_market_analysis_capture_performance_price")
+    price = schema_function("sp_market_analysis_performance_price")
+    history = schema_function("sp_market_analysis_list_signal_performance")
     assert (
-        "performance_recorded_at timestamptz NOT NULL DEFAULT clock_timestamp()" in sql
-    )
-    assert "COALESCE((payload->>'processed_at')::timestamptz, created_at)" in sql
+        "CREATE TRIGGER trg_market_analysis_capture_performance_price BEFORE INSERT "
+        "ON public.market_analysis_signal_events FOR EACH ROW EXECUTE FUNCTION "
+        "public.trg_market_analysis_capture_performance_price();"
+    ) in schema
+    events = schema.split("CREATE TABLE public.market_analysis_signal_events (", 1)[1].split(
+        "\n);", 1
+    )[0]
     assert (
-        "ORDER BY next_event.performance_recorded_at, next_event.signal_event_id" in sql
+        "performance_recorded_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL"
+        in events
     )
-    assert "WHERE NOT payload ? 'performance'" in sql
-    assert "instrument_id, observed_at, payload, false" in sql
-    assert "ts <= p_observed_at" in sql
-    assert "observed_at <= p_observed_at" in sql
-    assert "'CREATED', 'DIRECTION_CHANGED', 'CLOSED', 'EXPIRED'" in sql
-    assert "new_direction IN ('LONG', 'SHORT')" in sql
-    assert "CASE WHEN new_direction = 'SHORT' THEN -1 ELSE 1 END" in sql
-    assert "(valuation->>'price_at')::timestamptz >= observed_at" in sql
-    assert "exit_at >= observed_at" in sql
-    assert "OFFSET GREATEST(p_offset, 0)" in sql
-
-
-@pytest.mark.parametrize("scheduler_snapshot", [False, True])
-def test_incremental_analysis_installer_matches_schema(scheduler_snapshot) -> None:
-    import re
-
-    schema = Path("mip_schema.sql").read_text(encoding="utf-8")
-    installer = Path("oneshot/install_screener_incremental_analysis.sql").read_text(
-        encoding="utf-8"
+    assert (
+        "ORDER BY next_event.performance_recorded_at, next_event.signal_event_id"
+        in history
     )
-    scheduler_installer = Path(
-        "oneshot/install_scheduler_execution_requests.sql"
-    ).read_text(encoding="utf-8")
-    pattern = (
-        r"CREATE(?: OR REPLACE)? FUNCTION public\.(\w+)\((.*?)\)\s+RETURNS\s+"
-        r"(.*?)AS\s+(\$[^$]*\$)(.*?)\4;"
-    )
-    definitions = re.findall(pattern, installer, re.DOTALL)
-    progress_definitions = [
-        definition
-        for definition in re.findall(pattern, scheduler_installer, re.DOTALL)
-        if definition[0] == "sp_market_screener_context_progress"
-    ]
-    assert len(progress_definitions) == 1
-    name, _signature, returns, delimiter, body = progress_definitions[0]
-    scheduler_progress = [re.sub(r"\s+", " ", returns + body).strip()]
-    if scheduler_snapshot:
-        schema = re.sub(
-            pattern,
-            lambda match: (
-                f"CREATE FUNCTION public.{name}({match.group(2)}) RETURNS "
-                f"{returns}AS {delimiter}{body}{delimiter};"
-                if match.group(1) == name
-                else match.group(0)
-            ),
-            schema,
-            flags=re.DOTALL,
-        )
-    schema_definitions = {
-        (name, signature): re.sub(r"\s+", " ", returns + body).strip()
-        for name, signature, returns, _delimiter, body in re.findall(
-            pattern, schema, re.DOTALL
-        )
-    }
-    assert len(scheduler_progress) == 1
-    assert len(definitions) == 6
-    assert installer.startswith("BEGIN;")
-    assert installer.rstrip().endswith("COMMIT;")
-    for name, signature, returns, _delimiter, body in definitions:
-        installed_definition = re.sub(r"\s+", " ", returns + body).strip()
-        accepted_definitions = [installed_definition]
-        if name == "sp_market_screener_context_progress":
-            accepted_definitions.extend(scheduler_progress)
-        assert schema_definitions[name, signature] in accepted_definitions
-    assert "pg_try_advisory_lock(" in installer
-    assert "pg_advisory_unlock(" in installer
-    assert "pg_try_advisory_xact_lock(" not in installer
+    assert "NEW.instrument_id, NEW.observed_at, NEW.payload, true" in capture
+    assert "jsonb_build_object('historical_backfill', false)" in capture
+    assert "ts <= p_observed_at" in price
+    assert "observed_at <= p_observed_at" in price
+    assert "'CREATED', 'DIRECTION_CHANGED', 'CLOSED', 'EXPIRED'" in history
+    assert "new_direction IN ('LONG', 'SHORT')" in history
+    assert "CASE WHEN new_direction = 'SHORT' THEN -1 ELSE 1 END" in history
+    assert "(valuation->>'price_at')::timestamptz >= observed_at" in history
+    assert "exit_at >= observed_at" in history
+    assert "OFFSET GREATEST(p_offset, 0)" in history
 
 
-def test_scheduler_progress_override_preserves_context_and_domain_fallback() -> None:
-    installer = Path("oneshot/install_scheduler_execution_requests.sql").read_text(
-        encoding="utf-8"
-    )
-    progress = installer.split(
-        "CREATE OR REPLACE FUNCTION public.sp_market_screener_context_progress(", 1
-    )[1].split("$$;", 1)[0]
+def test_analysis_lock_preserves_session_and_transaction_scopes() -> None:
+    session_lock = schema_function("sp_market_screener_session_analysis_lock")
+    transaction_lock = schema_function("sp_market_screener_try_analysis_lock")
+    assert "CASE WHEN p_release" in session_lock
+    assert "pg_try_advisory_lock(hashtext('market_screener_analysis'))" in session_lock
+    assert "pg_advisory_unlock(hashtext('market_screener_analysis'))" in session_lock
+    assert "pg_try_advisory_xact_lock(" not in session_lock
+    assert "pg_try_advisory_xact_lock(hashtext('market_screener_analysis'))" in transaction_lock
+
+
+def test_scheduler_progress_preserves_context_and_domain_fallback() -> None:
+    progress = schema_function("sp_market_screener_context_progress")
     assert "sp_market_screener_context_instruments(" in progress
     assert "r.requested_by = p_user_id" in progress
     assert "r.payload->>'context_type' = p_context_type" in progress
@@ -503,34 +441,19 @@ def test_scheduler_progress_override_preserves_context_and_domain_fallback() -> 
 
 
 def test_screener_diagnostics_recovery_preserves_lock_and_run_identity() -> None:
-    installer = Path("oneshot/install_screener_run_diagnostics.sql").read_text(
-        encoding="utf-8"
-    )
-    schema = Path("mip_schema.sql").read_text(encoding="utf-8")
-    recovery = schema.split("CREATE FUNCTION public.sp_scheduler_recover_job_runs(", 1)[
-        1
-    ].split("$$;", 1)[0]
+    recovery = schema_function("sp_scheduler_recover_job_runs")
     anchor = "GET DIAGNOSTICS v_recovered = ROW_COUNT;"
     assert recovery.index("sp_scheduler_try_job_lock(p_job_id)") < recovery.index(
         anchor
     )
-    assert "pg_get_functiondef(" in installer
-    assert "EXECUTE replace(definition, anchor, anchor || synchronization)" in installer
-    assert "Unexpected scheduler recovery definition" in installer
-    assert "position('UPDATE public.market_screener_runs screener'" in installer
-    assert "screener.job_run_id = job_run.job_run_id" in installer
-    assert "job_run.job_id = p_job_id AND screener.status = 'RUNNING'" in installer
-    assert installer.startswith("BEGIN;")
-    assert installer.rstrip().endswith("COMMIT;")
+    assert "screener.job_run_id = job_run.job_run_id" in recovery
+    assert "job_run.job_id = p_job_id AND screener.status = 'RUNNING'" in recovery
+    assert "job_run.status IN ('FAILED', 'SUCCESS', 'PARTIAL')" in recovery
+    assert recovery.index(anchor) < recovery.index("UPDATE public.market_screener_runs screener")
 
 
 def test_screener_diagnostics_reader_handles_only_interrupted_linked_runs() -> None:
-    installer = Path("oneshot/install_screener_run_diagnostics.sql").read_text(
-        encoding="utf-8"
-    )
-    reader = installer.split(
-        "CREATE OR REPLACE FUNCTION public.sp_market_screener_list_runs(", 1
-    )[1]
+    reader = schema_function("sp_market_screener_list_runs")
     assert "'job_run_id', run.job_run_id" in reader
     assert "'job_key', job.job_key" in reader
     assert "job_run.job_run_id = run.job_run_id" in reader
@@ -549,51 +472,28 @@ def test_api_enriches_existing_opportunity_payloads() -> None:
     assert "sp_market_screener_get_user_opportunity" in repository
 
 
-def test_context_installer_matches_schema_and_filters_before_limit() -> None:
-    import re
-
-    schema = Path("mip_schema.sql").read_text(encoding="utf-8")
-    installer = Path("oneshot/install_screener_contexts.sql").read_text(
-        encoding="utf-8"
-    )
-    for name in (
-        "sp_market_screener_context_instruments",
-        "sp_market_screener_list_filtered_opportunities",
-        "sp_market_screener_list_contexts",
-        "sp_market_screener_prepare_context_scan",
-        "sp_market_screener_try_analysis_lock",
-    ):
-        pattern = rf"FUNCTION public\.{name}\(.*?AS\s+\$\$(.*?)\$\$;"
-        bodies = [
-            re.search(pattern, sql, re.DOTALL).group(1) for sql in (schema, installer)
-        ]
-        assert [
-            re.sub(r"\s+", " ", body.replace("character varying", "varchar")).strip()
-            for body in bodies
-        ][0] == [
-            re.sub(r"\s+", " ", body.replace("character varying", "varchar")).strip()
-            for body in bodies
-        ][
-            1
-        ]
-    assert "w.user_id = p_user_id" in installer
-    assert "p.user_id = p_user_id" in installer
-    assert "pos.quantity <> 0" in installer
-    assert "mum.valid_to IS NULL" in installer
-    assert "p_context_type = 'ENTITY' AND i.entity_id = p_context_id" in installer
+def test_context_members_preserve_owner_scope_and_filter_before_limit() -> None:
+    members = schema_function("sp_market_screener_context_instruments")
+    preparation = schema_function("sp_market_screener_prepare_context_scan")
+    filtered = schema_functions("sp_market_screener_list_filtered_opportunities")
+    assert "w.user_id = p_user_id" in members
+    assert "p.user_id = p_user_id" in members
+    assert "pos.quantity <> 0" in members
+    assert "mum.valid_to IS NULL" in members
+    assert "p_context_type = 'ENTITY' AND i.entity_id = p_context_id" in members
     assert (
-        "p_context_type = 'INSTRUMENT' AND i.instrument_id = p_context_id" in installer
+        "p_context_type = 'INSTRUMENT' AND i.instrument_id = p_context_id" in members
     )
-    assert "p_user_id IS NULL OR NOT EXISTS" in installer
+    assert "p_user_id IS NULL OR NOT EXISTS" in members
     assert (
         "CREATE UNIQUE INDEX uq_market_universes_code ON public.market_universes "
         "USING btree (upper(btrim((code)::text)));"
-    ) in schema
-    assert "ON CONFLICT (upper(btrim(code::text))) DO UPDATE" in installer
-    assert "ON CONFLICT (code)" not in installer
-    assert installer.index(
-        "o.consensus_direction = p_consensus_direction"
-    ) < installer.index("LIMIT least")
+    ) in schema_sql()
+    assert "ON CONFLICT (upper(btrim(code::text))) DO UPDATE" in preparation
+    assert "ON CONFLICT (code)" not in preparation
+    assert len(filtered) == 2
+    for routine in filtered:
+        assert routine.index("o.consensus_direction = p_consensus_direction") < routine.index("LIMIT least")
 
 
 @pytest.mark.parametrize(

@@ -184,15 +184,11 @@ def test_entity_list_http_scope_validation(monkeypatch, routes, scope):
         session.close.assert_called_once()
 
 
-def test_entity_list_installation_matches_authoritative_schema():
+def test_entity_list_schema_contract():
     root = Path(__file__).resolve().parents[1]
     schema = (root / "mip_schema.sql").read_text(encoding="utf-8")
-    installer = (root / "oneshot" / "install_entity_list_filters.sql").read_text(
-        encoding="utf-8"
-    )
     signature = "FUNCTION public.sp_get_user_entities"
     schema_body = schema.split(signature, 1)[1].split("$$;", 1)[0]
-    assert schema_body == installer.split(signature, 1)[1].split("$$;", 1)[0]
     assert "sp_get_user_entity_asset_match(" in schema_body
     assert "o.entity_id = e.entity_id AND o.active" in schema_body
     assert schema_body.index("p_scope = 'PORTFOLIO'") < schema_body.index("LIMIT")
@@ -204,16 +200,11 @@ def test_entity_list_installation_matches_authoritative_schema():
     assert "ORDER BY m.name, m.entity_id\nLIMIT" in schema_body
 
 
-def test_overview_installation_matches_authoritative_schema():
+def test_overview_schema_contract():
     root = Path(__file__).resolve().parents[1]
     schema = (root / "mip_schema.sql").read_text(encoding="utf-8")
-    installer = (root / "oneshot" / "install_entity_overview.sql").read_text(
-        encoding="utf-8"
-    )
     signature = "FUNCTION public.sp_get_user_entity_overview"
     schema_body = schema.split(signature, 1)[1].split("$$;", 1)[0]
-    installer_body = installer.split(signature, 1)[1].split("$$;", 1)[0]
-    assert schema_body == installer_body
     assert "sp_get_user_entity_asset_match(p_user_id, e.entity_id)" in schema_body
     assert "ne.entity_id = e.entity_id" in schema_body
     assert "o.entity_id = e.entity_id AND o.active" in schema_body

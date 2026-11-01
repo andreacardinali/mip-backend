@@ -16,11 +16,7 @@ from market_time.models import (
 from market_time.normalization import TemporalNormalizationError, as_utc
 from market_time.repository import SQLExchangeHoursRepository
 from market_time.service import MarketTimeService
-from oneshot.apply_market_time import migration_statements
-from oneshot.apply_market_time_exchange_mappings import (
-    mapping_sql,
-    validate_calendars,
-)
+from tests.schema_contract import schema_function
 
 pytestmark = [
     pytest.mark.filterwarnings(
@@ -143,135 +139,9 @@ def test_exchange_repository_uses_only_explicit_mapping():
     assert SQLExchangeHoursRepository(db).get_exchange("MISSING") is None
 
 
-def test_market_time_migration_is_scoped_and_does_not_backfill():
-    schema = (Path(__file__).resolve().parents[1] / "mip_schema.sql").read_text(
-        encoding="utf-8"
-    )
-    preflight, definition = migration_statements(schema)
-    assert "ADD COLUMN IF NOT EXISTS calendar_name" in preflight
-    assert "RESTRICT" in preflight
-    assert "proacl IS NOT NULL" in preflight
-    assert "CASCADE" not in preflight
-    assert "UPDATE public.filings" not in preflight
-    assert "actual_type IS DISTINCT FROM expected.data_type" in preflight
-    assert "No automatic historical conversion is allowed" in preflight
-    assert definition.startswith("CREATE OR REPLACE FUNCTION public.sp_upsert_filing")
+def test_filing_schema_contract_accepts_timezone_aware_instants():
+    definition = schema_function("sp_upsert_filing")
     assert "p_accepted_at timestamp with time zone" in definition
-
-
-def test_exchange_mapping_migration_is_scoped_and_guards_conflicts():
-    statement = mapping_sql()
-    assert "LOCK TABLE public.exchanges IN SHARE ROW EXCLUSIVE MODE" in statement
-    assert "Missing reviewed exchange" in statement
-    assert "Exchange identity changed" in statement
-    assert "Conflicting calendar/timezone" in statement
-    assert "NULLIF(existing.calendar_name, '')" in statement
-    assert "NULLIF(existing.timezone_name, '')" in statement
-    assert "INSERT" not in statement
-    assert "market_open_time" not in statement
-    assert "UPDATE public.filings" not in statement
-    for unresolved in ("US", "XBER", "XDUS", "XPAR"):
-        assert f"('{unresolved}'," not in statement
-
-
-def test_exchange_mapping_calendar_validation_rejects_timezone_conflicts():
-    calendars = Mock()
-    calendars.get_calendar.return_value.tz = "UTC"
-    with (
-        patch.dict("sys.modules", {"exchange_calendars": calendars}),
-        patch("oneshot.apply_market_time_exchange_mappings.ZoneInfo"),
-        pytest.raises(ValueError, match="expected Europe/Rome, got UTC"),
-    ):
-        validate_calendars()
-
-
-def test_exchange_mapping_calendar_validation_checks_all_mapped_calendars():
-    approved = {
-        "XMIL": "Europe/Rome",
-        "XNAS": "America/New_York",
-        "XNYS": "America/New_York",
-        "XAMS": "Europe/Amsterdam",
-        "XETR": "Europe/Berlin",
-        "XLON": "Europe/London",
-    }
-    calendars = Mock()
-    calendars.get_calendar.side_effect = lambda name: Mock(tz=approved[name])
-    with (
-        patch.dict("sys.modules", {"exchange_calendars": calendars}),
-        patch("oneshot.apply_market_time_exchange_mappings.ZoneInfo") as timezone,
-    ):
-        validate_calendars()
-    assert [call.args[0] for call in calendars.get_calendar.call_args_list] == list(
-        approved
-    )
-    assert [call.args[0] for call in timezone.call_args_list] == list(approved.values())
-    statement = mapping_sql()
-    for calendar_name, timezone_name in approved.items():
-        assert f"'{calendar_name}', '{timezone_name}')" in statement
-
-
-def test_exchange_mapping_dry_run_does_not_import_database(capsys):
-    from oneshot.apply_market_time_exchange_mappings import main
-
-    with (
-        patch("sys.argv", ["apply_market_time_exchange_mappings"]),
-        patch(
-            "oneshot.apply_market_time_exchange_mappings.validate_calendars"
-        ) as check,
-        patch.dict("sys.modules", {"db": None}),
-    ):
-        main()
-    check.assert_not_called()
-    output = capsys.readouterr().out
-    assert output.startswith("BEGIN;\n")
-    assert output.rstrip().endswith("COMMIT;")
-
-
-def test_exchange_mapping_apply_validates_before_database_access():
-    from oneshot.apply_market_time_exchange_mappings import main
-
-    with (
-        patch("sys.argv", ["apply_market_time_exchange_mappings", "--apply"]),
-        patch(
-            "oneshot.apply_market_time_exchange_mappings.validate_calendars",
-            side_effect=ValueError("Unavailable calendar"),
-        ),
-        patch.dict("sys.modules", {"db": None}),
-        pytest.raises(ValueError, match="Unavailable calendar"),
-    ):
-        main()
-
-
-def test_exchange_mapping_apply_uses_one_transaction():
-    from oneshot.apply_market_time_exchange_mappings import main
-
-    database = MagicMock()
-    with (
-        patch("sys.argv", ["apply_market_time_exchange_mappings", "--apply"]),
-        patch(
-            "oneshot.apply_market_time_exchange_mappings.validate_calendars"
-        ) as check,
-        patch.dict("sys.modules", {"db": database}),
-    ):
-        main()
-    check.assert_called_once_with()
-    database.engine.begin.assert_called_once_with()
-    connection = database.engine.begin.return_value.__enter__.return_value
-    connection.exec_driver_sql.assert_called_once_with(
-        mapping_sql(), execution_options={"no_parameters": True}
-    )
-
-
-def test_real_exchange_mapping_calendars_match_timezones():
-    pytest.importorskip("exchange_calendars")
-    validate_calendars()
-
-
-def test_market_time_migration_rejects_wrong_signature():
-    with pytest.raises(ValueError):
-        migration_statements(
-            "CREATE FUNCTION public.sp_upsert_filing(p_accepted_at timestamp without time zone)\n$$;"
-        )
 
 
 def test_clock_api_rejects_naive_instants_and_serializes_utc():
