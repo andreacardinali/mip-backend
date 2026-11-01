@@ -65,6 +65,40 @@ def test_lifecycle_storage_and_routines_use_installed_lake(database):
     assert "lifecycle_event" in definition
 
 
+def test_consolidation_guards_and_removed_table_references(database):
+    definitions = dict(
+        database.execute(
+            text(
+                "SELECT proname, prosrc FROM pg_proc WHERE oid IN ("
+                "to_regprocedure('public.sp_consolidate_entity(uuid,uuid,boolean)'), "
+                "to_regprocedure('public.sp_consolidate_instrument(uuid,uuid,boolean,boolean)'))"
+            )
+        ).all()
+    )
+    entity = definitions["sp_consolidate_entity"]
+    assert "SELECT FROM public.event_lake" in entity
+    assert "an entity redirect policy is required" in entity
+    assert entity.index("SELECT FROM public.analytical_lake") < entity.index(
+        "IF NOT p_force"
+    )
+    assert "sp_consolidate_entity(" in definitions["sp_consolidate_instrument"]
+    dangling_references = database.execute(
+        text(
+            "SELECT names.name, routine.oid::regprocedure::text "
+            "FROM unnest(ARRAY['entity_metrics', 'insider_transactions', "
+            "'portfolio_impacts', 'entity_impact_history', 'cache_portfolio_exposure', "
+            "'cache_portfolio_sector_exposure', 'cache_portfolio_theme_exposure', "
+            "'entity_scores', 'scoring_components', 'sector_sentiment', "
+            "'sync_jobs', 'sync_log', 'sync_mapping', 'system_jobs']) AS names(name) "
+            r"JOIN pg_proc routine ON routine.prosrc ~* ('\m' || names.name || '\M') "
+            "JOIN pg_namespace namespace ON namespace.oid = routine.pronamespace "
+            "WHERE namespace.nspname NOT IN ('pg_catalog', 'information_schema') "
+            "AND to_regclass('public.' || names.name) IS NULL"
+        )
+    ).all()
+    assert dangling_references == []
+
+
 def test_performance_preserves_asof_prices_and_direction_cycles(database):
     definitions = dict(
         database.execute(

@@ -1193,6 +1193,60 @@ After the analytical lake has been installed, use these temporary scripts in ord
 	public signatures. Entity consolidation rejects immutable analytical references
 	instead of rewriting them. Only then are `market_analysis_signal_events`,
 	`signals`, `signal_history` and `signal_factors` dropped without `CASCADE`.
+3. `oneshot/cleanup_analytical_post_migration.sql` is optional and rerunnable
+	after successful cutover. It verifies required relations, enabled persistence
+	triggers, absence of legacy tables/routine references, preserved historical
+	records and signal links, unique lifecycle IDs and informational/analytical
+	separation. It removes only the obsolete performance-capture trigger function
+	if still present, using `RESTRICT`, and refreshes table statistics with `ANALYZE`.
+	It does not delete events, apply retention, remove operational tables or start
+	services. Run the entire file with SQL error handling enabled; a failed guard
+	requires investigation, not bypassing the check. Keep writers stopped through
+	this optional cleanup and verification.
+
+Two additional, independent legacy cleanups are available after cutover:
+
+- `oneshot/cleanup_legacy_entity_projections.sql` removes the obsolete metrics,
+	insider transactions, portfolio impact/history and exposure-cache blocks from
+	the currently installed `sp_consolidate_entity(uuid,uuid,boolean)`, then drops
+	`entity_metrics`, `insider_transactions`, `portfolio_impacts`,
+	`entity_impact_history` and `cache_portfolio_exposure`. The source checksum and
+	block boundaries must match the audited live routine. Both immutable-lake guards
+	and the neighboring operational updates remain intact.
+- `oneshot/cleanup_legacy_unused_tables.sql` drops `cache_portfolio_sector_exposure`,
+	`cache_portfolio_theme_exposure`, `entity_scores`, `scoring_components`,
+	`sector_sentiment`, `sync_jobs`, `sync_log`, `sync_mapping` and `system_jobs`.
+	It drops `entity_scores` before its referenced `scoring_components`. The Python
+	function `scheduler.sync_jobs()` uses the scheduler repository, not the obsolete
+	`sync_jobs` table; current scheduler tables and runtime are retained.
+
+All fourteen tables were empty in the live audit. The five entity projections are
+still referenced because consolidation retains merge logic for the former mutable
+storage model, even though current writers no longer populate it. Empty tables do
+not make those statements harmless after a drop: the routine would fail when it
+reaches a missing relation. Remove the references before dropping the tables.
+`sp_consolidate_instrument(uuid,uuid,boolean,boolean)` references those projections
+indirectly through entity consolidation, enabled by default. Keep that delegation:
+it also consolidates operational entity references. Its definition is not modified
+by either cleanup. Neither routine should rewrite immutable lake history.
+
+Instrument consolidation currently has no direct lake guard, and neither lake has
+an instrument foreign key. The entity guards therefore do not provide universal
+protection for archived instrument IDs, especially when entity consolidation is
+disabled or both instruments share an entity. These cleanups do not add redirects
+or reassign archived instrument IDs. Review that separate policy before merging
+instruments with lake history.
+
+Both legacy cleanup scripts are transactional and rerunnable. They lock existing
+candidate tables, reject any rows or unexpected relation types, check routine
+source references across user schemas and use `DROP ... RESTRICT`, never `CASCADE`.
+Any surviving dependency aborts the transaction. Source-text checks cannot prove
+the absence of dynamically assembled SQL or external consumers. Stop every writer,
+back up and test on a restored database first; run each whole file with SQL error
+handling and roll back after an error. The preparation audit was read-only: these
+scripts have not been executed or their DDL/write paths validated on development.
+Refresh the dump from the actual database after successful cleanup, not by editing
+the existing dump to reflect proposed changes.
 
 Back up the database and validate both transactions on a restored database first.
 Stop all backend, scheduler and other database writers before backfill and keep
@@ -1218,11 +1272,16 @@ Remove-Item Env:MIP_TEST_LIVE_DB
 These permanent tests use a read-only, repeatable-read transaction against the
 configured database. They check installed storage/routines, original backfilled
 records and links, instrument isolation, history API compatibility and performance
-reads. They do not read `oneshot/` or establish that write paths execute correctly.
+reads, entity lake guards and dangling routine references to removed legacy tables.
+They allow the audited tables to remain present before optional cleanup. They do
+not read `oneshot/` or establish that write paths execute correctly.
 On the restored database, additionally exercise creation, confirmation, direction
-change, closure and expiry before applying cutover to development. The development
-database still uses legacy history until cutover actually commits; preparing these
-files or passing offline tests is not evidence that it has been applied.
+change, closure and expiry before applying cutover to development. Preparing these
+files or passing offline tests is not evidence that cutover has been applied;
+verify the actual development database before restarting writers. Lake-only
+analytical archival still retains operational `trading_signals`, scan-run tables,
+OHLCV and price history. A missing local `DATABASE_URL` blocks application startup
+and opt-in live tests even when the editor's PostgreSQL connection works.
 
 Operations requiring a complete database-only view remain atomic: final quant
 eligibility/ranking updates and full universe membership replacement. These do
