@@ -476,8 +476,9 @@ def test_context_members_preserve_owner_scope_and_filter_before_limit() -> None:
         "ai_failure",
     ],
 )
-def test_manual_context_scan_records_history_in_callers_transaction(
-    monkeypatch, outcome
+@pytest.mark.parametrize("incremental", [False, True])
+def test_manual_context_scan_records_history_with_transaction_boundaries(
+    monkeypatch, outcome, incremental
 ):
     calls = []
     context = {"user_id": "owner", "context_type": "WATCHLIST", "context_id": "list"}
@@ -490,7 +491,10 @@ def test_manual_context_scan_records_history_in_callers_transaction(
     }
     count = 0 if outcome == "empty" else 1001 if outcome == "too_many" else 1
     savepoints = []
-    db = SimpleNamespace(begin_nested=lambda: savepoints.append(True) or nullcontext())
+    db = SimpleNamespace(
+        begin_nested=lambda: savepoints.append(True) or nullcontext(),
+        commit=lambda: calls.append("commit"),
+    )
     run_id = UUID("00000000-0000-0000-0000-000000000001")
     snapshot_id = UUID("00000000-0000-0000-0000-000000000002")
     scan = {
@@ -571,6 +575,7 @@ def test_manual_context_scan_records_history_in_callers_transaction(
     def scan_members(session, **kwargs):
         assert session is db
         assert kwargs["members"] == [{"universe_id": "universe", **member}]
+        assert kwargs.get("incremental", False) is incremental
         calls.append("scan")
         if outcome == "failure":
             raise RuntimeError("provider unavailable")
@@ -596,6 +601,13 @@ def test_manual_context_scan_records_history_in_callers_transaction(
         }
         calls.append("complete")
 
+    progress_updates = []
+
+    def progress(**kwargs):
+        assert kwargs["run_id"] == run_id
+        progress_updates.append(kwargs["phase_results"]["progress"])
+        calls.append("progress")
+
     modules = {
         "market_analysis.scan": {"ScanConfig": object, "ScanMember": lambda **kw: kw},
         "market_screener.api_repository": {
@@ -611,7 +623,10 @@ def test_manual_context_scan_records_history_in_callers_transaction(
         },
         "market_screener.run_repository": {
             "MarketScreenerRunRepository": lambda session: SimpleNamespace(
-                start=start, create_snapshot=snapshot, complete=complete
+                start=start,
+                create_snapshot=snapshot,
+                complete=complete,
+                progress=progress,
             )
         },
         "notifications.queue": {"NotificationQueue": object},
@@ -632,7 +647,12 @@ def test_manual_context_scan_records_history_in_callers_transaction(
         "build_market_screener_ranking"
     ] = ranking
     analyze = namespace["analyze_screener_context"]
-    kwargs = {**context, "market_data_service": object(), "config": object()}
+    kwargs = {
+        **context,
+        "market_data_service": object(),
+        "config": object(),
+        "incremental": incremental,
+    }
     if ai_enabled:
         kwargs.update(llm_enabled=True, llm_settings={"configured": True})
     if outcome in ("empty", "too_many"):
@@ -642,7 +662,11 @@ def test_manual_context_scan_records_history_in_callers_transaction(
     elif outcome == "failure":
         with pytest.raises(RuntimeError, match="provider unavailable"):
             analyze(db, **kwargs)
-        assert calls == ["members", "lock", "start", "scan"]
+        assert calls == [
+            "members", "lock", "start",
+            *(["progress", "commit"] if incremental else []),
+            "scan",
+        ]
     else:
         result = analyze(db, **kwargs)
         assert result == {
@@ -657,12 +681,27 @@ def test_manual_context_scan_records_history_in_callers_transaction(
             "members",
             "lock",
             "start",
+            *(["progress", "commit"] if incremental else []),
             "scan",
+            *(["ranking", "progress", "commit"] if incremental and ai_enabled else []),
             *(["ai"] if ai_enabled else []),
+            *(["progress", "commit", "progress", "commit"] if incremental and ai_enabled and outcome != "ai_failure" else []),
             "ranking",
             "snapshot",
             "complete",
         ]
+        expected_progress = [("TECHNICAL", 0, 1)] if incremental else []
+        if incremental and ai_enabled:
+            expected_progress.append(("LLM_ENRICHMENT", 0, 0))
+            if outcome != "ai_failure":
+                expected_progress.extend([
+                    ("LLM_ENRICHMENT", 0, 1), ("LLM_ENRICHMENT", 1, 1),
+                ])
+        assert [
+            (update["phase"], update["completed"], update["total"])
+            for update in progress_updates
+        ] == expected_progress
+        assert all(update["symbol"] is None for update in progress_updates)
 
 
 @pytest.mark.parametrize(

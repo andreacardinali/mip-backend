@@ -37,13 +37,13 @@ def analyze_screener_context(
     runs = MarketScreenerRunRepository(db)
     run_id = runs.start()
 
-    def progress(completed, total, symbol):
+    def progress(completed, total, symbol, *, phase="TECHNICAL", results=None):
         runs.progress(
             run_id=run_id,
             phase_results={
-                "context": context,
+                **(results or {"context": context}),
                 "progress": {
-                    "phase": "TECHNICAL",
+                    "phase": phase,
                     "completed": completed,
                     "total": total,
                     "symbol": symbol,
@@ -66,6 +66,11 @@ def analyze_screener_context(
     )
     phases = {"context": context, "analysis_scan": scan}
     status = scan["status"]
+    if incremental and llm_enabled:
+        phases["ranking"] = build_market_screener_ranking(
+            MarketScreenerRepository(db), config=ScreenerRankingConfig()
+        )
+        progress(0, 0, None, phase="LLM_ENRICHMENT", results=phases)
     if llm_enabled:
         from market_analysis.llm_enrichment_repository import (
             MarketAnalysisLLMEnrichmentRepository,
@@ -75,17 +80,25 @@ def analyze_screener_context(
         )
 
         enrichment_repository = MarketAnalysisLLMEnrichmentRepository(db)
+        ai_total = 0
+        ai_completed = 0
 
         def load_candidates(*, contract_fingerprint, limit, min_interval_minutes=30):
+            nonlocal ai_total
             with db.begin_nested():
-                return enrichment_repository.list_pending_context(
+                candidates = enrichment_repository.list_pending_context(
                     **context,
                     enrichment_fingerprint=contract_fingerprint,
                     limit=limit,
                     min_interval_minutes=min_interval_minutes,
                 )
+            ai_total = len(candidates)
+            if incremental:
+                progress(0, ai_total, None, phase="LLM_ENRICHMENT", results=phases)
+            return candidates
 
         def persist(signal, enrichment, analysis, composite, *, contract_fingerprint):
+            nonlocal ai_completed
             with db.begin_nested():
                 persisted = enrichment_repository.apply(
                     signal_id=str(signal["signal_id"]),
@@ -99,7 +112,14 @@ def analyze_screener_context(
                     ),
                 )
             if incremental:
-                db.commit()
+                ai_completed += 1
+                progress(
+                    ai_completed,
+                    ai_total,
+                    signal.get("symbol"),
+                    phase="LLM_ENRICHMENT",
+                    results=phases,
+                )
             return persisted
 
         try:

@@ -84,6 +84,14 @@ are deduplicated for the same job, user and validated payload.
 Screener retains its advisory locks, incremental commits and domain runs,
 correlated through `job_run_id`. A busy analysis is deferred with the same ticket;
 lock diagnostics identify the blocking job and run without changing lock policy.
+
+For incremental context analyses, technical results and the initial ranking are
+committed before LLM enrichment starts. AI fields are committed as each enrichment
+is persisted; the final ranking and snapshot follow enrichment. AI failures retain
+the committed technical results and yield a partial outcome. Progress distinguishes
+technical analysis from AI enrichment, and the frontend polls entity views and
+screener results every two seconds while an analysis is running.
+
 Cache cleanup still uses `sp_cleanup_market_cache(30)`. The price-request worker
 only populates the existing specialist queue for the authenticated user with a
 30-second freshness threshold. Its successful result means enqueueing completed,
