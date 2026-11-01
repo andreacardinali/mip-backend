@@ -207,9 +207,14 @@ def test_alert_notification_skip_preserves_status_and_unnotified_guard():
     )
 
 
-def test_consolidate_instrument_alias_conflicts_match_unique_index():
+def test_consolidate_instrument_aliases_match_current_schema():
     schema = schema_sql()
     function = schema_function("sp_consolidate_instrument")
+    if "CREATE TABLE public.instrument_aliases (" not in schema:
+        assert "instrument_aliases" not in function
+        assert "v_moved_snapshots integer := 0;" in function
+        assert "'moved_snapshots', v_moved_snapshots" in function
+        return
     index = re.search(
         r"CREATE UNIQUE INDEX uq_instrument_alias_normalized .*?USING btree (.+);",
         schema,

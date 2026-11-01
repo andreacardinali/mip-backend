@@ -1300,6 +1300,47 @@ by installed consolidation routines: `entity_relationships`, `entity_sectors`,
 `portfolio_holdings_snapshots`. They cannot be dropped safely without first
 reviewing and changing those routine contracts.
 
+#### Consolidation Table Cleanup (2026-11-01)
+
+The subsequent audit identified ten empty legacy tables with no local runtime
+consumers: `entity_relationships`, `entity_sectors`, `entity_tags`,
+`etf_constituents`, `instrument_aliases`, `instrument_entity_exposure`,
+`instrument_relations`, `notification_hashes`, `portfolio_holdings_snapshots`
+and `tags`. `oneshot/cleanup_legacy_consolidation_tables.sql` prepares their
+removal, first removing only their branches from the installed
+`sp_consolidate_entity(uuid,uuid,boolean)` and
+`sp_consolidate_instrument(uuid,uuid,boolean,boolean)` functions. Other
+consolidation behavior, function metadata and signatures remain unchanged;
+`moved_snapshots` remains in the audit/result JSON with value zero.
+`entity_tags` is dropped before its referenced `tags` table. `sectors`,
+`analytical_event_evidence` and `market_analysis_scan_events` are not targets.
+The two analytical tables still have active writers and retention/provenance
+contracts, despite currently containing no rows.
+
+This script supersedes the preceding exclusion for these ten tables only. It
+is transactional and rerunnable after successful application. It locks existing
+ordinary standalone targets and rejects any rows, extension membership,
+unexpected routine source references, changed function-body fingerprints or
+nonunique block boundaries. Expected transformed-body fingerprints and the
+remaining immutable-lake guards and instrument result contract are checked
+before dropping with `RESTRICT`, never `CASCADE`. Only table-owned objects are
+removed; shared trigger functions are retained. All changes roll back on error.
+
+The block transformations were checked as text against the current live
+definitions through read-only SQL: boundaries are unique, removed branches
+reference only the targeted legacy relations, and retained operational branches
+and contracts remain present. The script has **not been executed**; its DDL,
+post-cleanup consolidation behavior and rerun path remain unvalidated. Stop all
+writers, take a backup and validate the entire transaction and rerun on a restored
+database before applying it to development with SQL error handling enabled.
+After an error, roll back the session before retrying. Refresh the schema dump
+from the actual database after application; do not edit the dump to simulate it.
+Permanent tests use that current dump or the live catalog, never `oneshot/`:
+the alias contract test follows whether the table is present, and the live
+consolidation check rejects references to any of these tables once it is absent.
+Neither audit nor source guards exclude external clients or dynamically assembled
+SQL. Instrument redirect/history policy remains a separate, unchanged concern.
+
 The six other empty tables were checked against current code paths and installed
 routine definitions, not just their names in the old dump:
 
