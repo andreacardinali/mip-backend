@@ -7,6 +7,7 @@ from auth.security import CurrentUser, get_current_user
 from db import SessionLocal
 from market_data.factory import market_data
 from services.currencies import normalize_supported_currency
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 router = APIRouter()
 password_hash = PasswordHash.recommended()
@@ -50,6 +51,13 @@ def update_preferences(
     payload: dict,
     current_user: CurrentUser = Depends(get_current_user),
 ):
+    display_timezone = payload.get("display_timezone", current_user.get("display_timezone", "UTC"))
+    try:
+        if not isinstance(display_timezone, str):
+            raise ValueError("Invalid display timezone")
+        ZoneInfo(display_timezone)
+    except (ValueError, ZoneInfoNotFoundError) as error:
+        raise HTTPException(422, "Invalid IANA display timezone") from error
     try:
         reporting_currency = normalize_supported_currency(
             payload.get("reporting_currency"),
@@ -69,13 +77,15 @@ def update_preferences(
             text(
                 """
                 SELECT public.sp_update_user_preferences(
-                    CAST(:user_id AS uuid), CAST(:reporting_currency AS character(3))
+                    CAST(:user_id AS uuid), CAST(:reporting_currency AS character(3)),
+                    CAST(:display_timezone AS text)
                 )
                 """
             ),
             {
                 "user_id": current_user["user_id"],
                 "reporting_currency": reporting_currency,
+                "display_timezone": display_timezone,
             },
         ).scalar()
         if row is None:

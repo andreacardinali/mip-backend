@@ -16,6 +16,7 @@ class CurrentUser(TypedDict):
     display_name: str | None
     is_active: bool
     reporting_currency: str
+    display_timezone: str
     roles: list[str]
 
 
@@ -35,7 +36,10 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> CurrentUser:
     try:
         row = (
             db.execute(
-                text("SELECT * FROM sp_get_user_context(CAST(:id AS uuid))"),
+                text(
+                    "SELECT context.*, public.sp_get_user_display_timezone(CAST(:id AS uuid)) "
+                    "AS display_timezone FROM sp_get_user_context(CAST(:id AS uuid)) context"
+                ),
                 {"id": uid},
             )
             .mappings()
