@@ -1176,6 +1176,54 @@ execute correctly on PostgreSQL. Verify revision deduplication, legacy baselines
 all signal transitions, enrichment and both cleanup routines against the actual
 installed database before enabling analytical writes.
 
+#### Lifecycle History Backfill And Cutover
+
+After the analytical lake has been installed, use these temporary scripts in order:
+
+1. `oneshot/backfill_analytical_lifecycle.sql` archives each existing
+	`market_analysis_signal_events` record, preserving its original JSON, as-of
+	performance prices and timestamps. It verifies exact content and signal links
+	before committing. Equivalent reruns reuse analytical event IDs. This is partial
+	historical signal context, explicitly marked `legacy_without_assessment`; no
+	missing historical observation, assessment or complete signal snapshot is invented.
+2. `oneshot/cutover_analytical_lifecycle.sql` verifies the full backfill and the
+	audited routine definitions, creates `market_analysis_lifecycle_events` as a
+	relational projection of the lake, and archives new transitions through its
+	insert trigger. History/performance, lifecycle and alert routines retain their
+	public signatures. Entity consolidation rejects immutable analytical references
+	instead of rewriting them. Only then are `market_analysis_signal_events`,
+	`signals`, `signal_history` and `signal_factors` dropped without `CASCADE`.
+
+Back up the database and validate both transactions on a restored database first.
+Stop all backend, scheduler and other database writers before backfill and keep
+them stopped through cutover and verification. Run each entire file in one session
+with SQL error handling enabled; after an error, roll back that session before
+retrying. Cutover requires empty obsolete scoring tables and rejects schema drift,
+incomplete/changed archives and remaining stored-routine references. Its locks have
+a 10-second acquisition timeout. It is not rerunnable after a successful cutover;
+no script runs on application startup. Keep `trading_signals`, scan-run tables,
+OHLCV and price history. Do not reapply obsolete lifecycle/scoring installers after
+cutover or rerun the analytical-lake installer on an existing lake.
+
+Refresh the schema dump from the actual database only after successful cutover.
+With `DATABASE_URL` configured in the backend's local `.env`, run these opt-in
+checks from the backend root on Windows:
+
+```powershell
+$env:MIP_TEST_LIVE_DB = "1"
+.\.venv\Scripts\python.exe -m pytest tests/test_analytical_lifecycle_live.py -q
+Remove-Item Env:MIP_TEST_LIVE_DB
+```
+
+These permanent tests use a read-only, repeatable-read transaction against the
+configured database. They check installed storage/routines, original backfilled
+records and links, instrument isolation, history API compatibility and performance
+reads. They do not read `oneshot/` or establish that write paths execute correctly.
+On the restored database, additionally exercise creation, confirmation, direction
+change, closure and expiry before applying cutover to development. The development
+database still uses legacy history until cutover actually commits; preparing these
+files or passing offline tests is not evidence that it has been applied.
+
 Operations requiring a complete database-only view remain atomic: final quant
 eligibility/ranking updates and full universe membership replacement. These do
 not wrap third-party calls in one transaction across independent instruments.

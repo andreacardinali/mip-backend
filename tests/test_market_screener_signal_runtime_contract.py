@@ -382,39 +382,6 @@ def test_snapshot_changes_compare_successful_unfiltered_snapshots() -> None:
     assert "previous_snapshot_id" in sql
 
 
-def test_performance_preserves_asof_prices_and_direction_cycles() -> None:
-    schema = schema_sql()
-    capture = schema_function("trg_market_analysis_capture_performance_price")
-    price = schema_function("sp_market_analysis_performance_price")
-    history = schema_function("sp_market_analysis_list_signal_performance")
-    assert (
-        "CREATE TRIGGER trg_market_analysis_capture_performance_price BEFORE INSERT "
-        "ON public.market_analysis_signal_events FOR EACH ROW EXECUTE FUNCTION "
-        "public.trg_market_analysis_capture_performance_price();"
-    ) in schema
-    events = schema.split("CREATE TABLE public.market_analysis_signal_events (", 1)[1].split(
-        "\n);", 1
-    )[0]
-    assert (
-        "performance_recorded_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL"
-        in events
-    )
-    assert (
-        "ORDER BY next_event.performance_recorded_at, next_event.signal_event_id"
-        in history
-    )
-    assert "NEW.instrument_id, NEW.observed_at, NEW.payload, true" in capture
-    assert "jsonb_build_object('historical_backfill', false)" in capture
-    assert "ts <= p_observed_at" in price
-    assert "observed_at <= p_observed_at" in price
-    assert "'CREATED', 'DIRECTION_CHANGED', 'CLOSED', 'EXPIRED'" in history
-    assert "new_direction IN ('LONG', 'SHORT')" in history
-    assert "CASE WHEN new_direction = 'SHORT' THEN -1 ELSE 1 END" in history
-    assert "(valuation->>'price_at')::timestamptz >= observed_at" in history
-    assert "exit_at >= observed_at" in history
-    assert "OFFSET GREATEST(p_offset, 0)" in history
-
-
 def test_analysis_lock_preserves_session_and_transaction_scopes() -> None:
     session_lock = schema_function("sp_market_screener_session_analysis_lock")
     transaction_lock = schema_function("sp_market_screener_try_analysis_lock")
