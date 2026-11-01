@@ -1169,6 +1169,11 @@ For pending AI enrichment, the runner installs both reviewed overloads, placing
 the instrument-scoped implementation before the two-argument compatibility
 wrapper. Missing, duplicate or unreviewed overload signatures are rejected.
 
+For user preferences, both reviewed overloads are installed, including the
+GUI-only display timezone. The preflight adds `users.display_timezone` with a
+default of `UTC`; timestamp storage and runtime timezone handling stay unchanged.
+Signature checks tolerate multiline declarations without changing emitted SQL.
+
 The runner executes DDL with `no_parameters=True`, preserving literal `%` markers
 inside PL/pgSQL without psycopg interpreting them as driver placeholders. A failed
 upgrade rolls back its transaction; rerun the corrected runner after a failure.

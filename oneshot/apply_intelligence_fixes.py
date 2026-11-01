@@ -34,6 +34,10 @@ FUNCTION_NAMES = (
 )
 
 FUNCTION_OVERLOADS = {
+    "sp_update_user_preferences": (
+        "p_user_id uuid, p_reporting_currency character",
+        "p_user_id uuid, p_reporting_currency character, p_display_timezone text",
+    ),
     "sp_market_analysis_list_pending_llm_enrichment": (
         "p_enrichment_fingerprint character varying, p_limit integer, p_instrument_ids uuid[], p_min_interval_minutes integer",
         "p_enrichment_fingerprint character varying, p_limit integer, p_instrument_ids uuid[]",
@@ -60,8 +64,15 @@ def migration_statements(schema: str) -> list[str]:
                 raise ValueError(f"Expected reviewed pg_dump overloads for {name}")
             definitions = []
             for signature in signatures:
-                prefix = f"CREATE FUNCTION public.{name}({signature}) RETURNS "
-                selected = [sql for sql in matches if sql.startswith(prefix)]
+                signature_pattern = (
+                    rf"^CREATE FUNCTION public\.{re.escape(name)}\(\s*"
+                    rf"{re.escape(signature)}\s*\)\s+RETURNS\s"
+                )
+                selected = [
+                    sql
+                    for sql in matches
+                    if re.match(signature_pattern, " ".join(sql.split()))
+                ]
                 if len(selected) != 1:
                     raise ValueError(
                         f"Expected exactly one pg_dump definition for {name}({signature})"

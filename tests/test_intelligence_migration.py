@@ -79,6 +79,55 @@ def test_migration_rejects_invalid_enrichment_overloads(change):
         migration_statements(schema)
 
 
+def test_preferences_overloads_include_timezone_after_column_preflight():
+    schema = (Path(__file__).resolve().parents[1] / "mip_schema.sql").read_text(
+        encoding="utf-8"
+    )
+    statements = migration_statements(schema)
+    assert (
+        "ADD COLUMN IF NOT EXISTS display_timezone text NOT NULL DEFAULT 'UTC'"
+        in statements[0]
+    )
+    preferences = [
+        sql
+        for sql in statements
+        if sql.startswith(
+            "CREATE OR REPLACE FUNCTION public.sp_update_user_preferences("
+        )
+    ]
+    assert len(preferences) == 2
+    assert "p_reporting_currency character) RETURNS" in preferences[0]
+    assert "p_display_timezone text" in preferences[1]
+    assert "display_timezone = p_display_timezone" in preferences[1]
+
+
+@pytest.mark.parametrize("change", ["missing", "duplicate", "unreviewed"])
+def test_migration_rejects_invalid_preferences_overloads(change):
+    schema = (Path(__file__).resolve().parents[1] / "mip_schema.sql").read_text(
+        encoding="utf-8"
+    )
+    definition = next(
+        sql.replace("CREATE OR REPLACE FUNCTION", "CREATE FUNCTION", 1)
+        for sql in migration_statements(schema)
+        if sql.startswith(
+            "CREATE OR REPLACE FUNCTION public.sp_update_user_preferences("
+        )
+        and "p_display_timezone text" in sql
+    )
+    if change == "missing":
+        schema = schema.replace(definition, "", 1)
+    elif change == "duplicate":
+        schema += "\n" + definition
+    else:
+        schema = schema.replace(
+            definition,
+            definition.replace("p_display_timezone text", "p_display_timezone integer"),
+            1,
+        )
+    with pytest.raises(ValueError, match="sp_update_user_preferences"):
+        migration_statements(schema)
+
+
 def test_migration_rejects_missing_definition():
     with pytest.raises(ValueError, match="position_cost_basis"):
         migration_statements("")

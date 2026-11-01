@@ -1,5 +1,8 @@
 SET LOCAL lock_timeout = '10s';
 
+ALTER TABLE public.users
+    ADD COLUMN IF NOT EXISTS display_timezone text NOT NULL DEFAULT 'UTC';
+
 ALTER TABLE public.trading_signals
     ADD COLUMN IF NOT EXISTS last_llm_analysis_at timestamptz;
 
