@@ -222,7 +222,7 @@ def call_cleanup(
     ) as cursor:
         cursor.execute(
             """
-            CALL public.sp_cleanup_llm_request_queue(
+            SELECT * FROM public.sp_cleanup_llm_request_queue(
                 p_completed_retention_days => %s,
                 p_failed_retention_days => %s,
                 p_abandoned_retention_days => %s,
@@ -230,13 +230,7 @@ def call_cleanup(
                 p_orphan_age => %s,
                 p_queue_key => %s,
                 p_dry_run => %s,
-                p_purge_all => %s,
-                p_completed_count => %s,
-                p_failed_count => %s,
-                p_abandoned_count => %s,
-                p_orphaned_pending_count => %s,
-                p_expired_processing_count => %s,
-                p_purged_count => %s
+                p_purge_all => %s
             )
             """,
             (
@@ -248,19 +242,13 @@ def call_cleanup(
                 queue_key,
                 dry_run,
                 purge_all,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
             ),
         )
 
         row = cursor.fetchone()
 
     if row is None:
-        raise RuntimeError("Cleanup procedure returned no result")
+        raise RuntimeError("Cleanup function returned no result")
 
     return CleanupResult.from_row(row)
 

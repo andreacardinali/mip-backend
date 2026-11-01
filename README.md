@@ -2,6 +2,27 @@
 
 Adds explicit logs immediately before and after each provider call, including call number, mode, signal count, signal IDs, output-token limit and elapsed time. Content-validation failures log split sizes and error details before recursive retry.
 
+## LLM Queue Cleanup Function
+
+Before deploying the updated `scripts/cleanup_llm_queue.py`, pause invocations
+of that command and manually apply
+`oneshot/convert_llm_queue_cleanup_to_function.sql` with a role authorized to
+create routines and replace the existing `postgres`-owned procedures. The script
+checks the audited installed procedure bodies and properties, creates one
+eight-input function returning six `p_*_count` columns, and drops both procedure
+overloads with `RESTRICT` in one transaction. It preserves the extended cleanup
+logic, owner and default execution permissions. Unexpected routine changes or
+dependencies abort the conversion. It is deliberately not rerunnable after
+conversion and is never applied at startup. It does not delete queue rows.
+
+The command now uses `SELECT`, not `CALL`; old command versions cannot run after
+conversion, and the updated command requires the converted database. Retention,
+orphan handling, queue filtering, dry-run defaults, purge confirmations and
+caller-owned commit remain unchanged. Refresh the schema dump from development
+after applying the script; do not hand-edit the dump to represent this change.
+Caller unit tests validate argument/result handling, not installation or live
+deletion behavior. Live verification requires applying the conversion first.
+
 ## Scheduler Execution Requests
 
 Explicit execution APIs authenticate, authorize and validate the request, then
@@ -1247,6 +1268,67 @@ handling and roll back after an error. The preparation audit was read-only: thes
 scripts have not been executed or their DDL/write paths validated on development.
 Refresh the dump from the actual database after successful cleanup, not by editing
 the existing dump to reflect proposed changes.
+
+#### Additional Cleanup Audit (2026-11-01)
+
+`oneshot/cleanup_unused_configuration_tables.sql` removes only `api_sources`,
+`notification_rules`, `notification_templates`, `system_settings` and
+`portfolio_snapshots`. Exact live counts were zero for all five; the audit found
+no application consumers, installed routine references, incoming foreign keys or
+dependent views. `portfolio_snapshots` has its own trigger and an outgoing foreign
+key; dropping the table removes its own objects, not the shared trigger function
+or the referenced table. Current alerts use `alert_rules`, not
+`notification_rules`, and notification delivery does not use these legacy
+configuration tables.
+
+The script is transactional and rerunnable. It checks ordinary standalone table
+types and extension ownership, locks existing targets, rejects any rows or user
+routine source references, and drops with `RESTRICT`, never `CASCADE`. A failed
+guard or dependency aborts the entire transaction. These catalog/row checks were
+verified read-only against development; the script itself was not executed and
+its PostgreSQL DDL path remains unvalidated. Stop writers, take a backup and test
+on a restored database before applying the entire file with SQL error handling.
+Dynamic SQL and consumers outside the audited workspace cannot be excluded.
+
+`schema_version` is not included: it contains seven historical rows. No use of
+that table was found, but removing populated historical metadata requires a
+separate retention decision. The `schema_version` field in event envelopes is
+unrelated and must remain. Also excluded are the empty tables still referenced
+by installed consolidation routines: `entity_relationships`, `entity_sectors`,
+`sectors`, `entity_tags`, `tags`, `etf_constituents`, `instrument_aliases`,
+`instrument_entity_exposure`, `instrument_relations`, `notification_hashes` and
+`portfolio_holdings_snapshots`. They cannot be dropped safely without first
+reviewing and changing those routine contracts.
+
+The six other empty tables were checked against current code paths and installed
+routine definitions, not just their names in the old dump:
+
+| Table | Current role | Decision |
+| --- | --- | --- |
+| `alert_events` | `evaluate_and_enqueue_market_alerts` registers matches through `sp_alert_register_match`; SQL uses the rows for fingerprint deduplication, cooldown and session limits. Other routines attach notification outcomes and list user history. | Retain: mutable delivery state is not replaced by immutable signal lifecycle events or notifications. |
+| `alert_threshold_state` | `sp_alert_observe_threshold` records ordered observations and crossing generations for `FIXED_PRICE`/`PERCENT_MOVE` rules with `crossing_only`. | Retain: prevents repeated threshold alerts. The sole live rule is enabled `MARKET_SIGNAL`, so no configured threshold producer currently needs rows. |
+| `analytical_event_evidence` | `sp_save_analytical_event` materializes informational parent links. Live FKs reference both lakes; the informational FK prevents deleting referenced evidence, while deleting its analytical owner cascades to the link. | Retain: enforces cross-lake retention. Current analytical events have no informational parents, explaining the empty link table. Analytical-to-analytical parents use `parent_event_ids` instead. |
+| `market_analysis_scan_events` | `save_scan_evaluations` links each observation and assessment to a run through `sp_market_analysis_link_scan_event`. Live FKs associate runs with analytical events. | Retain: the lake event key is deliberately independent of the run, allowing reuse across scans; it does not replace this many-to-many provenance link. Dropping it would break current scan persistence. |
+| `market_analysis_scan_failures` | Both scan services call `sp_market_analysis_record_scan_failure`, including incremental persistence failures. The rows store per-instrument diagnostics owned by a run. | Retain: failure diagnostics are not successful market observations; dropping it breaks error handling. No current failures does not imply no producer. |
+| `price_history` | Installed alert candidate/session-reference, entity performance and signal performance routines read historical closes. Instrument consolidation still merges the rows. | Retain for now, but ingestion is incomplete: no current ingestion writer was found. Provider history/OHLCV is returned in memory, and scans persist derived observations rather than a relational bar history. |
+
+The live database contained 2,189 analytical events, all `SIGNAL_LIFECYCLE`, with
+no parent links; there were no observation/assessment events yet. Its 211 scan
+runs comprised 210 completed and one still marked running. The most recent scan
+started at 11:01:29 Europe/Rome, before the first analytical ingestion at 12:06:59
+on November 1. This does not establish that the new scan writer has executed
+successfully; empty scan links cannot be used as evidence that it is obsolete.
+The running row dates from October 31 and needs a separate operational check;
+this cleanup does not alter run state.
+
+An empty `price_history` has functional consequences: `PERCENT_MOVE` alerts skip
+candidates without a previous-session reference, and history-backed performance
+prices may be unavailable. Payload/instrument price fallbacks do not reconstruct
+missing historical closes. Before removing this table, choose either explicit
+bar-history ingestion or an authoritative replacement, update every SQL consumer
+and validate session references and as-of performance against the actual database.
+This audit does not introduce either change or claim that the two-lake cutover
+already supplies those prices.
 
 Back up the database and validate both transactions on a restored database first.
 Stop all backend, scheduler and other database writers before backfill and keep
