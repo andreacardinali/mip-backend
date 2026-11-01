@@ -20,6 +20,7 @@ from market_analysis.scan import (
     ScanResult,
     scan_members,
 )
+from services.market_analysis_lake import save_scan_evaluations
 
 
 def run_market_analysis_scan(
@@ -84,6 +85,7 @@ def run_member_analysis_scan(
     try:
         member_lifecycle_events = []
         member_expired_signals = 0
+        assessment_ids = {}
         if incremental:
             db.commit()
             parts = []
@@ -96,6 +98,15 @@ def run_member_analysis_scan(
                     config=effective_config,
                 )
                 try:
+                    member_assessment_ids = save_scan_evaluations(
+                        db,
+                        repository,
+                        run_id=run_id,
+                        members=[member],
+                        result=part,
+                        config=effective_config,
+                        quant_config=quant_config,
+                    )
                     member_signal_ids = []
                     for evaluated in part.candidates:
                         quant_score, breakdown = score_evaluated_signal(
@@ -105,6 +116,16 @@ def run_member_analysis_scan(
                             evaluated.candidate,
                             evidence={
                                 **evaluated.candidate.evidence,
+                                **(
+                                    {
+                                        "assessment_event_id": member_assessment_ids[
+                                            str(member.instrument_id)
+                                        ]
+                                    }
+                                    if str(member.instrument_id)
+                                    in member_assessment_ids
+                                    else {}
+                                ),
                                 "quant": {
                                     "score": quant_score,
                                     "breakdown": breakdown,
@@ -152,6 +173,7 @@ def run_member_analysis_scan(
                     db.commit()
                     part = ScanResult(processed=1, candidates=(), failures=(failure,))
                 else:
+                    assessment_ids.update(member_assessment_ids)
                     member_lifecycle_events.extend(events)
                     member_expired_signals += expired
                 parts.append(part)
@@ -170,6 +192,15 @@ def run_member_analysis_scan(
                 market_data_service=market_data_service,
                 config=effective_config,
             )
+            assessment_ids = save_scan_evaluations(
+                db,
+                repository,
+                run_id=run_id,
+                members=members,
+                result=result,
+                config=effective_config,
+                quant_config=quant_config,
+            )
         quant_results = prefilter_evaluated_signals(
             result.candidates, config=quant_config
         )
@@ -183,6 +214,15 @@ def run_member_analysis_scan(
                 evaluated.candidate,
                 evidence={
                     **evaluated.candidate.evidence,
+                    **(
+                        {
+                            "assessment_event_id": assessment_ids[
+                                str(evaluated.member.instrument_id)
+                            ]
+                        }
+                        if str(evaluated.member.instrument_id) in assessment_ids
+                        else {}
+                    ),
                     "quant": {
                         "score": quant_score,
                         "breakdown": breakdown,

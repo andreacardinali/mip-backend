@@ -179,6 +179,17 @@ class MarketAnalysisRepository:
             ).scalar_one()
         )
 
+    def link_scan_event(self, *, run_id: str, event_id: str) -> None:
+        self.db.execute(
+            text(
+                """
+                SELECT public.sp_market_analysis_link_scan_event(
+                    CAST(:run_id AS uuid), CAST(:event_id AS uuid))
+            """
+            ),
+            {"run_id": run_id, "event_id": event_id},
+        )
+
     def upsert_signal(
         self,
         *,

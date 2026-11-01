@@ -75,6 +75,9 @@ def test_successful_no_signal_scan_records_only_evaluated_scope(
     assert result.skipped[0].reason == ScanSkipReason.NO_TECHNICAL_SIGNAL
     assert len(result.evaluations) == 1
     assert result.evaluations[0].observed_at.timestamp() == 200000
+    assert result.evaluations[0].snapshot
+    assert result.evaluations[0].bar_count == 2
+    assert len(result.evaluations[0].input_fingerprint) == 64
     assert result.to_dict()["evaluated_instrument_ids"] == [str(instrument_id)]
     captured = []
 

@@ -93,6 +93,10 @@ def analyze_screener_context(
                     llm_score=enrichment.llm_score,
                     llm_analysis=analysis,
                     composite_score=composite,
+                    input_signal=signal,
+                    assessment_event_id=(signal.get("evidence") or {}).get(
+                        "assessment_event_id"
+                    ),
                 )
             if incremental:
                 db.commit()

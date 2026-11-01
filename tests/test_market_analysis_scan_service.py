@@ -186,3 +186,105 @@ def test_incremental_scan_continues_after_member_persistence_failure(monkeypatch
         "COMPLETED",
         "commit",
     ]
+
+
+def test_lake_preserves_no_signal_evaluations_without_run_in_identity(monkeypatch):
+    from datetime import UTC, datetime
+    from unittest.mock import Mock
+    from uuid import uuid4
+
+    from market_analysis.quant_prefilter import QuantPrefilterConfig
+    from market_analysis.scan import ScanEvaluation, ScanMember, ScanResult
+    from services import market_analysis_lake as lake
+
+    envelopes = []
+    identifiers = [str(uuid4()), str(uuid4())]
+
+    def save(db, envelope, *, lake):
+        assert lake == "analytical"
+        envelopes.append(envelope.as_payload())
+        return identifiers[(len(envelopes) - 1) % 2]
+
+    monkeypatch.setattr(lake, "save_event", save)
+    member = ScanMember("u", "i", "e", "ABC", "X", "USD", None)
+    result = ScanResult(
+        processed=1,
+        candidates=(),
+        failures=(),
+        evaluations=(
+            ScanEvaluation(
+                "i",
+                datetime(2026, 11, 1, tzinfo=UTC),
+                ("TECH",),
+                "1D",
+                {"market_price": 12},
+                "a" * 64,
+                200,
+            ),
+        ),
+    )
+    repository = Mock()
+    for run_id in ("first-run", "second-run"):
+        assert lake.save_scan_evaluations(
+            object(),
+            repository,
+            run_id=run_id,
+            members=[member],
+            result=result,
+            config=ScanConfig(),
+            quant_config=QuantPrefilterConfig(),
+        ) == {"i": identifiers[1]}
+    assert envelopes[:2] == envelopes[2:]
+    assert envelopes[1]["payload"]["outcome"] == "NO_SIGNAL"
+    assert envelopes[1]["parent_event_ids"] == [identifiers[0]]
+    assert envelopes[0]["subjects"] == [{"instrument_id": "i", "entity_id": "e"}]
+    assert repository.link_scan_event.call_count == 4
+
+
+def test_lake_observation_is_independent_of_strategy_selection(monkeypatch):
+    from dataclasses import replace
+    from datetime import UTC, datetime
+    from unittest.mock import Mock
+    from uuid import uuid4
+
+    from market_analysis.quant_prefilter import QuantPrefilterConfig
+    from market_analysis.scan import ScanEvaluation, ScanMember, ScanResult
+    from services import market_analysis_lake as lake
+
+    envelopes = []
+
+    def save(db, envelope, *, lake):
+        assert lake == "analytical"
+        envelopes.append(envelope.as_payload())
+        return str(uuid4())
+
+    monkeypatch.setattr(lake, "save_event", save)
+    member = ScanMember("u", "i", None, "ABC")
+    evaluation = ScanEvaluation(
+        "i",
+        datetime(2026, 11, 1, tzinfo=UTC),
+        ("TECH", "SWING"),
+        "1D",
+        {"market_price": 12},
+        "a" * 64,
+        200,
+    )
+    for strategies in (("TECH", "SWING"), ("SWING", "TECH"), ("TECH",)):
+        lake.save_scan_evaluations(
+            object(),
+            Mock(),
+            run_id="run",
+            members=[member],
+            result=ScanResult(
+                processed=1,
+                candidates=(),
+                failures=(),
+                evaluations=(replace(evaluation, strategy_codes=strategies),),
+            ),
+            config=ScanConfig(enabled_strategies=strategies),
+            quant_config=QuantPrefilterConfig(),
+        )
+    assert envelopes[0] == envelopes[2] == envelopes[4]
+    assert envelopes[1]["event_key"] == envelopes[3]["event_key"]
+    assert envelopes[1]["payload"] == envelopes[3]["payload"]
+    assert envelopes[1]["event_key"] != envelopes[5]["event_key"]

@@ -62,6 +62,10 @@ def _persist_single_enrichment(
             llm_score=enrichment.llm_score,
             llm_analysis=analysis,
             composite_score=composite_score,
+            input_signal=signal,
+            assessment_event_id=(signal.get("evidence") or {}).get(
+                "assessment_event_id"
+            ),
         )
     )
 

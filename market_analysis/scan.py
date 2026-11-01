@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import hashlib
+import json
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Protocol
@@ -127,6 +129,9 @@ class ScanEvaluation:
     observed_at: datetime
     strategy_codes: tuple[str, ...]
     timeframe: str
+    snapshot: dict = field(default_factory=dict)
+    input_fingerprint: str | None = None
+    bar_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,8 +163,9 @@ class ScanResult:
 
 class MarketDataReader(Protocol):
     def get_ohlcv(self, request: HistoryRequest): ...
-def _evaluate(member, bars, config):
-    snapshot = analyze_price_bars(bars, config=config.technical_config)
+def _evaluate(member, bars, config, snapshot=None):
+    if snapshot is None:
+        snapshot = analyze_price_bars(bars, config=config.technical_config)
     if snapshot is None:
         raise ValueError("technical snapshot unavailable")
     observed = datetime.fromtimestamp(snapshot.observed_timestamp, UTC)
@@ -220,13 +226,25 @@ def scan_members(members, *, market_data_service, config):
                 )
                 continue
             bars = sorted(bars, key=lambda bar: bar.timestamp)
-            values = _evaluate(member, bars, config)
+            snapshot = analyze_price_bars(bars, config=config.technical_config)
+            if snapshot is None:
+                raise ValueError("technical snapshot unavailable")
+            values = _evaluate(member, bars, config, snapshot)
             evaluations.append(
                 ScanEvaluation(
                     member.instrument_id,
-                    datetime.fromtimestamp(bars[-1].timestamp, UTC),
+                    datetime.fromtimestamp(snapshot.observed_timestamp, UTC),
                     config.enabled_strategies or default_registry.codes,
                     config.timeframe,
+                    asdict(snapshot),
+                    hashlib.sha256(
+                        json.dumps(
+                            [asdict(bar) for bar in bars],
+                            sort_keys=True,
+                            allow_nan=False,
+                        ).encode("utf-8")
+                    ).hexdigest(),
+                    len(bars),
                 )
             )
             if not values:

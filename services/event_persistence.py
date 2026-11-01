@@ -9,10 +9,16 @@ from market_time.normalization import as_utc
 from services.event_contract import EventEnvelope, stable_event_key
 
 
-def save_event(db: Session, event: EventEnvelope) -> str:
+def save_event(db: Session, event: EventEnvelope, *, lake: str = "event") -> str:
+    routines = {
+        "event": "public.sp_save_event",
+        "analytical": "public.sp_save_analytical_event",
+    }
+    if lake not in routines:
+        raise ValueError(f"Unknown lake: {lake}")
     return str(
         db.execute(
-            text("SELECT public.sp_save_event(CAST(:envelope AS jsonb))"),
+            text(f"SELECT {routines[lake]}(CAST(:envelope AS jsonb))"),
             {"envelope": json.dumps(event.as_payload(), allow_nan=False)},
         ).scalar_one()
     )

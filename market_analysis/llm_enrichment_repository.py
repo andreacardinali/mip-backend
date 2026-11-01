@@ -70,14 +70,17 @@ class MarketAnalysisLLMEnrichmentRepository:
         llm_score: float,
         llm_analysis: dict[str, Any],
         composite_score: float,
+        input_signal: dict[str, Any],
+        assessment_event_id: str | None = None,
     ) -> bool:
         value = self.db.execute(
             text(
                 """
-                SELECT public.sp_market_analysis_apply_llm_enrichment(
+                SELECT public.sp_market_analysis_apply_lake_enrichment(
                     CAST(:signal_id AS uuid), CAST(:enrichment_fingerprint AS varchar),
                     CAST(:llm_score AS numeric), CAST(:llm_analysis AS jsonb),
-                    CAST(:composite_score AS numeric)
+                    CAST(:composite_score AS numeric), CAST(:assessment_event_id AS uuid),
+                    CAST(:input_signal AS jsonb)
                 )
             """
             ),
@@ -87,6 +90,16 @@ class MarketAnalysisLLMEnrichmentRepository:
                 "llm_score": llm_score,
                 "llm_analysis": json.dumps(llm_analysis),
                 "composite_score": composite_score,
+                "assessment_event_id": assessment_event_id,
+                "input_signal": json.dumps(
+                    {
+                        key: value
+                        for key, value in input_signal.items()
+                        if key not in {"llm_analysis", "enrichment_fingerprint"}
+                    },
+                    default=str,
+                    allow_nan=False,
+                ),
             },
         ).scalar_one()
         return bool(value)

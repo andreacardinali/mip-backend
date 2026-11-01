@@ -1109,6 +1109,73 @@ tests/test_portfolio_intelligence_refactor.py`. Installer text checks are not
 PostgreSQL execution tests; DDL, trigger and concurrent revision behavior must
 also be verified in an isolated database before manual installation.
 
+### Analytical Lake
+
+The analytical runtime requires manual installation of
+`oneshot/install_analytical_lake.sql` before restarting the backend and scheduler.
+Back up the development database, stop its writers, and validate the entire
+transaction on a restored database first. The installer rejects an existing
+analytical lake or analytical records already present in the informational lake;
+it does not silently transfer history. It is not a startup migration or a
+rerunnable migration framework. The schema dump must subsequently be refreshed
+from the actual development database, not edited to describe this proposed schema.
+
+`event_lake` remains the informational archive. `analytical_lake` uses the same
+envelope columns, independent immutable revisions, and its own
+`analytical_lake_latest` projection. The shared persistence adapter routes to
+`sp_save_event` or `sp_save_analytical_event`; informational writes reject
+analytical types. Analytical records are:
+
+- `MARKET_OBSERVATION`: numerical snapshot, computation profile, bar count and
+	fingerprint of the historical input.
+- `SIGNAL_ASSESSMENT`: strategies, configuration, candidate scores and outcome,
+	including successful `NO_SIGNAL` evaluations.
+- `SIGNAL_LIFECYCLE`: complete signal state captured by a database trigger on
+	insert and meaningful update, including confirmation, closure and expiration.
+- `SIGNAL_ENRICHMENT`: model output, scores, enrichment fingerprint and archived
+	input context, written atomically with the signal update.
+
+Each technical observation and assessment belongs to exactly one instrument.
+Its parent `entity_id` enables entity-level aggregation; neither parent context
+nor universe membership propagates a listing's signals to sibling instruments.
+Failed or insufficient-history evaluations remain scan diagnostics, not fabricated
+analytical results. Full OHLCV stays in dedicated historical storage; the lake
+retains the numerical snapshot and input fingerprint, not a duplicate candle series.
+An input fingerprint alone cannot reconstruct candles removed from historical storage.
+
+Scan-run associations are separate from semantic identity. Repeated equivalent
+scans reuse analytical event IDs. Changed content at the same logical identity
+creates a revision; a different computation or assessment profile creates a
+distinct identity. Assessments reference the exact observation, and signal records
+reference the assessment used. Enrichment archives the input context, excluding
+previous enrichment output. Installation captures the current state of existing
+signals as an explicitly marked legacy baseline when no assessment is available;
+it cannot reconstruct their earlier history.
+
+Analytical retention is independently and explicitly invoked:
+
+```sql
+SELECT * FROM public.sp_cleanup_analytical_lake(365);        -- Preview only.
+SELECT * FROM public.sp_cleanup_analytical_lake(365, false); -- Delete, caller commits.
+```
+
+There is no default analytical retention period and no new scheduled cleanup.
+Old unreferenced observations and `NO_SIGNAL` assessments may expire. Every event
+linked to an existing trading signal, including a closed signal, is protected
+along with its parent dependencies and complete retained revision families.
+Deleting a trading signal removes that protection; this policy is not an archive
+independent of signal deletion. Informational parents have actual foreign-key
+references through `analytical_event_evidence`, so informational cleanup preserves
+them while their analytical owner remains. Model input context is archived as
+analytical evidence. Cleanup previews and deletions lock writers, require positive
+retention days, and return cutoff, eligible, protected and deleted counts.
+
+Runtime tests exercise routing and transaction behavior without reading
+`oneshot/`. They do not establish that the installer, triggers or retention rules
+execute correctly on PostgreSQL. Verify revision deduplication, legacy baselines,
+all signal transitions, enrichment and both cleanup routines against the actual
+installed database before enabling analytical writes.
+
 Operations requiring a complete database-only view remain atomic: final quant
 eligibility/ranking updates and full universe membership replacement. These do
 not wrap third-party calls in one transaction across independent instruments.

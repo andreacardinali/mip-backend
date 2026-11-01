@@ -6,7 +6,6 @@ from unittest.mock import Mock
 
 import pytest
 
-from tests.schema_contract import schema_function, schema_sql
 from market_time.normalization import TemporalNormalizationError
 from services.event_contract import EventEnvelope, stable_event_key
 from services.event_persistence import (
@@ -15,6 +14,7 @@ from services.event_persistence import (
     save_filing,
     save_intelligence_event,
 )
+from tests.schema_contract import schema_function, schema_sql
 
 
 def test_envelope_supports_future_types_and_date_only_events():
@@ -68,17 +68,33 @@ def test_identity_is_stable_and_unambiguous():
     )
 
 
-def test_common_writer_uses_one_sp_and_does_not_own_transaction():
+@pytest.mark.parametrize(
+    ("lake", "routine"),
+    [
+        ("event", "public.sp_save_event"),
+        ("analytical", "public.sp_save_analytical_event"),
+    ],
+)
+def test_common_writer_uses_one_sp_and_does_not_own_transaction(lake, routine):
     db = Mock()
     db.execute.return_value.scalar_one.return_value = "event-id"
     assert (
-        save_event(db, EventEnvelope("NEWS_ARTICLE", "ACQUIRED", "FMP", "id", {}))
+        save_event(
+            db, EventEnvelope("NEWS_ARTICLE", "ACQUIRED", "FMP", "id", {}), lake=lake
+        )
         == "event-id"
     )
-    assert "public.sp_save_event" in str(db.execute.call_args.args[0])
+    assert routine in str(db.execute.call_args.args[0])
     db.execute.assert_called_once()
     db.commit.assert_not_called()
     db.rollback.assert_not_called()
+
+
+def test_common_writer_rejects_unknown_lake_before_querying():
+    db = Mock()
+    with pytest.raises(ValueError, match="Unknown lake"):
+        save_event(db, EventEnvelope("NEWS", "ACQUIRED", "FMP", "id", {}), lake="other")
+    db.execute.assert_not_called()
 
 
 def test_schema_declares_revision_and_timestamp_guards():
@@ -394,7 +410,8 @@ def test_lake_cleanup_protects_active_chains_future_events_and_incoming_referenc
 def test_lake_cleanup_exception_preserves_immutability_and_transaction_ownership():
     timestamps = schema_function("event_lake_timestamps")
     assert (
-        "current_setting('mip.event_lake_cleanup', true) IS DISTINCT FROM 'on'" in timestamps
+        "current_setting('mip.event_lake_cleanup', true) IS DISTINCT FROM 'on'"
+        in timestamps
     )
     assert "WHERE candidate.event_id = OLD.event_id" in timestamps
     assert "RETURN OLD;" in timestamps
@@ -413,5 +430,3 @@ def test_lake_indexes_cover_incoming_foreign_keys_and_latest_ordering():
     ordering = "event_type, stage, source, event_key, entity_id, revision DESC"
     assert f"({ordering});" in sql
     assert f"ORDER BY {ordering}" in view
-
-

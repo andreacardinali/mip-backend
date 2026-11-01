@@ -97,6 +97,48 @@ def test_candidate_repository_passes_freshness_interval_to_sql(context):
         assert "NULL::uuid[]" in statement
 
 
+def test_enrichment_repository_passes_exact_source_revision():
+    from market_analysis.llm_enrichment_repository import (
+        MarketAnalysisLLMEnrichmentRepository,
+    )
+
+    calls = []
+
+    class Result:
+        def scalar_one(self):
+            return False
+
+    class Database:
+        def execute(self, statement, parameters):
+            calls.append((str(statement), parameters))
+            return Result()
+
+    repository = MarketAnalysisLLMEnrichmentRepository(Database())
+    assert not repository.apply(
+        signal_id="signal",
+        enrichment_fingerprint="fingerprint",
+        llm_score=75,
+        llm_analysis={"summary": "test"},
+        composite_score=80,
+        assessment_event_id="exact-revision",
+        input_signal={
+            "signal_id": "signal",
+            "reference_price": 12,
+            "llm_analysis": {"old": True},
+        },
+    )
+    statement, parameters = calls[0]
+    assert "sp_market_analysis_apply_lake_enrichment" in statement
+    assert "CAST(:assessment_event_id AS uuid)" in statement
+    assert parameters["assessment_event_id"] == "exact-revision"
+    import json
+
+    assert json.loads(parameters["input_signal"]) == {
+        "signal_id": "signal",
+        "reference_price": 12,
+    }
+
+
 def test_configured_enrichment_reuses_fingerprint_and_persistence(monkeypatch):
     monkeypatch.setattr(service, "create_provider", lambda config: FakeProvider())
     selected = []
