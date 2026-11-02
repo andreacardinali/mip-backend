@@ -179,6 +179,31 @@ class RetryTests(unittest.TestCase):
         self.assertNotIn("network-secret", str(error.exception))
         self.assertNotIn("network-secret", "\n".join(captured.output))
 
+    def test_connect_error_is_retried_for_explicitly_retryable_post(self):
+        attempts = 0
+        sleeps = []
+
+        def handler(request):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise httpx.ConnectError("connection refused", request=request)
+            return httpx.Response(200, request=request)
+
+        with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+            response = request_with_retry(
+                client,
+                "POST",
+                "https://example.test",
+                policy=RetryPolicy(max_retries=1, jitter_seconds=0),
+                retry_non_idempotent=True,
+                sleep=sleeps.append,
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(attempts, 2)
+        self.assertEqual(sleeps, [1.0])
+
     def test_get_retries_then_succeeds(self):
         transport = SequenceTransport([503, 200])
         with httpx.Client(transport=transport) as client:

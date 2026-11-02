@@ -789,6 +789,46 @@ def test_scheduler_requester_lookup_error_exits_savepoint():
     assert db.begin_nested.return_value.__exit__.call_args.args[0] is RuntimeError
 
 
+def test_pipeline_diagnostics_returns_bounded_pipeline_sections(monkeypatch):
+    from routers import system_admin
+
+    class Result:
+        def __init__(self, values):
+            self.values = values
+
+        def mappings(self):
+            return self
+
+        def all(self):
+            return self.values
+
+    db = MagicMock()
+    result_sets = [
+        [{"stage": "ACQUIRED", "event_count": 4}],
+        [{"event_type": "NEWS", "stage": "ACQUIRED"}],
+        [{"status": "SUCCESS", "run_count": 2}],
+        [{"job_key": "market_analysis_scan", "status": "SUCCESS"}],
+        [{"status": "SENT", "channel": "EMAIL", "notification_count": 1}],
+        [{"status": "FAILED", "channel": "EMAIL", "attempt_count": 3}],
+        [{"channel": "EMAIL", "configured_sources": 2, "ready_sources": 1}],
+    ]
+    db.execute.side_effect = [Result(values) for values in result_sets]
+    monkeypatch.setattr(system_admin, "SessionLocal", lambda: db)
+
+    result = system_admin.get_pipeline_diagnostics(limit=10, _={"user_id": USER_ID})
+
+    assert result["window_days"] == 7
+    assert result["ingestion"]["recent_events"] == result_sets[1]
+    assert result["processing"]["recent_runs"] == result_sets[3]
+    assert result["notifications"]["recent"] == result_sets[5]
+    assert result["notifications"]["channels"] == result_sets[6]
+    assert db.execute.call_count == 7
+    assert db.execute.call_args_list[1].args[1] == {"limit": 10}
+    assert db.execute.call_args_list[3].args[1] == {"limit": 10}
+    assert db.execute.call_args_list[5].args[1] == {"limit": 10}
+    db.close.assert_called_once()
+
+
 @pytest.mark.parametrize("manual_request", [False, True])
 def test_scheduler_skipped_worker_preserves_result_without_failure(
     monkeypatch, manual_request

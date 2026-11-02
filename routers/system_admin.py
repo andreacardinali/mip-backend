@@ -1,7 +1,7 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Body, Depends, HTTPException, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ValidationError
 from sqlalchemy import text
 
@@ -25,6 +25,122 @@ class JobUpdate(BaseModel):
 
 class CronPreview(BaseModel):
     cron_expression: str
+
+
+@router.get("/diagnostics")
+def get_pipeline_diagnostics(
+    limit: int = Query(default=50, ge=1, le=200),
+    _: CurrentUser = Depends(require_admin),
+):
+    db = SessionLocal()
+    try:
+        def rows(statement: str, parameters: dict[str, Any] | None = None):
+            result = db.execute(text(statement), parameters or {})
+            return [dict(row) for row in result.mappings().all()]
+
+        return {
+            "generated_at": datetime.now(timezone.utc),
+            "window_days": 7,
+            "ingestion": {
+                "by_stage_source": rows(
+                    """
+                    SELECT stage, source, COUNT(*)::integer AS event_count,
+                           MAX(ingested_at) AS latest_ingested_at
+                    FROM public.event_lake
+                    WHERE ingested_at >= now() - interval '7 days'
+                    GROUP BY stage, source
+                    ORDER BY latest_ingested_at DESC, stage, source
+                    """
+                ),
+                "recent_events": rows(
+                    """
+                    SELECT event_id, event_type, stage, source, event_key,
+                           revision, entity_id, occurred_at, ingested_at
+                    FROM public.event_lake
+                    ORDER BY ingested_at DESC
+                    LIMIT :limit
+                    """,
+                    {"limit": limit},
+                ),
+            },
+            "processing": {
+                "by_status": rows(
+                    """
+                    SELECT UPPER(status) AS status, COUNT(*)::integer AS run_count,
+                           MAX(started_at) AS latest_started_at
+                    FROM public.scheduler_job_runs
+                    WHERE started_at >= now() - interval '7 days'
+                    GROUP BY UPPER(status)
+                    ORDER BY run_count DESC, status
+                    """
+                ),
+                "recent_runs": rows(
+                    """
+                    SELECT r.job_run_id, j.job_key, j.job_name, r.status,
+                           r.started_at, r.completed_at, r.error_message, r.result
+                    FROM public.scheduler_job_runs r
+                    JOIN public.scheduler_jobs j ON j.job_id = r.job_id
+                    ORDER BY r.started_at DESC
+                    LIMIT :limit
+                    """,
+                    {"limit": limit},
+                ),
+            },
+            "notifications": {
+                "by_status_channel": rows(
+                    """
+                    SELECT UPPER(status) AS status,
+                           UPPER(COALESCE(channel, 'N/D')) AS channel,
+                           COUNT(*)::integer AS notification_count,
+                           MAX(created_at) AS latest_created_at
+                    FROM public.notifications
+                    WHERE created_at >= now() - interval '7 days'
+                    GROUP BY UPPER(status), UPPER(COALESCE(channel, 'N/D'))
+                    ORDER BY notification_count DESC, status, channel
+                    """
+                ),
+                "recent": rows(
+                    """
+                    SELECT notification_id, notification_type, title, status, channel,
+                           severity, attempt_count, next_attempt_at, last_error,
+                           created_at, sent_at
+                    FROM public.notifications
+                    ORDER BY created_at DESC
+                    LIMIT :limit
+                    """,
+                    {"limit": limit},
+                ),
+                "channels": rows(
+                    """
+                    SELECT UPPER(source_type) AS channel,
+                           COUNT(*)::integer AS configured_sources,
+                           COUNT(*) FILTER (
+                               WHERE COALESCE((config->>'enabled')::boolean, true)
+                           )::integer AS enabled_sources,
+                           COUNT(*) FILTER (
+                               WHERE COALESCE(
+                                   NULLIF(config->>'credential_encrypted', ''),
+                                   NULLIF(config->>'bot_token', ''),
+                                   NULLIF(config->>'token', '')
+                               ) IS NOT NULL
+                           )::integer AS credentialed_sources,
+                           COUNT(*) FILTER (
+                               WHERE COALESCE((config->>'enabled')::boolean, true)
+                                 AND COALESCE(
+                                     NULLIF(config->>'credential_encrypted', ''),
+                                     NULLIF(config->>'bot_token', ''),
+                                     NULLIF(config->>'token', '')
+                                 ) IS NOT NULL
+                           )::integer AS ready_sources
+                    FROM public.user_sources
+                    GROUP BY UPPER(source_type)
+                    ORDER BY channel
+                    """
+                ),
+            },
+        }
+    finally:
+        db.close()
 
 
 @router.post("/scheduler/cron-preview")
