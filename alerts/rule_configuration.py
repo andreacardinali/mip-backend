@@ -164,6 +164,7 @@ def validate_rule_payload(payload: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("Invalid override instrument ID") from error
         if not isinstance(override, dict) or override.keys() - {
             "enabled",
+            "notification_source_id",
             "threshold",
             "price_direction",
             "strategy_codes",
@@ -178,7 +179,18 @@ def validate_rule_payload(payload: dict[str, Any]) -> dict[str, Any]:
         override_enabled = override.get("enabled", True)
         if type(override_enabled) is not bool:
             raise ValueError("Override enabled must be a boolean")
+        notification_source_id = override.get("notification_source_id")
+        if notification_source_id is not None:
+            if not isinstance(notification_source_id, str):
+                raise ValueError("Invalid notification destination override")
+            try:
+                notification_source_id = str(UUID(notification_source_id))
+            except ValueError as error:
+                raise ValueError(
+                    "Invalid notification destination override"
+                ) from error
         merged = {**normalized, **override}
+        merged.pop("notification_source_id", None)
         merged.pop("instrument_overrides", None)
         merged.pop("enabled", None)
         checked = validate_rule_payload(
@@ -188,10 +200,17 @@ def validate_rule_payload(payload: dict[str, Any]) -> dict[str, Any]:
                 "conditions": merged,
             }
         )["conditions"]
-        normalized_overrides[instrument_id] = {
+        normalized_override = {
             "enabled": override_enabled,
-            **{key: checked[key] for key in override if key != "enabled"},
+            **{
+                key: checked[key]
+                for key in override
+                if key not in ("enabled", "notification_source_id")
+            },
         }
+        if "notification_source_id" in override:
+            normalized_override["notification_source_id"] = notification_source_id
+        normalized_overrides[instrument_id] = normalized_override
     normalized["instrument_overrides"] = normalized_overrides
     return {
         "name": name.strip(),
@@ -210,4 +229,8 @@ def effective_rule(rule, instrument_id: str):
     override = rule.conditions.get("instrument_overrides", {}).get(instrument_id, {})
     if override.get("enabled") is False:
         return None
-    return replace(rule, conditions={**rule.conditions, **override})
+    conditions = {**rule.conditions, **override}
+    conditions.pop("notification_source_id", None)
+    if override.get("notification_source_id"):
+        conditions["source_id"] = override["notification_source_id"]
+    return replace(rule, conditions=conditions)

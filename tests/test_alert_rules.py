@@ -119,6 +119,7 @@ def test_rule_payload_normalizes_strategy_codes():
 
 def test_instrument_override_is_validated_and_normalized():
     instrument = "00000000-0000-0000-0000-000000000001"
+    source_id = "00000000-0000-0000-0000-000000000002"
     payload = validate_rule_payload(
         {
             "name": "Watchlist",
@@ -129,6 +130,7 @@ def test_instrument_override_is_validated_and_normalized():
                     instrument: {
                         "strategy_codes": [" supertrend "],
                         "min_composite_score": 0.9,
+                        "notification_source_id": source_id.upper(),
                     }
                 },
             },
@@ -137,6 +139,7 @@ def test_instrument_override_is_validated_and_normalized():
     override = payload["conditions"]["instrument_overrides"][instrument]
     assert override["strategy_codes"] == ["SUPERTREND"]
     assert override["min_composite_score"] == 0.9
+    assert override["notification_source_id"] == source_id
     with pytest.raises(ValueError):
         validate_rule_payload(
             {
@@ -146,6 +149,35 @@ def test_instrument_override_is_validated_and_normalized():
                 },
             }
         )
+
+
+def test_instrument_notification_source_is_applied_to_effective_rule():
+    from alerts.models import AlertRule
+    from alerts.rule_configuration import effective_rule
+
+    instrument = "00000000-0000-0000-0000-000000000001"
+    default_source = "00000000-0000-0000-0000-000000000002"
+    exception_source = "00000000-0000-0000-0000-000000000003"
+    rule = AlertRule(
+        rule_id="rule",
+        user_id="user",
+        name="Rule",
+        alert_type="MARKET_SIGNAL",
+        severity="MEDIUM",
+        channel=None,
+        conditions={
+            "source_id": default_source,
+            "instrument_overrides": {
+                instrument: {"enabled": True, "notification_source_id": exception_source}
+            },
+        },
+    )
+
+    assert effective_rule(rule, instrument).conditions["source_id"] == exception_source
+    assert (
+        effective_rule(rule, "another-instrument").conditions["source_id"]
+        == default_source
+    )
 
 
 @pytest.mark.parametrize("alert_type", ["FIXED_PRICE", "PERCENT_MOVE", "SIGNAL_CHANGE"])

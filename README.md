@@ -746,7 +746,14 @@ instead of its numeric ranking position, while preserving ranking order. Apply
 `oneshot/install_screener_analysis_timestamp.sql` manually to update the shared
 opportunity enrichment routine. The timestamp uses the same completed-evaluation
 criteria as the entity overview and displays `N/D` for legacy scans without
-evaluated instrument IDs.
+evaluated instrument IDs in the API; the table labels missing timestamps
+`Non registrata` and explains that they do not indicate a retrieval error.
+Above the table, the selected context retains its latest run outcome, start and
+completion timestamps, including when no opportunities are displayed. Persisted
+scan counters distinguish no signals from no instrument evaluated; older runs
+without counters do not imply either outcome. Running and queued executions
+continue to show progress. The global `Ultima pipeline` label is separate from
+this context-specific run feedback.
 
 Authenticated `GET /api/entities/{entity_id}/overview` delegates to
 `sp_get_user_entity_overview` with the authenticated user ID. Review and manually

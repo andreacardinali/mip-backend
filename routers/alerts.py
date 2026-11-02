@@ -51,8 +51,18 @@ def _save_rule(payload: dict, user_id: str, rule_id: UUID | None):
         raise HTTPException(status_code=422, detail=str(error)) from error
     database = SessionLocal()
     try:
-        source_id = validated["conditions"].get("source_id")
-        if source_id:
+        source_ids = {
+            source_id
+            for source_id in (
+                [validated["conditions"].get("source_id")]
+                + [
+                    override.get("notification_source_id")
+                    for override in validated["conditions"]["instrument_overrides"].values()
+                ]
+            )
+            if source_id
+        }
+        for source_id in source_ids:
             source = get_source_config(database, user_id, source_id)
             if source is None or not (source["config"] or {}).get("enabled", True):
                 raise HTTPException(
