@@ -2,7 +2,7 @@ from cryptography.fernet import Fernet, InvalidToken
 
 from config.settings import settings
 
-SETTING_NAME = "NOTIFICATION_CREDENTIAL_ENCRYPTION_KEY"
+SETTING_NAME = "NOTIFICATIONS_CREDENTIAL_ENCRYPTION_KEY"
 
 
 class NotificationCredentialError(RuntimeError):
