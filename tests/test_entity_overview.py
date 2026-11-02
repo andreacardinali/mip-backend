@@ -224,7 +224,7 @@ def test_overview_schema_contract():
     page = (frontend / "pages" / "EntitiesPage.tsx").read_text(encoding="utf-8")
     types = (frontend / "types" / "entity.ts").read_text(encoding="utf-8")
     assert "last_analysis_at: string | null" in types
-    assert "Ultima analisi: {timestamp(overview.last_analysis_at ?? null)}" in page
-    assert page.index("Ultima analisi:") < page.index(
+    assert "Ultima analisi tecnica registrata (almeno uno strumento)" in page
+    assert page.index("Ultima analisi tecnica registrata") < page.index(
         "overview.opportunities.length === 0"
     )

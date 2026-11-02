@@ -103,7 +103,7 @@ def test_schema_declares_revision_and_timestamp_guards():
         "UNIQUE NULLS NOT DISTINCT "
         "(event_type, stage, source, event_key, entity_id, revision)" in sql
     )
-    writer = schema_function("sp_save_event")
+    writer = schema_function("sp_save_informational_event")
     timestamps = schema_function("event_lake_timestamps")
     assert "pg_advisory_xact_lock" in writer
     assert "BEFORE INSERT OR DELETE OR UPDATE ON public.event_lake" in sql
@@ -117,7 +117,7 @@ def test_schema_declares_revision_and_timestamp_guards():
 
 def test_lake_entity_scope_applies_to_fanout_revisions_and_lookups():
     sql = schema_sql()
-    writer = schema_function("sp_save_event")
+    writer = schema_function("sp_save_informational_event")
     news_writer = schema_function("sp_news_upsert_article")
     assert "FOREIGN KEY (entity_id) REFERENCES public.entities(entity_id)" in sql
     assert (
@@ -223,7 +223,7 @@ def test_event_api_readers_use_stored_routines_not_legacy_relations():
 
 
 def test_common_sql_writer_resolves_issuer_without_creating_incomplete_instruments():
-    writer = schema_function("sp_save_event")
+    writer = schema_function("sp_save_informational_event")
     catalyst = schema_function("sp_event_resolve_catalyst_entity")
     filing = schema_function("sp_event_resolve_filing_entity")
     assert "public.sp_event_resolve_catalyst_entity(" in writer

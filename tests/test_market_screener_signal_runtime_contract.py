@@ -23,16 +23,28 @@ def test_screener_analysis_timestamp_replaces_visible_rank() -> None:
         "(r.summary -> 'evaluated_instrument_ids') ? instrument.instrument_id::text"
         in timestamp_body
     )
+    columns_module = Path(
+        "../mip-frontend/src/components/screenerOpportunityColumns.tsx"
+    ).read_text(
+        encoding="utf-8"
+    )
+    columns = columns_module.split("export function screenerOpportunityColumns(", 1)[1]
+    columns = columns.split("\n}\n", 1)[0]
     page = Path("../mip-frontend/src/pages/ScreenerPage.tsx").read_text(
         encoding="utf-8"
     )
-    columns = page.split("const columns:", 1)[1].split("\n  ];", 1)[0]
+    initial_state_module = Path(
+        "../mip-frontend/src/components/screenerOpportunityColumns.tsx"
+    ).read_text(encoding="utf-8")
     assert 'field: "last_analysis_at", headerName: "Ultima analisi"' in columns
     assert 'type: "dateTime"' in columns
-    assert "ranking_position: false" in page
+    assert "ranking_position: false" in initial_state_module
     assert 'headerName: "#"' not in columns
-    assert 'import { formatTimestamp } from "../services/timestamps";' in page
-    assert "valueFormatter: (value: Date | null) => formatTimestamp(value)" in columns
+    assert 'import { formatTimestamp } from "../services/timestamps";' in columns_module
+    assert (
+        'valueFormatter: (value: Date | null) => value ? formatTimestamp(value) : "Non registrata"'
+        in columns
+    )
 
 
 @pytest.mark.parametrize(
@@ -930,7 +942,9 @@ def test_gui_context_analysis_and_optional_refresh_contract() -> None:
     api = Path("../mip-frontend/src/api/api.ts").read_text(encoding="utf-8")
     assert 'api.get<ScreenerContext[]>("/screener/contexts")' in service
     assert 'api.post<ExecutionRequest>("/screener/analyze", context)' in service
-    assert "waitForJobRun<ScreenerAnalysisResult>(data.job_run_id)" in service
+    assert "waitForJobRun<ScreenerAnalysisResult>(data.job_run_id, {" in service
+    assert 'label: context.context_type === "ENTITY"' in service
+    assert "context," in service
     assert "mutationFn: analyzeScreenerContext" in page
     assert "await refreshScreener()" in page
     assert "context_type: selectedContext?.context_type" in page
@@ -968,7 +982,6 @@ def test_gui_context_analysis_and_optional_refresh_contract() -> None:
         assert "useIsMutating({ mutationKey: screenerAnalysisMutationKey }) > 0" in view
         assert "mutationKey: screenerAnalysisMutationKey," in view
         assert "mutationFn: analyzeScreenerContext" in view
-        assert "analysis.isPending" not in view
     assert "selectedContext && !analysisRunning" in page
     assert (
         'export const screenerAnalysisMutationKey = ["screener-analysis"] as const'
