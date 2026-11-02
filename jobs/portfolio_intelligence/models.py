@@ -25,6 +25,7 @@ class EntityCandidate:
     collection_name: str | None = None
     exposure_available: bool = False
     enabled_categories: list[str] = field(default_factory=list)
+    notification_source_id: str | None = None
 
     def notification_context(self) -> dict[str, Any]:
         return {

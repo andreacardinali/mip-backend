@@ -10,6 +10,10 @@ CREATE TABLE IF NOT EXISTS public.collection_intelligence_subscriptions (
     CHECK (enabled_categories <@ ARRAY['DAILY_MOVER', 'UPCOMING_CATALYST', 'BREAKING_CATALYST', 'NEWS']::text[])
 );
 
+ALTER TABLE public.collection_intelligence_subscriptions
+    ADD COLUMN IF NOT EXISTS notification_source_id uuid
+    REFERENCES public.user_sources(source_id) ON DELETE SET NULL;
+
 CREATE OR REPLACE FUNCTION public.sp_list_monitoring_collections(p_user_id uuid)
 RETURNS TABLE(collection_type text, collection_id uuid, collection_name text, enabled_categories text[])
 LANGUAGE sql STABLE
@@ -50,6 +54,54 @@ BEGIN
     VALUES (p_user_id, p_collection_type, p_collection_id, p_categories)
     ON CONFLICT (user_id, collection_type, collection_id) DO UPDATE
         SET enabled_categories = EXCLUDED.enabled_categories, updated_at = now();
+    RETURN true;
+END
+$$;
+
+CREATE OR REPLACE FUNCTION public.sp_list_monitoring_collection_destinations(p_user_id uuid)
+RETURNS TABLE(
+    collection_type text, collection_id uuid, collection_name text,
+    enabled_categories text[], notification_source_id uuid
+)
+LANGUAGE sql STABLE
+AS $$
+    SELECT c.collection_type, c.collection_id, c.collection_name,
+           c.enabled_categories, s.notification_source_id
+    FROM public.sp_list_monitoring_collections(p_user_id) c
+    LEFT JOIN public.collection_intelligence_subscriptions s
+      ON s.user_id = p_user_id AND s.collection_type = c.collection_type
+     AND s.collection_id = c.collection_id
+    ORDER BY c.collection_type, c.collection_name, c.collection_id
+$$;
+
+CREATE OR REPLACE FUNCTION public.sp_save_collection_intelligence(
+    p_user_id uuid, p_collection_type text, p_collection_id uuid,
+    p_categories text[], p_notification_source_id uuid
+)
+RETURNS boolean LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM public.sp_list_monitoring_collections(p_user_id) c
+        WHERE c.collection_type = p_collection_type AND c.collection_id = p_collection_id
+    ) THEN
+        RETURN false;
+    END IF;
+    IF p_notification_source_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM public.user_sources source
+        WHERE source.user_id = p_user_id
+          AND source.source_id = p_notification_source_id
+          AND coalesce((source.config->>'enabled')::boolean, true)
+    ) THEN
+        RAISE EXCEPTION 'Notification destination is not enabled for this user';
+    END IF;
+    INSERT INTO public.collection_intelligence_subscriptions
+        (user_id, collection_type, collection_id, enabled_categories, notification_source_id)
+    VALUES (p_user_id, p_collection_type, p_collection_id, p_categories, p_notification_source_id)
+    ON CONFLICT (user_id, collection_type, collection_id) DO UPDATE
+        SET enabled_categories = EXCLUDED.enabled_categories,
+            notification_source_id = EXCLUDED.notification_source_id,
+            updated_at = now();
     RETURN true;
 END
 $$;

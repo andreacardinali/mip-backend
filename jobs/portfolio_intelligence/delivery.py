@@ -95,6 +95,7 @@ class CollectionEventPublisher:
                     title=item.get("headline") or event_key,
                     message=format_message(item),
                     context=item,
+                    source_id=recipient.notification_source_id,
                 ):
                     count += 1
             except Exception as exc:

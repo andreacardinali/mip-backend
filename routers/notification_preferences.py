@@ -35,6 +35,7 @@ class CollectionIntelligencePayload(BaseModel):
     enabled_categories: list[
         Literal["DAILY_MOVER", "UPCOMING_CATALYST", "BREAKING_CATALYST", "NEWS"]
     ]
+    notification_source_id: UUID | None = None
 
 
 class DeliveryPreferencesPayload(BaseModel):
@@ -58,7 +59,8 @@ def get_monitoring_collections(
     try:
         rows = db.execute(
             text(
-                "SELECT * FROM public.sp_list_monitoring_collections(CAST(:user_id AS uuid))"
+                "SELECT * FROM public.sp_list_monitoring_collection_destinations("
+                "CAST(:user_id AS uuid))"
             ),
             {"user_id": current_user["user_id"]},
         ).all()
@@ -81,7 +83,8 @@ def update_collection_intelligence(
                 """
                 SELECT public.sp_save_collection_intelligence(
                     CAST(:user_id AS uuid), :collection_type,
-                    CAST(:collection_id AS uuid), CAST(:categories AS text[])
+                    CAST(:collection_id AS uuid), CAST(:categories AS text[]),
+                    CAST(:source_id AS uuid)
                 )
             """
             ),
@@ -90,6 +93,9 @@ def update_collection_intelligence(
                 "collection_type": collection_type,
                 "collection_id": str(collection_id),
                 "categories": sorted(set(payload.enabled_categories)),
+                "source_id": str(payload.notification_source_id)
+                if payload.notification_source_id
+                else None,
             },
         ).scalar_one()
         if not saved:

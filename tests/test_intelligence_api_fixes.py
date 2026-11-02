@@ -24,7 +24,10 @@ def test_collection_intelligence_update_is_scoped_to_authenticated_user(
     database = MagicMock()
     database.execute.return_value.scalar_one.return_value = owned
     monkeypatch.setattr(module, "SessionLocal", lambda: database)
-    payload = module.CollectionIntelligencePayload(enabled_categories=["NEWS", "NEWS"])
+    payload = module.CollectionIntelligencePayload(
+        enabled_categories=["NEWS", "NEWS"],
+        notification_source_id=UUID(RUN_ID),
+    )
     if owned:
         assert module.update_collection_intelligence(
             "PORTFOLIO", UUID(JOB_ID), payload, {"user_id": USER_ID}
@@ -41,6 +44,7 @@ def test_collection_intelligence_update_is_scoped_to_authenticated_user(
     parameters = database.execute.call_args.args[1]
     assert parameters["user_id"] == USER_ID
     assert parameters["categories"] == ["NEWS"]
+    assert parameters["source_id"] == RUN_ID
     database.close.assert_called_once()
 
 

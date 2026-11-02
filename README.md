@@ -1528,6 +1528,9 @@ canonical ISO dates and integer confidence values before entering SQL history.
 `CollectionEventPublisher` then projects events onto subscribed portfolios,
 watchlists and universes by category: `DAILY_MOVER`, `UPCOMING_CATALYST`,
 `BREAKING_CATALYST` or `NEWS`. Daily Mover also matches the exact instrument.
+Each collection can select an enabled notification destination; an unset choice
+uses the user's default destination. The selected destination is validated as
+belonging to that user and is passed through to the notification queue.
 Collection valuation, allocation, exposure and severity belong only to this
 projection. Daily Mover's estimated portfolio impact in percentage points is
 `dailyChangePct * allocationPct / 100`; unavailable exposure yields `null`.
@@ -1543,7 +1546,8 @@ missing values are not replaced with zero.
 Review and validate `oneshot/install_collection_intelligence.sql` against the
 current PostgreSQL schema, back up the development database, and manually install
 it before running the updated APIs/jobs. It installs subscription routines, shared
-coverage, shared-event persistence and research history in one transaction.
+coverage, shared-event persistence and research history, plus per-collection
+notification destinations, in one transaction.
 No SQL is run on startup.
 Offline tests mock the database and providers; they do not certify the SQL runtime.
 

@@ -145,6 +145,7 @@ class RefactorTests(unittest.TestCase):
             enabled_categories=["NEWS"],
         )
         second = replace(first, collection_id="second")
+        second = replace(second, notification_source_id="destination")
         context = Mock()
         context.notification_queue.enqueue.side_effect = [
             RuntimeError("write failed"),
@@ -172,6 +173,13 @@ class RefactorTests(unittest.TestCase):
         self.assertEqual(len(publisher.errors), 1)
         context.db.rollback.assert_called_once()
         self.assertEqual(context.notification_queue.enqueue.call_count, 2)
+        self.assertIsNone(
+            context.notification_queue.enqueue.call_args_list[0].kwargs["source_id"]
+        )
+        self.assertEqual(
+            context.notification_queue.enqueue.call_args_list[1].kwargs["source_id"],
+            "destination",
+        )
 
     def test_delivery_filter_does_not_discard_shared_event(self):
         source = EntityCandidate(
@@ -278,11 +286,13 @@ class RefactorTests(unittest.TestCase):
                 "collection_id": "second",
                 "collection_name": "Osservati",
                 "enabled_categories": ["NEWS"],
+                "notification_source_id": "destination",
             }
         ]
         candidate = load_candidates(database, "BREAKING_CATALYST")[0]
         self.assertEqual(candidate.collection_id, "second")
         self.assertEqual(candidate.enabled_categories, ["NEWS"])
+        self.assertEqual(candidate.notification_source_id, "destination")
         self.assertIsNone(candidate.notification_context()["allocationPct"])
         self.assertEqual(
             database.execute.call_args.args[1], {"branch": "BREAKING_CATALYST"}

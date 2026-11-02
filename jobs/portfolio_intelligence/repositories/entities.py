@@ -24,8 +24,15 @@ def load_candidates(db: Session, branch: str) -> list[EntityCandidate]:
         db.execute(
             text(
                 """
-                SELECT *
+                SELECT candidate.value || jsonb_build_object(
+                    'notification_source_id', subscription.notification_source_id
+                )
                 FROM public.sp_get_collection_intelligence_candidates(:branch)
+                    AS candidate(value)
+                LEFT JOIN public.collection_intelligence_subscriptions subscription
+                  ON subscription.user_id = (candidate.value->>'user_id')::uuid
+                 AND subscription.collection_type = candidate.value->>'collection_type'
+                 AND subscription.collection_id = (candidate.value->>'collection_id')::uuid
                 """
             ),
             {"branch": branch},
@@ -60,4 +67,9 @@ def _candidate_from_row(
         collection_name=row.get("collection_name"),
         exposure_available=row.get("allocation_pct") is not None,
         enabled_categories=list(row.get("enabled_categories") or []),
+        notification_source_id=(
+            str(row["notification_source_id"])
+            if row.get("notification_source_id")
+            else None
+        ),
     )
