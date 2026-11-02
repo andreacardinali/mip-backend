@@ -2,6 +2,12 @@ from collections.abc import Mapping
 from typing import Any
 
 
+def entity_label(item: Mapping[str, Any]) -> str:
+    symbol = item["symbol"]
+    name = item.get("name")
+    return f"{symbol} | {name}" if name else symbol
+
+
 def collection_details(item: Mapping[str, Any]) -> str:
     if not item.get("collectionId"):
         return ""
@@ -25,7 +31,7 @@ def format_daily_mover_message(item: Mapping[str, Any]) -> str:
     change = float(item["dailyChangePct"])
     sign = "+" if change > 0 else ""
     return (
-        f"📈 DAILY MOVER\n{item['symbol']} | {sign}{change:.2f}%\n"
+        f"📈 DAILY MOVER\n{entity_label(item)} | {sign}{change:.2f}%\n"
         f"{collection_details(item)}"
         f"Severity: {item['severity']}\n{item.get('headline', '')}\n"
         f"{item.get('explanation', '')}\n"
@@ -35,7 +41,7 @@ def format_daily_mover_message(item: Mapping[str, Any]) -> str:
 
 def format_upcoming_catalyst_message(item: Mapping[str, Any]) -> str:
     return (
-        f"📅 UPCOMING CATALYST\n{item['symbol']} | "
+        f"📅 UPCOMING CATALYST\n{entity_label(item)} | "
         f"{item.get('eventType')} | {item.get('eventDate')}\n"
         f"{collection_details(item)}"
         f"Severity: {item['severity']}\n{item.get('headline', '')}\n"
@@ -45,7 +51,7 @@ def format_upcoming_catalyst_message(item: Mapping[str, Any]) -> str:
 
 def format_breaking_catalyst_message(item: Mapping[str, Any]) -> str:
     return (
-        f"⚡ BREAKING CATALYST\n{item['symbol']} | {item.get('eventType')}\n"
+        f"⚡ BREAKING CATALYST\n{entity_label(item)} | {item.get('eventType')}\n"
         f"{collection_details(item)}"
         f"Severity: {item['severity']}\n{item.get('headline', '')}\n"
         f"{item.get('eventSummary', '')}\n{item.get('materialityReason', '')}"

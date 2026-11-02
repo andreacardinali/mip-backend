@@ -20,6 +20,7 @@ from jobs.portfolio_intelligence.incremental import IncrementalNotificationWrite
 from jobs.portfolio_intelligence.messages import (
     format_breaking_catalyst_message,
     format_daily_mover_message,
+    format_upcoming_catalyst_message,
 )
 from jobs.portfolio_intelligence.models import BranchResult, EntityCandidate
 from jobs.portfolio_intelligence.parsing import (
@@ -389,6 +390,7 @@ class RefactorTests(unittest.TestCase):
         daily = format_daily_mover_message(
             {
                 "symbol": "AAPL",
+                "name": "Apple Inc.",
                 "dailyChangePct": 3.5,
                 "severity": "MEDIUM",
                 "headline": "Move",
@@ -397,9 +399,36 @@ class RefactorTests(unittest.TestCase):
             }
         )
         self.assertIn("+3.50%", daily)
+        self.assertIn("AAPL | Apple Inc.", daily)
+        self.assertIn(
+            "AAPL | +3.50%",
+            format_daily_mover_message(
+                {
+                    "symbol": "AAPL",
+                    "dailyChangePct": 3.5,
+                    "severity": "MEDIUM",
+                    "headline": "Move",
+                    "explanation": "Why",
+                    "recommendedCheck": "Check",
+                }
+            ),
+        )
+        upcoming = format_upcoming_catalyst_message(
+            {
+                "symbol": "AAPL",
+                "name": "Apple Inc.",
+                "eventType": "EARNINGS",
+                "eventDate": "2025-01-01",
+                "severity": "HIGH",
+                "headline": "Results soon",
+                "eventSummary": "Summary",
+            }
+        )
+        self.assertIn("AAPL | Apple Inc.", upcoming)
         breaking = format_breaking_catalyst_message(
             {
                 "symbol": "AAPL",
+                "name": "Apple Inc.",
                 "eventType": "NEWS",
                 "severity": "HIGH",
                 "headline": "Headline",
@@ -408,6 +437,7 @@ class RefactorTests(unittest.TestCase):
             }
         )
         self.assertIn("BREAKING CATALYST", breaking)
+        self.assertIn("AAPL | Apple Inc.", breaking)
 
 
 class CatalystResearchHistoryTests(unittest.TestCase):
