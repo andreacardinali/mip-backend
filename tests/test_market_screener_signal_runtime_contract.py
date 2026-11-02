@@ -30,9 +30,7 @@ def test_screener_analysis_timestamp_replaces_visible_rank() -> None:
     )
     columns = columns_module.split("export function screenerOpportunityColumns(", 1)[1]
     columns = columns.split("\n}\n", 1)[0]
-    page = Path("../mip-frontend/src/pages/ScreenerPage.tsx").read_text(
-        encoding="utf-8"
-    )
+
     initial_state_module = Path(
         "../mip-frontend/src/components/screenerOpportunityColumns.tsx"
     ).read_text(encoding="utf-8")
