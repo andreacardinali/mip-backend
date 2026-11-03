@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict Q26CRdTq7nBijQWP683Pp6h3iNOjx7eqKq1LMOnHxGrUl6UX1XbB4EekvmBbmWS
+\restrict 4o6zX49HnGde69o2NBG1qy8JFoYNVABoigkplAzt1oLODvIisy7FIXdpva4MpnO
 
 -- Dumped from database version 18.6 (Debian 18.6-1.pgdg13+2)
 -- Dumped by pg_dump version 18.6 (Debian 18.6-1.pgdg13+2)
@@ -3888,19 +3888,7 @@ CREATE FUNCTION public.sp_get_recent_intelligence_catalysts(p_entity_ids uuid[],
                    ) ORDER BY i.symbol, i.instrument_id)
                    FROM public.instruments i WHERE i.entity_id = e.entity_id
                ), '[]'::jsonb), 0
-        FROM ( SELECT event_type AS branch,
-    COALESCE(provenance ->> 'projection_event_key'::text, event_key) AS event_key,
-    entity_id,
-    ((subjects -> 0) ->> 'instrument_id'::text)::uuid AS instrument_id,
-    COALESCE(provenance ->> 'category'::text, event_type) AS category,
-    payload || jsonb_build_object('entity_id', entity_id, 'instrument_id', (subjects -> 0) ->> 'instrument_id'::text) AS payload,
-    evidence,
-    ( SELECT min(original.created_at) AS min
-           FROM public.event_lake original
-          WHERE original.event_type = lake.event_type AND original.stage = lake.stage AND original.source = lake.source AND original.event_key = lake.event_key AND NOT original.entity_id IS DISTINCT FROM lake.entity_id) AS first_seen_at,
-    last_seen_at
-   FROM (SELECT DISTINCT ON (lake.event_type, lake.stage, lake.source, lake.event_key, lake.entity_id) lake.event_id, lake.schema_version, lake.event_type, lake.payload_version, lake.stage, lake.source, lake.source_event_id, lake.event_key, lake.revision, lake.supersedes_event_id, lake.content_hash, lake.occurred_at, lake.event_day, lake.observed_at, lake.ingested_at, lake.subjects, lake.parent_event_ids, lake.payload, lake.raw_payload, lake.evidence, lake.provenance, lake.created_at, lake.updated_at, lake.last_seen_at, lake.entity_id FROM public.event_lake AS lake ORDER BY lake.event_type, lake.stage, lake.source, lake.event_key, lake.entity_id, lake.revision DESC) lake
-  WHERE stage = 'VALIDATED'::text AND (event_type = ANY (ARRAY['DAILY_MOVER'::text, 'UPCOMING_CATALYST'::text, 'BREAKING_CATALYST'::text]))) e
+        FROM public.collection_intelligence_events e
         WHERE e.entity_id = ANY(p_entity_ids)
           AND e.branch IN ('UPCOMING_CATALYST', 'BREAKING_CATALYST')
           AND left(e.payload->>'eventDate', 10)::date >=
@@ -4859,6 +4847,23 @@ CREATE FUNCTION public.sp_import_asset_profile(p_payload jsonb) RETURNS TABLE(en
     AS $$
     SELECT r.entity_id, r.instrument_id, r.imported
     FROM public.sp_upsert_asset_profile(p_payload, NULL, NULL, true) r;
+$$;
+
+
+--
+-- Name: sp_list_monitoring_collection_destinations(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_list_monitoring_collection_destinations(p_user_id uuid) RETURNS TABLE(collection_type text, collection_id uuid, collection_name text, enabled_categories text[], notification_source_id uuid)
+    LANGUAGE sql STABLE
+    AS $$
+    SELECT c.collection_type, c.collection_id, c.collection_name,
+           c.enabled_categories, s.notification_source_id
+    FROM public.sp_list_monitoring_collections(p_user_id) c
+    LEFT JOIN public.collection_intelligence_subscriptions s
+      ON s.user_id = p_user_id AND s.collection_type = c.collection_type
+     AND s.collection_id = c.collection_id
+    ORDER BY c.collection_type, c.collection_name, c.collection_id
 $$;
 
 
@@ -9945,6 +9950,40 @@ $$;
 
 
 --
+-- Name: sp_save_collection_intelligence(uuid, text, uuid, text[], uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_save_collection_intelligence(p_user_id uuid, p_collection_type text, p_collection_id uuid, p_categories text[], p_notification_source_id uuid) RETURNS boolean
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM public.sp_list_monitoring_collections(p_user_id) c
+        WHERE c.collection_type = p_collection_type AND c.collection_id = p_collection_id
+    ) THEN
+        RETURN false;
+    END IF;
+    IF p_notification_source_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM public.user_sources source
+        WHERE source.user_id = p_user_id
+          AND source.source_id = p_notification_source_id
+          AND coalesce((source.config->>'enabled')::boolean, true)
+    ) THEN
+        RAISE EXCEPTION 'Notification destination is not enabled for this user';
+    END IF;
+    INSERT INTO public.collection_intelligence_subscriptions
+        (user_id, collection_type, collection_id, enabled_categories, notification_source_id)
+    VALUES (p_user_id, p_collection_type, p_collection_id, p_categories, p_notification_source_id)
+    ON CONFLICT (user_id, collection_type, collection_id) DO UPDATE
+        SET enabled_categories = EXCLUDED.enabled_categories,
+            notification_source_id = EXCLUDED.notification_source_id,
+            updated_at = now();
+    RETURN true;
+END
+$$;
+
+
+--
 -- Name: sp_save_event(jsonb); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -10196,37 +10235,13 @@ $_$;
 --
 
 CREATE FUNCTION public.sp_save_intelligence_event(p_branch text, p_event_key text, p_entity_id uuid, p_instrument_id uuid, p_category text, p_payload jsonb, p_evidence jsonb) RETURNS void
-    LANGUAGE plpgsql
+    LANGUAGE sql
     AS $$
-DECLARE
-    v_key text;
-    v_day date;
-BEGIN
-    SELECT lake.event_key INTO v_key FROM public.event_lake_latest lake
-    WHERE lake.event_type = p_branch AND lake.stage = 'VALIDATED'
-      AND lake.source = 'COLLECTION_RESEARCH' AND lake.entity_id = p_entity_id
-      AND coalesce(lake.provenance->>'projection_event_key', lake.event_key) = p_event_key
-      AND lake.subjects->0->>'instrument_id' = p_instrument_id::text
-    ORDER BY lake.created_at DESC, lake.event_id LIMIT 1;
-    v_day := CASE WHEN p_branch = 'DAILY_MOVER' AND strpos(p_event_key, '|') > 0
-                  THEN split_part(p_event_key, '|', 2)::date
-                  ELSE nullif(p_payload->>'eventDate', '')::date END;
-    PERFORM public.sp_save_event(jsonb_build_object(
-        'schema_version', 1, 'payload_version', 1,
-        'event_type', p_branch, 'stage', 'VALIDATED',
-        'source', 'COLLECTION_RESEARCH', 'event_key', coalesce(v_key, p_event_key),
-        'event_day', v_day,
-        'parent_event_ids', '[]'::jsonb,
-        'subjects', jsonb_build_array(jsonb_build_object(
-            'entity_id', p_entity_id, 'instrument_id', p_instrument_id)),
-        'payload', p_payload - ARRAY['daysUntilEvent', 'eventKey', 'sources',
-            'relatedSymbols', 'name', 'symbol', 'entity_id', 'observedDate', 'marketEvidence'],
-        'raw_payload', p_payload,
-        'evidence', coalesce(p_evidence, '{}'::jsonb) - 'marketEvidence',
-        'provenance', jsonb_build_object('branch', p_branch,
-            'category', p_category, 'projection_event_key', p_event_key,
-            'marketEvidence', p_evidence->'marketEvidence')));
-END;
+    INSERT INTO public.collection_intelligence_events
+        (branch, event_key, entity_id, instrument_id, category, payload, evidence)
+    VALUES (p_branch, p_event_key, p_entity_id, p_instrument_id, p_category, p_payload, p_evidence)
+    ON CONFLICT (branch, event_key) DO UPDATE
+        SET payload = EXCLUDED.payload, evidence = EXCLUDED.evidence, last_seen_at = now()
 $$;
 
 
@@ -11058,8 +11073,7 @@ BEGIN
     LOCK TABLE public.exchange_source_mappings IN SHARE ROW EXCLUSIVE MODE;
     IF EXISTS (
         SELECT 1 FROM public.exchange_source_mappings
-                WHERE (system_id = v_system_id OR system_id IS NULL)
-                    AND exchange <> p_exchange
+        WHERE system_id = v_system_id AND exchange <> p_exchange
             AND lower(source_exchange_code) IN
                 (lower(p_exchange_code), lower(p_provider_exchange))
     ) THEN
@@ -11165,8 +11179,7 @@ BEGIN
         JOIN jsonb_array_elements(p_catalog) AS rows(item)
           ON upper(btrim(m.source_exchange_code)) = item->>'code'
           OR upper(btrim(m.source_exchange_name)) = upper(btrim(item->>'name'))
-                WHERE (m.system_id = v_system_id OR m.system_id IS NULL)
-                    AND m.exchange <> item->>'code'
+        WHERE m.system_id = v_system_id AND m.exchange <> item->>'code'
     ) THEN
         RAISE EXCEPTION 'Eulerpool catalog conflicts with existing exchange mappings';
     END IF;
@@ -12892,6 +12905,25 @@ CREATE VIEW public.analytical_lake_latest AS
 
 
 --
+-- Name: collection_intelligence_events; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.collection_intelligence_events (
+    branch text NOT NULL,
+    event_key text NOT NULL,
+    entity_id uuid NOT NULL,
+    instrument_id uuid NOT NULL,
+    category text NOT NULL,
+    payload jsonb NOT NULL,
+    evidence jsonb NOT NULL,
+    first_seen_at timestamp with time zone DEFAULT now() NOT NULL,
+    last_seen_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT collection_intelligence_events_branch_check CHECK ((branch = ANY (ARRAY['DAILY_MOVER'::text, 'UPCOMING_CATALYST'::text, 'BREAKING_CATALYST'::text]))),
+    CONSTRAINT collection_intelligence_events_category_check CHECK ((category = ANY (ARRAY['DAILY_MOVER'::text, 'UPCOMING_CATALYST'::text, 'BREAKING_CATALYST'::text, 'NEWS'::text])))
+);
+
+
+--
 -- Name: collection_intelligence_subscriptions; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -12901,6 +12933,7 @@ CREATE TABLE public.collection_intelligence_subscriptions (
     collection_id uuid NOT NULL,
     enabled_categories text[] DEFAULT '{}'::text[] CONSTRAINT collection_intelligence_subscriptio_enabled_categories_not_null NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    notification_source_id uuid,
     CONSTRAINT collection_intelligence_subscriptions_collection_type_check CHECK ((collection_type = ANY (ARRAY['PORTFOLIO'::text, 'WATCHLIST'::text, 'UNIVERSE'::text]))),
     CONSTRAINT collection_intelligence_subscriptions_enabled_categories_check CHECK ((enabled_categories <@ ARRAY['DAILY_MOVER'::text, 'UPCOMING_CATALYST'::text, 'BREAKING_CATALYST'::text, 'NEWS'::text]))
 );
@@ -14217,6 +14250,14 @@ ALTER TABLE ONLY public.analytical_lake
 
 
 --
+-- Name: collection_intelligence_events collection_intelligence_events_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.collection_intelligence_events
+    ADD CONSTRAINT collection_intelligence_events_pkey PRIMARY KEY (branch, event_key);
+
+
+--
 -- Name: collection_intelligence_subscriptions collection_intelligence_subscriptions_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -14305,7 +14346,7 @@ ALTER TABLE ONLY public.exchange_rates
 
 
 --
--- Name: exchange_source_mappings exchange_source_mappings_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: exchange_source_mappings exchange_source_mappings_provider_key; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.exchange_source_mappings
@@ -15021,11 +15062,12 @@ CREATE INDEX ix_exchange_rate_history_date ON public.exchange_rate_history USING
 
 CREATE INDEX ix_exchange_source_mappings_exchange ON public.exchange_source_mappings USING btree (exchange);
 
+
 --
 -- Name: ix_exchange_source_mappings_global_alias; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE UNIQUE INDEX ix_exchange_source_mappings_global_alias ON public.exchange_source_mappings USING btree (upper(btrim(source_exchange_code::text))) WHERE (system_id IS NULL);
+CREATE UNIQUE INDEX ix_exchange_source_mappings_global_alias ON public.exchange_source_mappings USING btree (upper(btrim((source_exchange_code)::text))) WHERE (system_id IS NULL);
 
 
 --
@@ -15982,6 +16024,30 @@ ALTER TABLE ONLY public.analytical_lake
 
 
 --
+-- Name: collection_intelligence_events collection_intelligence_events_entity_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.collection_intelligence_events
+    ADD CONSTRAINT collection_intelligence_events_entity_id_fkey FOREIGN KEY (entity_id) REFERENCES public.entities(entity_id) ON DELETE CASCADE;
+
+
+--
+-- Name: collection_intelligence_events collection_intelligence_events_instrument_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.collection_intelligence_events
+    ADD CONSTRAINT collection_intelligence_events_instrument_id_fkey FOREIGN KEY (instrument_id) REFERENCES public.instruments(instrument_id) ON DELETE CASCADE;
+
+
+--
+-- Name: collection_intelligence_subscriptions collection_intelligence_subscriptio_notification_source_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.collection_intelligence_subscriptions
+    ADD CONSTRAINT collection_intelligence_subscriptio_notification_source_id_fkey FOREIGN KEY (notification_source_id) REFERENCES public.user_sources(source_id) ON DELETE SET NULL;
+
+
+--
 -- Name: collection_intelligence_subscriptions collection_intelligence_subscriptions_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -16513,5 +16579,5 @@ ALTER TABLE ONLY public.watchlists
 -- PostgreSQL database dump complete
 --
 
-\unrestrict Q26CRdTq7nBijQWP683Pp6h3iNOjx7eqKq1LMOnHxGrUl6UX1XbB4EekvmBbmWS
+\unrestrict 4o6zX49HnGde69o2NBG1qy8JFoYNVABoigkplAzt1oLODvIisy7FIXdpva4MpnO
 

@@ -146,9 +146,7 @@ class RefactorTests(unittest.TestCase):
             enabled_categories=["NEWS"],
         )
         second = replace(first, collection_id="second")
-        second = replace(
-            second, user_id="bob", notification_source_id="destination"
-        )
+        second = replace(second, user_id="bob", notification_source_id="destination")
         context = Mock()
         context.notification_queue.enqueue.side_effect = [
             RuntimeError("write failed"),
@@ -248,9 +246,7 @@ class RefactorTests(unittest.TestCase):
                 return_value=[watchlist, portfolio],
             ),
         ):
-            count = CollectionEventPublisher(
-                context, "BREAKING_CATALYST"
-            ).publish(
+            count = CollectionEventPublisher(context, "BREAKING_CATALYST").publish(
                 source,
                 event_key="event",
                 category="NEWS",
@@ -266,7 +262,10 @@ class RefactorTests(unittest.TestCase):
         self.assertEqual(queued["notification_key"], "BREAKING_CATALYST|event")
         self.assertEqual(queued["context"]["collectionType"], "PORTFOLIO")
         self.assertEqual(
-            {membership["collectionType"] for membership in queued["context"]["collections"]},
+            {
+                membership["collectionType"]
+                for membership in queued["context"]["collections"]
+            },
             {"PORTFOLIO", "WATCHLIST"},
         )
         self.assertIn("Presente in:", queued["message"])
