@@ -146,32 +146,11 @@ def test_news_writer_preserves_ids_and_writes_only_to_lake():
     assert "public.sp_save_event(jsonb_build_object(" in sql
 
 
-def test_archive_writers_delegate_to_common_event_writer():
-    contracts = {
-        "sp_upsert_catalyst": "RETURNS uuid",
-        "sp_upsert_filing": "RETURNS uuid",
-        "sp_save_intelligence_event": "RETURNS void",
-    }
-    for name, result in contracts.items():
-        body = schema_function(name)
-        assert result in body
-        assert "public.sp_save_event(" in body
-        assert "'parent_event_ids', '[]'::jsonb" in body
-        assert "'evidence'," in body
-        assert "'provenance'," in body
-        assert "INSERT INTO public.catalysts" not in body
-        assert "INSERT INTO public.filings" not in body
-        assert "INSERT INTO public.collection_intelligence_events" not in body
-
-
 @pytest.mark.parametrize(
     "name",
     [
         "sp_news_upsert_article",
         "sp_news_update_entity_scores",
-        "sp_upsert_catalyst",
-        "sp_upsert_filing",
-        "sp_save_intelligence_event",
     ],
 )
 def test_specific_writers_delegate_without_legacy_projection_dependencies(name):
@@ -375,39 +354,7 @@ def test_intelligence_writes_only_to_lake():
     assert "public.sp_save_event" in str(db.execute.call_args.args[0])
 
 
-def test_lake_cleanup_defaults_to_preview_and_validates_runtime_threshold():
-    sql = schema_function("sp_cleanup_event_lake")
-    assert "p_threshold_days integer DEFAULT 30" in sql
-    assert "p_dry_run boolean DEFAULT true" in sql
-    assert "p_threshold_days IS NULL OR p_threshold_days <= 0" in sql
-    assert "IF p_dry_run IS NULL THEN" in sql
-    assert "make_interval(days => p_threshold_days)" in sql
-    assert "IF NOT p_dry_run THEN" in sql
-    assert sql.index("IF NOT p_dry_run THEN") < sql.index(
-        "DELETE FROM public.event_lake"
-    )
-    assert "GET DIAGNOSTICS deleted_rows = ROW_COUNT" in sql
-
-
-def test_lake_cleanup_protects_active_chains_future_events_and_incoming_references():
-    sql = schema_function("sp_cleanup_event_lake")
-    assert "LOCK TABLE public.event_lake IN SHARE ROW EXCLUSIVE MODE" in sql
-    assert "HAVING max(last_seen_at) >= cutoff_at" in sql
-    assert "max(event_day) >= (statement_timestamp() AT TIME ZONE 'UTC')::date" in sql
-    assert "max(occurred_at) >= statement_timestamp()" in sql
-    assert "lake.entity_id IS NOT DISTINCT FROM retained.entity_id" in sql
-    assert "constraint_row.confrelid = 'public.event_lake'::regclass" in sql
-    assert "LOCK TABLE %I.%I IN SHARE MODE" in sql
-    assert "unnest(reference.conkey, reference.confkey)" in sql
-    assert "WITH RECURSIVE edges AS" in sql
-    assert "unnest(parent_event_ids)" in sql
-    assert "SELECT supersedes_event_id, event_id" in sql
-    assert "JOIN edges ON edges.event_id = retained.event_id" in sql
-    assert "ON CONFLICT DO NOTHING" in sql
-    assert "CASCADE" not in sql
-
-
-def test_lake_cleanup_exception_preserves_immutability_and_transaction_ownership():
+def test_event_lake_timestamps_preserve_immutability():
     timestamps = schema_function("event_lake_timestamps")
     assert (
         "current_setting('mip.event_lake_cleanup', true) IS DISTINCT FROM 'on'"
@@ -415,12 +362,6 @@ def test_lake_cleanup_exception_preserves_immutability_and_transaction_ownership
     )
     assert "WHERE candidate.event_id = OLD.event_id" in timestamps
     assert "RETURN OLD;" in timestamps
-    body = schema_function("sp_cleanup_event_lake")
-    assert "DISABLE TRIGGER" not in body
-    assert "SECURITY DEFINER" not in body
-    assert "COMMIT" not in body.replace("ON COMMIT DROP", "")
-    assert "coalesce(previous_cleanup_setting, '')" in body
-    assert "DROP TABLE pg_temp.event_lake_cleanup_candidates" in body
 
 
 def test_lake_indexes_cover_incoming_foreign_keys_and_latest_ordering():

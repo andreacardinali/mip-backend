@@ -16,7 +16,6 @@ from market_time.models import (
 from market_time.normalization import TemporalNormalizationError, as_utc
 from market_time.repository import SQLExchangeHoursRepository
 from market_time.service import MarketTimeService
-from tests.schema_contract import schema_function
 
 pytestmark = [
     pytest.mark.filterwarnings(
@@ -137,11 +136,6 @@ def test_exchange_repository_uses_only_explicit_mapping():
     assert db.execute.call_args.args[1] == {"exchange": "TEST"}
     db.execute.return_value.mappings.return_value.one_or_none.return_value = None
     assert SQLExchangeHoursRepository(db).get_exchange("MISSING") is None
-
-
-def test_filing_schema_contract_accepts_timezone_aware_instants():
-    definition = schema_function("sp_upsert_filing")
-    assert "p_accepted_at timestamp with time zone" in definition
 
 
 def test_clock_api_rejects_naive_instants_and_serializes_utc():

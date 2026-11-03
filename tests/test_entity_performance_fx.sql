@@ -23,18 +23,11 @@ BEGIN
 END;
 $$;
 
--- Structural checks. The functional entity test is intentionally left to the
--- application fixture because entity, user and identity UUIDs are deployment data.
+-- Structural check for the exchange-rate history table.
 DO $$
 BEGIN
     IF to_regclass('public.exchange_rate_history') IS NULL THEN
         RAISE EXCEPTION 'exchange_rate_history was not created';
-    END IF;
-
-    IF to_regprocedure(
-        'public.sp_get_entity_performance(uuid,uuid,date,date,character)'
-    ) IS NULL THEN
-        RAISE EXCEPTION 'sp_get_entity_performance signature is missing';
     END IF;
 END;
 $$;

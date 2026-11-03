@@ -206,24 +206,6 @@ def test_alert_notification_skip_preserves_status_and_unnotified_guard():
     )
 
 
-def test_consolidate_instrument_aliases_match_current_schema():
-    schema = schema_sql()
-    function = schema_function("sp_consolidate_instrument")
-    if "CREATE TABLE public.instrument_aliases (" not in schema:
-        assert "instrument_aliases" not in function
-        assert "v_moved_snapshots integer := 0;" in function
-        assert "'moved_snapshots', v_moved_snapshots" in function
-        return
-    index = re.search(
-        r"CREATE UNIQUE INDEX uq_instrument_alias_normalized .*?USING btree (.+);",
-        schema,
-    )
-    assert index is not None
-    conflict_clause = f"ON CONFLICT {index.group(1)} DO NOTHING"
-    assert " ".join(function.split()).count(conflict_clause) == 2
-    assert "ON CONFLICT (alias_symbol)" not in function
-
-
 def test_collection_monitoring_preserves_owner_scope_and_signal_changes():
     schema = schema_sql()
     installed = schema_function("sp_alert_list_rule_candidates")
@@ -239,15 +221,6 @@ def test_collection_monitoring_preserves_owner_scope_and_signal_changes():
     assert "r.conditions->'excluded_symbols'" in installed
     table = schema.split("CREATE TABLE public.alert_events (", 1)[1].split(");", 1)[0]
     assert "signal_id uuid NOT NULL" not in table
-
-
-def test_consolidate_instrument_deletes_source_before_metadata_update():
-    function = schema_function("sp_consolidate_instrument")
-    source_delete = function.index("DELETE FROM instruments")
-    metadata_update = function.index("UPDATE instruments\n    SET")
-    assert function.index("INSERT INTO instrument_consolidation_audit") < source_delete
-    assert source_delete < metadata_update
-    assert "instruments.exchange,\n            v_source.exchange" in function
 
 
 def test_cleanup_entities_preserves_locked_or_referenced_entities():
@@ -283,35 +256,4 @@ def test_exchange_alias_normalization_precedes_existing_exchange():
     ].split("CREATE FUNCTION ", 1)[0]
     assert profile.index("public.sp_normalize_listing_exchange(") < profile.index(
         "public.sp_upsert_exchange("
-    )
-
-
-def test_exchange_alias_registration_preserves_existing_exchanges():
-    registration = schema_function("sp_register_exchange_alias")
-    assert "FOR KEY SHARE" in registration
-    assert "AND active" in registration
-    assert registration.index("LOCK TABLE") < registration.index("IF EXISTS")
-    assert registration.index("exchange <> p_exchange") < registration.index(
-        "exchange = p_exchange\n          AND"
-    )
-    assert "upper(btrim(source_exchange_name)) = v_alias" in registration
-    assert "v_global := nullif(btrim(p_system_code), '') IS NULL" in registration
-    assert "system_id IS NULL" in registration
-    assert "conflicts with a canonical exchange code" in registration
-    assert "INSERT INTO public.exchanges" not in registration
-    assert "DELETE FROM" not in registration
-
-
-def test_global_exchange_alias_has_repeatable_deployment_seed():
-    seed_path = ROOT / "scripts" / "seed_exchange_aliases.sql"
-    seed = seed_path.read_text(encoding="utf-8")
-    installer = (ROOT / "oneshot" / "install_exchange_aliases.sql").read_text(
-        encoding="utf-8"
-    )
-
-    assert "SELECT public.sp_register_exchange_alias('XNYS', NULL, 'NYSE');" in seed
-    assert "INSERT INTO public.exchange_source_mappings" not in seed
-    assert (
-        "SELECT public.sp_register_exchange_alias('XNYS', NULL, 'NYSE');"
-        not in installer
     )

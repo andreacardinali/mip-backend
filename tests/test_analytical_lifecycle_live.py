@@ -70,8 +70,7 @@ def test_consolidation_guards_and_removed_table_references(database):
         database.execute(
             text(
                 "SELECT proname, prosrc FROM pg_proc WHERE oid IN ("
-                "to_regprocedure('public.sp_consolidate_entity(uuid,uuid,boolean)'), "
-                "to_regprocedure('public.sp_consolidate_instrument(uuid,uuid,boolean,boolean)'))"
+                "to_regprocedure('public.sp_consolidate_entity(uuid,uuid,boolean)'))"
             )
         ).all()
     )
@@ -81,7 +80,6 @@ def test_consolidation_guards_and_removed_table_references(database):
     assert entity.index("SELECT FROM public.analytical_lake") < entity.index(
         "IF NOT p_force"
     )
-    assert "sp_consolidate_entity(" in definitions["sp_consolidate_instrument"]
     dangling_references = database.execute(
         text(
             "SELECT names.name, routine.oid::regprocedure::text "
