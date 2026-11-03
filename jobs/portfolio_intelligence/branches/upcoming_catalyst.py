@@ -4,7 +4,10 @@ from datetime import date, timedelta
 
 from job_runtime.collections import batched
 from job_runtime.progress import BatchProgress
-from jobs.portfolio_intelligence.batching import matched_batch_rows
+from jobs.portfolio_intelligence.batching import (
+    BatchResultCountMismatch,
+    matched_batch_rows,
+)
 from jobs.portfolio_intelligence.delivery import CollectionEventPublisher
 from jobs.portfolio_intelligence.evidence import MarketEvidenceCollector
 from jobs.portfolio_intelligence.messages import format_upcoming_catalyst_message
@@ -57,24 +60,57 @@ class UpcomingCatalystBranch:
                 }
                 for candidate in batch
             ]
-            progress.record_llm_call()
-            response = context.research_llm.generate_json(
-                LLMRequest(
-                    prompt=template.render(
-                        execution_date=today.isoformat(),
-                        window_start=today.isoformat(),
-                        window_end=end.isoformat(),
-                        candidates=json.dumps(payload, default=str),
-                    ),
-                    prompt_fingerprint=template.fingerprint,
-                    grounded_search=True,
-                    max_tokens=4096,
+
+            def generate_response(candidate_payload):
+                progress.record_llm_call()
+                return context.research_llm.generate_json(
+                    LLMRequest(
+                        prompt=template.render(
+                            execution_date=today.isoformat(),
+                            window_start=today.isoformat(),
+                            window_end=end.isoformat(),
+                            candidates=json.dumps(candidate_payload, default=str),
+                        ),
+                        prompt_fingerprint=template.fingerprint,
+                        grounded_search=True,
+                        max_tokens=4096,
+                    )
                 )
-            )
+
             batch_failures = 0
-            for source, row in matched_batch_rows(
-                batch, response.data, label="Upcoming"
-            ):
+            matched_rows = []
+            try:
+                response = generate_response(payload)
+                matched_rows.extend(
+                    (source, row, response.sources, candidate_payload)
+                    for (source, candidate_payload), (_, row) in zip(
+                        zip(batch, payload, strict=True),
+                        matched_batch_rows(batch, response.data, label="Upcoming"),
+                        strict=True,
+                    )
+                )
+            except BatchResultCountMismatch:
+                progress.record_split()
+                for source, candidate_payload in zip(batch, payload, strict=True):
+                    try:
+                        retry_response = generate_response([candidate_payload])
+                        row = next(
+                            matched_batch_rows(
+                                [source], retry_response.data, label="Upcoming"
+                            )
+                        )[1]
+                        matched_rows.append(
+                            (source, row, retry_response.sources, candidate_payload)
+                        )
+                    except ValueError as exc:
+                        result.add_error(f"{source.symbol}: {exc}")
+                        batch_failures += 1
+                        logger.exception(
+                            "Upcoming LLM result recovery failed symbol=%s",
+                            source.symbol,
+                        )
+
+            for source, row, response_sources, candidate_payload in matched_rows:
                 for raw_event in row.get("events") or []:
                     try:
                         event = parse_upcoming_event(raw_event)
@@ -92,7 +128,7 @@ class UpcomingCatalystBranch:
                         "name": source.name,
                         "eventKey": event_key,
                         "daysUntilEvent": days,
-                        "sources": response.sources,
+                        "sources": response_sources,
                     }
                     try:
                         result.notification_count += publisher.publish(
@@ -101,10 +137,8 @@ class UpcomingCatalystBranch:
                             category=self.name,
                             payload=item,
                             evidence={
-                                "marketEvidence": payload[batch.index(source)][
-                                    "marketEvidence"
-                                ],
-                                "sources": response.sources,
+                                "marketEvidence": candidate_payload["marketEvidence"],
+                                "sources": response_sources,
                             },
                             decorate=lambda recipient, event_days=days: dict(
                                 zip(

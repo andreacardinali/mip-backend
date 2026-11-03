@@ -594,12 +594,13 @@ class SharedBranchTests(unittest.TestCase):
                 "news": []
             }
 
-    def execute(self, branch, recipients=(), save_effect=None):
+    def execute(self, branch, recipients=(), save_effect=None, candidates=None):
         module = type(branch).__module__
         with ExitStack() as stack:
             stack.enter_context(
                 patch(
-                    f"{module}.load_acquisition_candidates", return_value=[self.source]
+                    f"{module}.load_acquisition_candidates",
+                    return_value=[self.source] if candidates is None else candidates,
                 )
             )
             stack.enter_context(
@@ -731,6 +732,70 @@ class SharedBranchTests(unittest.TestCase):
             self.context.prompts.get.return_value.render.call_args.kwargs["candidates"]
         )
         self.assert_shared_payload(candidates[0])
+
+    def test_upcoming_retries_incomplete_batch_per_candidate(self):
+        candidates = [
+            replace(
+                self.source,
+                entity_id=f"entity-{index}",
+                instrument_id=f"instrument-{index}",
+                symbol=symbol,
+            )
+            for index, symbol in enumerate(("AAPL", "MSFT", "NVDA", "AMZN"))
+        ]
+        self.context.research_llm.generate_json.side_effect = [
+            SimpleNamespace(
+                data={
+                    "results": [
+                        {"symbol": "AAPL", "events": []},
+                        {"symbol": "MSFT", "events": []},
+                        {"symbol": "NVDA", "events": []},
+                    ]
+                },
+                sources=[],
+            ),
+            *[
+                SimpleNamespace(
+                    data={"results": [{"symbol": candidate.symbol, "events": []}]},
+                    sources=[],
+                )
+                for candidate in candidates
+            ],
+        ]
+
+        result = self.execute(UpcomingCatalystBranch(), candidates=candidates)
+
+        self.assertEqual(result.errors, [])
+        self.assertEqual(
+            result.diagnostics["workload"]["llm_calls"],
+            1 + len(candidates),
+        )
+        self.assertEqual(result.diagnostics["workload"]["split_batches"], 1)
+        self.assertEqual(result.diagnostics["workload"]["failed_items"], 0)
+
+    def test_upcoming_failed_single_candidate_retry_marks_partial(self):
+        candidates = [
+            replace(self.source, symbol=symbol, entity_id=symbol)
+            for symbol in ("AAPL", "MSFT")
+        ]
+        self.context.research_llm.generate_json.side_effect = [
+            SimpleNamespace(data={"results": []}, sources=[]),
+            SimpleNamespace(
+                data={"results": [{"symbol": "AAPL", "events": []}]},
+                sources=[],
+            ),
+            SimpleNamespace(
+                data={"results": [{"symbol": "WRONG", "events": []}]},
+                sources=[],
+            ),
+        ]
+
+        result = self.execute(UpcomingCatalystBranch(), candidates=candidates)
+
+        self.assertEqual(result.status, JobStatus.PARTIAL)
+        self.assertEqual(len(result.errors), 1)
+        self.assertIn("MSFT", result.errors[0])
+        self.assertEqual(result.diagnostics["workload"]["failed_items"], 1)
 
     def test_persistence_failure_does_not_block_the_next_breaking_event(self):
         self.set_events(

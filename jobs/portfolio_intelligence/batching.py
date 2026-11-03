@@ -10,6 +10,10 @@ class SymbolCandidate(Protocol):
     symbol: str
 
 
+class BatchResultCountMismatch(ValueError):
+    pass
+
+
 def matched_batch_rows[T: SymbolCandidate](
     batch: Sequence[T],
     response_data: Mapping[str, Any],
@@ -22,7 +26,7 @@ def matched_batch_rows[T: SymbolCandidate](
         raise ValueError(f"{label} LLM results must be a list")
 
     if len(rows) != len(batch):
-        raise ValueError(
+        raise BatchResultCountMismatch(
             f"{label} LLM result count mismatch: "
             f"expected {len(batch)}, "
             f"received {len(rows)}"
