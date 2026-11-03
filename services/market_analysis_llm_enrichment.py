@@ -7,7 +7,7 @@ from typing import Any
 
 from httpx import InvalidURL
 
-from http_client import HttpRequestError, get_http_status
+from http_client import HttpRequestError, get_http_status, redact_text
 from job_runtime.progress import BatchProgress
 from llm import LLMConfig, LLMProvider, create_provider
 from market_analysis.enrichment_contract import enrichment_fingerprint as fingerprint
@@ -191,7 +191,16 @@ def _enrich_resilient(*, provider, signals, max_tokens, progress):
         return list(zip(signals, enrichments, strict=True)), [], False
     except Exception as error:
         if _endpoint_unavailable(error):
-            logger.warning("LLM enrichment stopped: endpoint unavailable")
+            safe_error = redact_text(
+                str(error),
+                sensitive_values=(getattr(provider, "api_key", ""),),
+            )
+            logger.warning(
+                "LLM enrichment stopped: endpoint unavailable "
+                "status=%s error=%s",
+                get_http_status(error),
+                safe_error[:500],
+            )
             return [], _unavailable_failures(signals), True
         midpoint = len(signals) // 2
         progress.record_split()

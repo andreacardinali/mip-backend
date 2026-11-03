@@ -194,3 +194,34 @@ def test_endpoint_failure_during_split_preserves_successful_sibling():
     assert result["signal_ids"] == persisted
     assert result["failed"] == 4
     assert result["reason"] == "endpoint_unavailable"
+
+
+def test_http_failure_logs_status_and_redacted_provider_error(caplog):
+    provider = ResilientProvider()
+    provider.api_key = "test-secret-key"
+    request = http.Request("POST", "http://localhost/ai")
+
+    def generate(_request):
+        response = http.Response(400, request=request)
+        try:
+            response.raise_for_status()
+        except http.HTTPStatusError as cause:
+            raise RuntimeError(
+                "Azure rejected payload: unsupported parameter; "
+                "api_key=test-secret-key"
+            ) from cause
+
+    provider.generate_json = generate
+    result = run_market_analysis_llm_enrichment(
+        provider=provider,
+        candidates=[_signal("signal-1"), _signal("signal-2")],
+        persist_enrichment=lambda *_: True,
+        enrichment_fingerprint=enrichment_fingerprint(),
+        call_batch_size=2,
+    )
+
+    assert result["failed"] == 2
+    assert "status=400" in caplog.text
+    assert "unsupported parameter" in caplog.text
+    assert "test-secret-key" not in caplog.text
+    assert "api_key=[REDACTED]" in caplog.text
