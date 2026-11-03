@@ -211,6 +211,7 @@ def request_with_retry(
 
     may_retry = normalized_method in IDEMPOTENT_METHODS or retry_non_idempotent
     secrets = _request_secrets(client, url, request_kwargs, sensitive_values)
+    safe_url = redact_text(url, sensitive_values=secrets)
 
     for attempt in range(policy.max_retries + 1):
         try:
@@ -234,8 +235,9 @@ def request_with_retry(
                 random_uniform=random_uniform,
             )
             logger.warning(
-                "HTTP request retry after exception method=%s attempt=%s/%s "
+                "HTTP request retry after exception url=%s method=%s attempt=%s/%s "
                 "delay=%.3f error_type=%s error=%s",
+                safe_url,
                 normalized_method,
                 attempt + 1,
                 policy.max_retries + 1,
@@ -261,8 +263,9 @@ def request_with_retry(
         if not may_retry or attempt >= policy.max_retries or not response_allows_retry:
             error_message = _response_error_message(response, secrets)
             logger.error(
-                "HTTP request failed permanently status=%s method=%s attempt=%s/%s "
+                "HTTP request failed permanently url=%s status=%s method=%s attempt=%s/%s "
                 "error=%s",
+                safe_url,
                 response.status_code,
                 normalized_method,
                 attempt + 1,
@@ -280,7 +283,8 @@ def request_with_retry(
         )
         error_message = _response_error_message(response, secrets)
         logger.warning(
-            "HTTP request retry status=%s method=%s attempt=%s/%s delay=%.3f error=%s",
+            "HTTP request retry url=%s status=%s method=%s attempt=%s/%s delay=%.3f error=%s",
+            safe_url,
             response.status_code,
             normalized_method,
             attempt + 1,

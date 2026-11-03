@@ -307,7 +307,7 @@ class RetryTests(unittest.TestCase):
                 response = request_with_retry(
                     client,
                     "POST",
-                    "https://example.invalid",
+                    "https://example.invalid/v1/chat?token=endpoint-secret",
                     policy=RetryPolicy(
                         max_retries=1,
                         jitter_seconds=0,
@@ -326,6 +326,11 @@ class RetryTests(unittest.TestCase):
             log_output,
         )
         self.assertIn("attempt=1/2", log_output)
+        self.assertIn(
+            "url=https://example.invalid/v1/chat?token=[REDACTED]",
+            log_output,
+        )
+        self.assertNotIn("endpoint-secret", log_output)
 
     def test_retry_log_contains_exception_message(self):
         attempts = 0
@@ -357,7 +362,7 @@ class RetryTests(unittest.TestCase):
                 response = request_with_retry(
                     client,
                     "POST",
-                    "https://example.invalid",
+                    "https://example.invalid/v1/chat?token=endpoint-secret",
                     policy=RetryPolicy(
                         max_retries=1,
                         jitter_seconds=0,
@@ -382,6 +387,11 @@ class RetryTests(unittest.TestCase):
             "attempt=1/2",
             log_output,
         )
+        self.assertIn(
+            "url=https://example.invalid/v1/chat?token=[REDACTED]",
+            log_output,
+        )
+        self.assertNotIn("endpoint-secret", log_output)
 
 
 if __name__ == "__main__":
