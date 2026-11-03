@@ -311,4 +311,7 @@ def test_global_exchange_alias_has_repeatable_deployment_seed():
 
     assert "SELECT public.sp_register_exchange_alias('XNYS', NULL, 'NYSE');" in seed
     assert "INSERT INTO public.exchange_source_mappings" not in seed
-    assert "SELECT public.sp_register_exchange_alias('XNYS', NULL, 'NYSE');" not in installer
+    assert (
+        "SELECT public.sp_register_exchange_alias('XNYS', NULL, 'NYSE');"
+        not in installer
+    )

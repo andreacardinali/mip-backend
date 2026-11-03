@@ -22,7 +22,8 @@ def collection_details(item: Mapping[str, Any]) -> str:
                     (
                         value
                         for value in portfolio_exposure
-                        if value.get("collectionName") == membership.get("collectionName")
+                        if value.get("collectionName")
+                        == membership.get("collectionName")
                     ),
                     {},
                 )

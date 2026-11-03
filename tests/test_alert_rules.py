@@ -168,7 +168,10 @@ def test_instrument_notification_source_is_applied_to_effective_rule():
         conditions={
             "source_id": default_source,
             "instrument_overrides": {
-                instrument: {"enabled": True, "notification_source_id": exception_source}
+                instrument: {
+                    "enabled": True,
+                    "notification_source_id": exception_source,
+                }
             },
         },
     )

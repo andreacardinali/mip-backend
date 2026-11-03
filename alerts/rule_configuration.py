@@ -186,9 +186,7 @@ def validate_rule_payload(payload: dict[str, Any]) -> dict[str, Any]:
             try:
                 notification_source_id = str(UUID(notification_source_id))
             except ValueError as error:
-                raise ValueError(
-                    "Invalid notification destination override"
-                ) from error
+                raise ValueError("Invalid notification destination override") from error
         merged = {**normalized, **override}
         merged.pop("notification_source_id", None)
         merged.pop("instrument_overrides", None)

@@ -57,7 +57,9 @@ def _save_rule(payload: dict, user_id: str, rule_id: UUID | None):
                 [validated["conditions"].get("source_id")]
                 + [
                     override.get("notification_source_id")
-                    for override in validated["conditions"]["instrument_overrides"].values()
+                    for override in validated["conditions"][
+                        "instrument_overrides"
+                    ].values()
                 ]
             )
             if source_id

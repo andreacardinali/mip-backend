@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
@@ -34,12 +34,13 @@ def get_pipeline_diagnostics(
 ):
     db = SessionLocal()
     try:
+
         def rows(statement: str, parameters: dict[str, Any] | None = None):
             result = db.execute(text(statement), parameters or {})
             return [dict(row) for row in result.mappings().all()]
 
         return {
-            "generated_at": datetime.now(timezone.utc),
+            "generated_at": datetime.now(UTC),
             "window_days": 7,
             "ingestion": {
                 "by_stage_source": rows(

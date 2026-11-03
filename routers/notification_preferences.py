@@ -93,9 +93,11 @@ def update_collection_intelligence(
                 "collection_type": collection_type,
                 "collection_id": str(collection_id),
                 "categories": sorted(set(payload.enabled_categories)),
-                "source_id": str(payload.notification_source_id)
-                if payload.notification_source_id
-                else None,
+                "source_id": (
+                    str(payload.notification_source_id)
+                    if payload.notification_source_id
+                    else None
+                ),
             },
         ).scalar_one()
         if not saved:

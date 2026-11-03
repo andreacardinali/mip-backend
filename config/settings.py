@@ -3,7 +3,6 @@ from pathlib import Path
 
 from dotenv import dotenv_values
 
-
 _DEFAULTS = {
     "DATABASE_URL": "postgresql+psycopg://postgres:postgres@localhost:5432/postgres",
 }
