@@ -215,6 +215,13 @@ def request_with_retry(
 
     for attempt in range(policy.max_retries + 1):
         try:
+            logger.info(
+                "HTTP request started url=%s method=%s attempt=%s/%s",
+                safe_url,
+                normalized_method,
+                attempt + 1,
+                policy.max_retries + 1,
+            )
             context_token = ACTIVE_SECRETS.set(secrets)
             try:
                 response = client.request(normalized_method, url, **request_kwargs)

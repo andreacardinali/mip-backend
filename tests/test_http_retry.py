@@ -357,7 +357,7 @@ class RetryTests(unittest.TestCase):
         with httpx.Client(transport=transport) as client:
             with self.assertLogs(
                 "http_client.retry",
-                level=logging.WARNING,
+                level=logging.INFO,
             ) as captured:
                 response = request_with_retry(
                     client,
@@ -385,6 +385,11 @@ class RetryTests(unittest.TestCase):
         )
         self.assertIn(
             "attempt=1/2",
+            log_output,
+        )
+        self.assertIn(
+            "HTTP request started url=https://example.invalid/v1/chat?token=[REDACTED] "
+            "method=POST attempt=1/2",
             log_output,
         )
         self.assertIn(
