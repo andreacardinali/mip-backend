@@ -46,3 +46,28 @@ def test_ollama_passes_response_schema_to_format(monkeypatch):
     assert captured["format"] == schema
     assert "JSON Schema" in captured["prompt"]
     assert response.data == {"llm_score": 75}
+
+
+def test_ollama_temperature_is_configured_through_json_config(monkeypatch):
+    captured = {}
+
+    def fake_request(client, method, url, **kwargs):
+        captured.update(kwargs["json"])
+        return httpx.Response(
+            200,
+            request=httpx.Request("POST", url),
+            json={"response": '{"ok":true}'},
+        )
+
+    monkeypatch.setattr(module, "create_http_client", FakeClient)
+    monkeypatch.setattr(module, "request_with_retry", fake_request)
+
+    provider = module.OllamaProvider(
+        base_url="http://ollama.internal:11434",
+        model="qwen3:8b",
+        json_config={"options": {"temperature": 0.2}},
+    )
+    provider.generate_json(LLMRequest(prompt="Return JSON"))
+
+    assert captured["options"]["temperature"] == 0.2
+    assert captured["options"]["num_predict"] == 4096

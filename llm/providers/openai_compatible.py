@@ -21,7 +21,6 @@ PROTECTED_PATHS = frozenset(
         "messages",
         "input",
         "instructions",
-        "temperature",
         "max_tokens",
         "max_output_tokens",
     }
@@ -133,7 +132,6 @@ class OpenAICompatibleProvider(LLMProvider):
                 "model": self.model,
                 "instructions": JSON_SYSTEM_PROMPT,
                 "input": request.prompt,
-                "temperature": request.temperature,
                 "max_output_tokens": request.max_tokens,
             }
         else:
@@ -143,7 +141,6 @@ class OpenAICompatibleProvider(LLMProvider):
                     {"role": "system", "content": JSON_SYSTEM_PROMPT},
                     {"role": "user", "content": request.prompt},
                 ],
-                "temperature": request.temperature,
                 "max_tokens": request.max_tokens,
             }
         body = deep_merge_dicts(standard_body, self.json_config)

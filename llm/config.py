@@ -48,7 +48,6 @@ PROTECTED_JSON_CONFIG_KEYS = frozenset(
         "messages",
         "input",
         "instructions",
-        "temperature",
         "max_tokens",
         "max_output_tokens",
     }

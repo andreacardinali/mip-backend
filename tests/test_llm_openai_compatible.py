@@ -19,13 +19,14 @@ class OpenAICompatibleProviderTests(unittest.TestCase):
                 "stream": False,
                 "top_p": 1,
                 "seed": 0,
+                "temperature": 0.2,
             },
         )
         body = provider._build_request_body(
             LLMRequest(prompt="Return JSON", temperature=0.0, max_tokens=256)
         )
         self.assertEqual(body["model"], "google/gemma-4-31b-it")
-        self.assertEqual(body["temperature"], 0.0)
+        self.assertEqual(body["temperature"], 0.2)
         self.assertEqual(body["max_tokens"], 256)
         self.assertEqual(body["chat_template_kwargs"], {"enable_thinking": False})
         self.assertFalse(body["stream"])
@@ -55,10 +56,24 @@ class OpenAICompatibleProviderTests(unittest.TestCase):
         )
         self.assertEqual(body["model"], "test-model")
         self.assertEqual(body["input"], "Return JSON")
-        self.assertEqual(body["temperature"], 0.1)
+        self.assertNotIn("temperature", body)
         self.assertEqual(body["max_output_tokens"], 300)
         self.assertIn("JSON object", body["instructions"])
         self.assertNotIn("messages", body)
+
+    def test_responses_temperature_is_configured_through_json_config(self):
+        provider = OpenAICompatibleProvider(
+            base_url="https://example.test/v1",
+            api_key="test-key",
+            model="test-model",
+            api_protocol="responses",
+            json_config={"temperature": 0.3},
+        )
+        body = provider._build_request_body(
+            LLMRequest(prompt="Return JSON", temperature=0.0, max_tokens=300)
+        )
+        self.assertEqual(body["temperature"], 0.3)
+        self.assertEqual(body["max_output_tokens"], 300)
 
     def test_responses_extracts_output_text(self):
         self.assertEqual(
@@ -176,7 +191,7 @@ class OpenAICompatibleProviderTests(unittest.TestCase):
         self.assertEqual(config.json_config, {"stream": False})
         self.assertEqual(config.api_protocol, "chat_completions")
 
-    def test_config_parses_responses_protocol(self):
+    def test_config_parses_responses_protocol_and_temperature_json(self):
         config = LLMConfig.from_settings(
             {
                 "TEST_PROVIDER": "openai_compatible",
@@ -184,12 +199,14 @@ class OpenAICompatibleProviderTests(unittest.TestCase):
                 "TEST_API_KEY": "test-key",
                 "TEST_MODEL": "test-model",
                 "TEST_API_PROTOCOL": "responses",
+                "TEST_JSON_CONFIG": '{"temperature":0.3}',
             },
             prefix="TEST",
             default_provider="openai_compatible",
             default_timeout_seconds=60,
         )
         self.assertEqual(config.api_protocol, "responses")
+        self.assertEqual(config.json_config, {"temperature": 0.3})
 
     def test_config_rejects_unknown_protocol(self):
         with self.assertRaisesRegex(ValueError, "Unsupported TEST_API_PROTOCOL"):

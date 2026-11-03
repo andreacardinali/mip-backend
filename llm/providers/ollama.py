@@ -13,7 +13,6 @@ PROTECTED_PATHS = frozenset(
         "think",
         "format",
         "prompt",
-        "options.temperature",
         "options.num_predict",
     }
 )
@@ -52,7 +51,6 @@ class OllamaProvider(LLMProvider):
             "format": response_format,
             "prompt": prompt,
             "options": {
-                "temperature": request.temperature,
                 "num_predict": request.max_tokens,
             },
         }

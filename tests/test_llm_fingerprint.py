@@ -35,3 +35,11 @@ def test_provider_fingerprint_separates_api_protocols():
     chat = provider_config_fingerprint(**common, api_protocol="chat_completions")
     responses = provider_config_fingerprint(**common, api_protocol="responses")
     assert chat != responses
+    responses_with_temperature = provider_config_fingerprint(
+        **{
+            **common,
+            "json_config": {"temperature": 0.3},
+        },
+        api_protocol="responses",
+    )
+    assert responses != responses_with_temperature

@@ -8,7 +8,6 @@ from llm.parsing import parse_json_object
 PROTECTED_PATHS = frozenset(
     {
         "contents",
-        "generationConfig.temperature",
         "generationConfig.maxOutputTokens",
         "generationConfig.responseMimeType",
         "generationConfig.responseSchema",
@@ -41,7 +40,6 @@ class GeminiProvider(LLMProvider):
         standard_body: dict[str, Any] = {
             "contents": [{"role": "user", "parts": [{"text": request.prompt}]}],
             "generationConfig": {
-                "temperature": request.temperature,
                 "maxOutputTokens": request.max_tokens,
                 "responseMimeType": "application/json",
             },
