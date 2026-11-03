@@ -134,7 +134,7 @@ class RefactorTests(unittest.TestCase):
                     self.assertEqual(event.payload["eventConfidence"], event.confidence)
                     self.assertEqual(payload["eventDate"], "2026-W44-6")
 
-    def test_delivery_failure_does_not_block_other_collections(self):
+    def test_delivery_failure_does_not_block_other_users(self):
         source = EntityCandidate(
             "", "entity", "instrument", "AAPL", "Apple", None, "USD", None
         )
@@ -146,7 +146,9 @@ class RefactorTests(unittest.TestCase):
             enabled_categories=["NEWS"],
         )
         second = replace(first, collection_id="second")
-        second = replace(second, notification_source_id="destination")
+        second = replace(
+            second, user_id="bob", notification_source_id="destination"
+        )
         context = Mock()
         context.notification_queue.enqueue.side_effect = [
             RuntimeError("write failed"),
@@ -208,6 +210,68 @@ class RefactorTests(unittest.TestCase):
         recipients.assert_not_called()
         self.assertEqual(count, 0)
         self.assertEqual(publisher.accepted_count, 1)
+
+    def test_delivery_deduplicates_and_combines_collection_context_per_user(self):
+        source = EntityCandidate(
+            "", "entity", "instrument", "AAPL", "Apple", None, "USD", None
+        )
+        watchlist = EntityCandidate(
+            "alice",
+            "entity",
+            "instrument",
+            "AAPL",
+            "Apple",
+            None,
+            "USD",
+            None,
+            collection_type="WATCHLIST",
+            collection_id="watchlist",
+            enabled_categories=["NEWS"],
+            notification_source_id="watchlist-source",
+        )
+        portfolio = replace(
+            watchlist,
+            collection_type="PORTFOLIO",
+            collection_id="portfolio",
+            allocation_pct=25,
+            exposure_available=True,
+            notification_source_id="portfolio-source",
+        )
+        context = Mock()
+        context.notification_queue.enqueue.return_value = EnqueueResult(
+            EnqueueStatus.CREATED, notification_id="created"
+        )
+        with (
+            patch("jobs.portfolio_intelligence.delivery.save_intelligence_event"),
+            patch(
+                "jobs.portfolio_intelligence.delivery.load_candidates",
+                return_value=[watchlist, portfolio],
+            ),
+        ):
+            count = CollectionEventPublisher(
+                context, "BREAKING_CATALYST"
+            ).publish(
+                source,
+                event_key="event",
+                category="NEWS",
+                payload={"headline": "News"},
+                evidence={"sources": []},
+                decorate=lambda recipient: {"severity": "LOW"},
+                format_message=format_breaking_catalyst_message,
+            )
+
+        self.assertEqual(count, 1)
+        context.notification_queue.enqueue.assert_called_once()
+        queued = context.notification_queue.enqueue.call_args.kwargs
+        self.assertEqual(queued["notification_key"], "BREAKING_CATALYST|event")
+        self.assertEqual(queued["context"]["collectionType"], "PORTFOLIO")
+        self.assertEqual(
+            {membership["collectionType"] for membership in queued["context"]["collections"]},
+            {"PORTFOLIO", "WATCHLIST"},
+        )
+        self.assertIn("Presente in:", queued["message"])
+        self.assertIn("WATCHLIST", queued["message"])
+        self.assertEqual(queued["source_id"], "portfolio-source")
 
     def test_shared_event_is_saved_before_subscription_lookup(self):
         source = EntityCandidate(
@@ -319,7 +383,7 @@ class RefactorTests(unittest.TestCase):
         self.assertIsNone(context["positionMarketValue"])
         self.assertFalse(context["exposureAvailable"])
 
-    def test_incremental_writer_deduplicates_per_user_and_collection(self):
+    def test_incremental_writer_deduplicates_per_user_and_event(self):
         queue = Mock()
         queue.enqueue.return_value = EnqueueResult(
             EnqueueStatus.CREATED, notification_id="created"
@@ -327,19 +391,22 @@ class RefactorTests(unittest.TestCase):
         writer = IncrementalNotificationWriter(queue)
         first = {"collectionType": "PORTFOLIO", "collectionId": "first"}
         second = {"collectionType": "WATCHLIST", "collectionId": "second"}
-        for user_id, context in [("alice", first), ("bob", first), ("alice", second)]:
+        for user_id, context in [("alice", first), ("bob", first)]:
             self.assertTrue(
                 writer.enqueue(
                     notification_key="EVENT", user_id=user_id, context=context
                 )
             )
         self.assertFalse(
+            writer.enqueue(notification_key="EVENT", user_id="alice", context=second)
+        )
+        self.assertFalse(
             writer.enqueue(notification_key="EVENT", user_id="alice", context=first)
         )
-        self.assertEqual(queue.enqueue.call_count, 3)
+        self.assertEqual(queue.enqueue.call_count, 2)
         self.assertEqual(
             queue.enqueue.call_args.kwargs["notification_key"],
-            "EVENT|WATCHLIST|second",
+            "EVENT",
         )
 
     def test_incremental_writer_commits_and_retries_failed_keys(self):

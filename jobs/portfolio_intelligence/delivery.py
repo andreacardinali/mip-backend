@@ -37,17 +37,18 @@ class CollectionEventPublisher:
         format_message: Callable[[dict[str, Any]], str],
         deliver: bool = True,
     ) -> int:
-        save_intelligence_event(
-            self.context.db,
-            branch=self.branch,
-            event_key=event_key,
-            entity_id=source.entity_id,
-            instrument_id=source.instrument_id,
-            category=category,
-            payload=payload,
-            evidence=evidence,
-        )
-        self._saved_keys.add(event_key)
+        if event_key not in self._saved_keys:
+            save_intelligence_event(
+                self.context.db,
+                branch=self.branch,
+                event_key=event_key,
+                entity_id=source.entity_id,
+                instrument_id=source.instrument_id,
+                category=category,
+                payload=payload,
+                evidence=evidence,
+            )
+            self._saved_keys.add(event_key)
         if not deliver:
             return 0
         if self._recipients is None:
@@ -60,32 +61,89 @@ class CollectionEventPublisher:
                     "Intelligence recipient lookup failed branch=%s", self.branch
                 )
                 return 0
+        matching_recipients = [
+            recipient
+            for recipient in self._recipients
+            if recipient.entity_id == source.entity_id
+            and (
+                self.branch != "DAILY_MOVER"
+                or recipient.instrument_id == source.instrument_id
+            )
+            and category in recipient.enabled_categories
+        ]
+        recipients_by_user: dict[str, list[EntityCandidate]] = {}
+        for recipient in matching_recipients:
+            recipients_by_user.setdefault(recipient.user_id, []).append(recipient)
+
         count = 0
-        for recipient in self._recipients:
+        for user_id, user_recipients in recipients_by_user.items():
+            portfolios = [
+                recipient
+                for recipient in user_recipients
+                if (recipient.collection_type or "").upper() == "PORTFOLIO"
+            ]
+            recipient = max(
+                portfolios or user_recipients,
+                key=lambda candidate: (
+                    candidate.exposure_available,
+                    candidate.allocation_pct,
+                ),
+            )
+            portfolio_exposure = []
+            for portfolio in portfolios:
+                exposure = {
+                    "collectionName": portfolio.collection_name,
+                    "allocationPct": (
+                        portfolio.allocation_pct
+                        if portfolio.exposure_available
+                        else None
+                    ),
+                    "positionMarketValue": (
+                        portfolio.market_value if portfolio.exposure_available else None
+                    ),
+                }
+                exposure.update(decorate(portfolio))
+                portfolio_exposure.append(exposure)
+            collection_memberships = [
+                {
+                    "collectionType": member.collection_type,
+                    "collectionId": member.collection_id,
+                    "collectionName": member.collection_name,
+                }
+                for member in user_recipients
+            ]
+            decorations = [decorate(portfolio) for portfolio in portfolios]
+            if not decorations:
+                decorations = [decorate(recipient)]
+            severity_rank = {"LOW": 0, "MEDIUM": 1, "HIGH": 2, "CRITICAL": 3}
+            decoration = max(
+                decorations,
+                key=lambda value: severity_rank.get(value.get("severity"), -1),
+            )
             if recipient.entity_id != source.entity_id:
-                continue
-            if (
-                self.branch == "DAILY_MOVER"
-                and recipient.instrument_id != source.instrument_id
-            ):
-                continue
-            if category not in recipient.enabled_categories:
                 continue
             try:
                 item = {
                     **payload,
                     **recipient.notification_context(),
-                    **decorate(recipient),
-                    "user_id": recipient.user_id,
+                    **decoration,
+                    "user_id": user_id,
                     "entity_id": source.entity_id,
                     "symbol": source.symbol,
                     "name": source.name,
                     "relatedSymbols": recipient.related_symbols,
+                    "collections": collection_memberships,
+                    "portfolioExposure": portfolio_exposure,
+                    "inPortfolio": bool(portfolios),
+                    "inWatchlist": any(
+                        (member.collection_type or "").upper() == "WATCHLIST"
+                        for member in user_recipients
+                    ),
                     "eventKey": event_key,
                     "notificationCategory": category,
                 }
                 if self.writer.enqueue(
-                    user_id=recipient.user_id,
+                    user_id=user_id,
                     notification_key=f"{self.branch}|{event_key}",
                     notification_type=self.branch,
                     entity_id=source.entity_id,
@@ -100,7 +158,7 @@ class CollectionEventPublisher:
                     count += 1
             except Exception as exc:
                 self.errors.append(
-                    f"{event_key}: {recipient.user_id}/{recipient.collection_id}: {exc}"
+                    f"{event_key}: {user_id}/{recipient.collection_id}: {exc}"
                 )
                 logger.exception("Intelligence delivery failed branch=%s", self.branch)
         return count

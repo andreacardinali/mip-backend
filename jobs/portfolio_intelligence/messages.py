@@ -9,6 +9,34 @@ def entity_label(item: Mapping[str, Any]) -> str:
 
 
 def collection_details(item: Mapping[str, Any]) -> str:
+    memberships = item.get("collections") or []
+    portfolio_exposure = item.get("portfolioExposure") or []
+    if memberships:
+        details = []
+        for membership in memberships:
+            collection_type = membership.get("collectionType") or "Collection"
+            label = membership.get("collectionName") or membership.get("collectionId")
+            line = f"{collection_type}: {label or 'N/D'}"
+            if collection_type.upper() == "PORTFOLIO":
+                exposure = next(
+                    (
+                        value
+                        for value in portfolio_exposure
+                        if value.get("collectionName") == membership.get("collectionName")
+                    ),
+                    {},
+                )
+                allocation = exposure.get("allocationPct")
+                if allocation is not None:
+                    line += f" (peso {allocation:.2f}%"
+                    impact = exposure.get("portfolioImpactPct")
+                    if impact is not None:
+                        line += f"; contributo stimato {impact:+.3f} p.p."
+                    line += ")"
+                elif exposure:
+                    line += " (peso non disponibile)"
+            details.append(line)
+        return "Presente in: " + "; ".join(details) + "\n"
     if not item.get("collectionId"):
         return ""
     details = f"Collection: {item.get('collectionName') or item['collectionId']}\n"
