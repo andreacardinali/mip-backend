@@ -274,6 +274,9 @@ def test_exchange_alias_normalization_precedes_existing_exchange():
     assert "AND es.active" in function
     assert "upper(btrim(esm.source_exchange_code))" in function
     assert "upper(btrim(esm.source_exchange_name))" in function
+    assert "esm.system_id IS NULL" in function
+    assert "Ambiguous global exchange alias" in function
+    assert "conflicts with canonical code" in function
     assert "LIMIT 1" not in function
     profile = schema.split("CREATE FUNCTION public.sp_upsert_asset_profile(", 1)[
         1
@@ -292,5 +295,20 @@ def test_exchange_alias_registration_preserves_existing_exchanges():
         "exchange = p_exchange\n          AND"
     )
     assert "upper(btrim(source_exchange_name)) = v_alias" in registration
+    assert "v_global := nullif(btrim(p_system_code), '') IS NULL" in registration
+    assert "system_id IS NULL" in registration
+    assert "conflicts with a canonical exchange code" in registration
     assert "INSERT INTO public.exchanges" not in registration
     assert "DELETE FROM" not in registration
+
+
+def test_global_exchange_alias_has_repeatable_deployment_seed():
+    seed_path = ROOT / "scripts" / "seed_exchange_aliases.sql"
+    seed = seed_path.read_text(encoding="utf-8")
+    installer = (ROOT / "oneshot" / "install_exchange_aliases.sql").read_text(
+        encoding="utf-8"
+    )
+
+    assert "SELECT public.sp_register_exchange_alias('XNYS', NULL, 'NYSE');" in seed
+    assert "INSERT INTO public.exchange_source_mappings" not in seed
+    assert "SELECT public.sp_register_exchange_alias('XNYS', NULL, 'NYSE');" not in installer

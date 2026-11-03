@@ -8983,6 +8983,31 @@ BEGIN
         END IF;
     END IF;
 
+    IF v_exchange IS NOT NULL THEN
+        SELECT array_agg(DISTINCT esm.exchange)
+        INTO v_mapped_exchanges
+        FROM public.exchange_source_mappings esm
+        WHERE esm.system_id IS NULL
+          AND (
+              upper(btrim(esm.source_exchange_code)) = v_exchange
+              OR upper(btrim(esm.source_exchange_name)) = v_exchange
+          );
+
+        IF cardinality(v_mapped_exchanges) > 1 THEN
+            RAISE EXCEPTION 'Ambiguous global exchange alias %', v_exchange;
+        END IF;
+        IF cardinality(v_mapped_exchanges) = 1 THEN
+            SELECT e.exchange INTO v_mapped_exchange
+            FROM public.exchanges e
+            WHERE upper(btrim(e.exchange)) = v_exchange;
+            IF FOUND AND v_mapped_exchange <> v_mapped_exchanges[1] THEN
+                RAISE EXCEPTION 'Global exchange alias % conflicts with canonical code %',
+                    v_exchange, v_mapped_exchange;
+            END IF;
+            RETURN v_mapped_exchanges[1];
+        END IF;
+    END IF;
+
     SELECT e.exchange INTO v_mapped_exchange
     FROM public.exchanges e
     WHERE upper(btrim(e.exchange)) = v_exchange;
@@ -9221,8 +9246,10 @@ DECLARE
     v_alias varchar;
     v_system_id uuid;
     v_system_count integer;
+    v_global boolean;
 BEGIN
     v_alias := upper(nullif(btrim(p_alias), ''));
+    v_global := nullif(btrim(p_system_code), '') IS NULL;
     IF v_alias IS NULL OR length(v_alias) > 100 THEN
         RAISE EXCEPTION 'Exchange alias must contain between 1 and 100 characters';
     END IF;
@@ -9230,18 +9257,37 @@ BEGIN
     IF NOT FOUND THEN
         RAISE EXCEPTION 'Existing exchange row required: %', p_exchange;
     END IF;
-    SELECT count(*) INTO v_system_count FROM public.external_systems
-    WHERE upper(btrim(code)) = upper(btrim(p_system_code)) AND active;
-    IF v_system_count <> 1 THEN
-        RAISE EXCEPTION 'Expected one active external system for %', p_system_code;
+    IF NOT v_global THEN
+        SELECT count(*) INTO v_system_count FROM public.external_systems
+        WHERE upper(btrim(code)) = upper(btrim(p_system_code)) AND active;
+        IF v_system_count <> 1 THEN
+            RAISE EXCEPTION 'Expected one active external system for %', p_system_code;
+        END IF;
+        SELECT system_id INTO v_system_id FROM public.external_systems
+        WHERE upper(btrim(code)) = upper(btrim(p_system_code)) AND active;
     END IF;
-    SELECT system_id INTO v_system_id FROM public.external_systems
-    WHERE upper(btrim(code)) = upper(btrim(p_system_code)) AND active;
 
     LOCK TABLE public.exchange_source_mappings IN SHARE ROW EXCLUSIVE MODE;
+    IF v_global AND EXISTS (
+        SELECT 1 FROM public.exchanges
+        WHERE upper(btrim(exchange)) = v_alias AND exchange <> p_exchange
+    ) THEN
+        RAISE EXCEPTION 'Global exchange alias % conflicts with a canonical exchange code',
+            v_alias;
+    END IF;
+    IF v_global AND EXISTS (
+        SELECT 1 FROM public.exchange_source_mappings
+        WHERE exchange <> p_exchange
+          AND (upper(btrim(source_exchange_code)) = v_alias
+               OR upper(btrim(source_exchange_name)) = v_alias)
+    ) THEN
+        RAISE EXCEPTION 'Global exchange alias % conflicts with an existing mapping',
+            v_alias;
+    END IF;
     IF EXISTS (
         SELECT 1 FROM public.exchange_source_mappings
-        WHERE system_id = v_system_id AND exchange <> p_exchange
+        WHERE (system_id = v_system_id OR system_id IS NULL)
+          AND exchange <> p_exchange
           AND (upper(btrim(source_exchange_code)) = v_alias
                OR upper(btrim(source_exchange_name)) = v_alias)
     ) THEN
@@ -9250,7 +9296,8 @@ BEGIN
     END IF;
     IF EXISTS (
         SELECT 1 FROM public.exchange_source_mappings
-        WHERE system_id = v_system_id AND exchange = p_exchange
+                WHERE (system_id = v_system_id OR (v_global AND system_id IS NULL))
+                    AND exchange = p_exchange
           AND (upper(btrim(source_exchange_code)) = v_alias
                OR upper(btrim(source_exchange_name)) = v_alias)
     ) THEN
@@ -9259,7 +9306,8 @@ BEGIN
     INSERT INTO public.exchange_source_mappings
         (exchange, system_id, source_exchange_code, raw_payload)
     VALUES (p_exchange, v_system_id, v_alias,
-            jsonb_build_object('registration', 'manual'));
+            jsonb_build_object('registration', 'manual',
+                               'scope', CASE WHEN v_global THEN 'global' ELSE 'provider' END));
 END;
 $$;
 
@@ -11010,7 +11058,8 @@ BEGIN
     LOCK TABLE public.exchange_source_mappings IN SHARE ROW EXCLUSIVE MODE;
     IF EXISTS (
         SELECT 1 FROM public.exchange_source_mappings
-        WHERE system_id = v_system_id AND exchange <> p_exchange
+                WHERE (system_id = v_system_id OR system_id IS NULL)
+                    AND exchange <> p_exchange
             AND lower(source_exchange_code) IN
                 (lower(p_exchange_code), lower(p_provider_exchange))
     ) THEN
@@ -11116,7 +11165,8 @@ BEGIN
         JOIN jsonb_array_elements(p_catalog) AS rows(item)
           ON upper(btrim(m.source_exchange_code)) = item->>'code'
           OR upper(btrim(m.source_exchange_name)) = upper(btrim(item->>'name'))
-        WHERE m.system_id = v_system_id AND m.exchange <> item->>'code'
+                WHERE (m.system_id = v_system_id OR m.system_id IS NULL)
+                    AND m.exchange <> item->>'code'
     ) THEN
         RAISE EXCEPTION 'Eulerpool catalog conflicts with existing exchange mappings';
     END IF;
@@ -13070,7 +13120,7 @@ CREATE TABLE public.exchange_rates (
 
 CREATE TABLE public.exchange_source_mappings (
     exchange character varying(20) NOT NULL,
-    system_id uuid NOT NULL,
+    system_id uuid,
     source_exchange_code character varying(100) NOT NULL,
     source_exchange_name character varying(255),
     observed_at timestamp with time zone DEFAULT now() NOT NULL,
@@ -14259,7 +14309,7 @@ ALTER TABLE ONLY public.exchange_rates
 --
 
 ALTER TABLE ONLY public.exchange_source_mappings
-    ADD CONSTRAINT exchange_source_mappings_pkey PRIMARY KEY (exchange, system_id, source_exchange_code);
+    ADD CONSTRAINT exchange_source_mappings_provider_key UNIQUE (exchange, system_id, source_exchange_code);
 
 
 --
@@ -14970,6 +15020,12 @@ CREATE INDEX ix_exchange_rate_history_date ON public.exchange_rate_history USING
 --
 
 CREATE INDEX ix_exchange_source_mappings_exchange ON public.exchange_source_mappings USING btree (exchange);
+
+--
+-- Name: ix_exchange_source_mappings_global_alias; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX ix_exchange_source_mappings_global_alias ON public.exchange_source_mappings USING btree (upper(btrim(source_exchange_code::text))) WHERE (system_id IS NULL);
 
 
 --

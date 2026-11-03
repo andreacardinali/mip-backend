@@ -315,12 +315,22 @@ instants stored as `timestamptz`. Adjusted opening/closing hours remain local ti
 not UTC instants. Conflicting closure flags, response identities and duplicate
 holiday dates are rejected. Null closure flags remain unknown.
 
-### Provider Exchange Aliases
+### Exchange Aliases
 
-`exchanges.exchange` is the internal venue identity; provider codes are aliases
-in `exchange_source_mappings`. Apply `oneshot/install_exchange_aliases.sql` to
-install conflict-checked alias registration and update listing normalization.
-This migration does not register aliases, rename exchanges or move instruments.
+`exchanges.exchange` is the internal venue identity; provider aliases and
+provider-independent aliases share `exchange_source_mappings`. Provider rows
+retain their `external_systems` association. A row with `system_id IS NULL` is
+an explicitly reviewed global alias and is considered only when no provider
+mapping matched. For an existing database, apply
+`oneshot/install_exchange_aliases.sql` to update the table and install
+conflict-checked registration and listing normalization. That temporary upgrade
+does not register aliases, rename exchanges or move instruments.
+
+For a fresh deployment, load `mip_schema.sql`, run the initial exchange catalog
+synchronization so the canonical `XNYS` row exists, then apply
+`scripts/seed_exchange_aliases.sql`. Run that same idempotent seed after the
+upgrade above on existing databases. It registers the reviewed global alias
+`NYSE` to `XNYS`; it does not create canonical exchanges or provider mappings.
 
 After reviewing venue identity, register each provider identifier against the
 chosen existing MIP row. For example, if that row is `XNAS` and both external
@@ -335,9 +345,18 @@ COMMIT;
 ```
 
 Registration is case-insensitive, whitespace-trimmed and idempotent. Conflicting
-code or name mappings are rejected, not reassigned. Listing imports resolve
-provider aliases before checking existing exchange codes and before exchange
-creation; ambiguous mappings fail instead of selecting the latest observation.
+code or name mappings are rejected, not reassigned. To register a reviewed alias
+independently of any provider, pass `NULL` as the provider code:
+
+```sql
+SELECT public.sp_register_exchange_alias('XNYS', NULL, 'NYSE');
+```
+
+Listing imports resolve provider aliases first, then globally registered aliases,
+before checking existing exchange codes and before exchange creation. Ambiguous
+global mappings fail instead of selecting the latest observation. Provider-
+observed holiday labels and catalog codes remain provider-scoped evidence; they
+are not promoted globally without review.
 Before catalog authority is activated, unknown identifiers retain the existing
 fallback behavior and can produce distinct venues. After activation, exchange
 upserts require canonical catalog membership. Review aliases before new-provider
