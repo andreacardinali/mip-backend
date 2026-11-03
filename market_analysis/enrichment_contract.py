@@ -21,6 +21,7 @@ def enrichment_fingerprint(
                     base_url=config.base_url,
                     json_config=config.json_config,
                     think_enabled=config.think_enabled,
+                    api_protocol=config.api_protocol,
                 )
                 if config is not None
                 else None

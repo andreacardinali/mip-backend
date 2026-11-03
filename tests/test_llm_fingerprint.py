@@ -22,3 +22,16 @@ def test_provider_fingerprint_ignores_operational_settings_by_contract():
         think_enabled=False,
     )
     assert first != second
+
+
+def test_provider_fingerprint_separates_api_protocols():
+    common = {
+        "provider": "openai_compatible",
+        "model": "test-model",
+        "base_url": "https://example.test/v1",
+        "json_config": {},
+        "think_enabled": False,
+    }
+    chat = provider_config_fingerprint(**common, api_protocol="chat_completions")
+    responses = provider_config_fingerprint(**common, api_protocol="responses")
+    assert chat != responses

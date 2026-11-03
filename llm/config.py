@@ -41,8 +41,17 @@ def _get_json_object(settings: SettingsReader, key: str) -> dict[str, Any]:
 
 
 SUPPORTED_PROVIDERS = {"gemini", "ollama", "openai_compatible"}
+SUPPORTED_OPENAI_COMPATIBLE_PROTOCOLS = {"chat_completions", "responses"}
 PROTECTED_JSON_CONFIG_KEYS = frozenset(
-    {"model", "messages", "temperature", "max_tokens"}
+    {
+        "model",
+        "messages",
+        "input",
+        "instructions",
+        "temperature",
+        "max_tokens",
+        "max_output_tokens",
+    }
 )
 
 
@@ -50,6 +59,7 @@ PROTECTED_JSON_CONFIG_KEYS = frozenset(
 class LLMConfig:
     provider: str
     model: str
+    api_protocol: str = "chat_completions"
     base_url: str = ""
     api_key: str = ""
     timeout_seconds: float = 60.0
@@ -95,6 +105,10 @@ class LLMConfig:
             .strip()
             .lower(),
             model=str(settings.get(f"{p}_MODEL", "") or "").strip(),
+            api_protocol=str(
+                settings.get(f"{p}_API_PROTOCOL", "chat_completions")
+                or "chat_completions"
+            ).strip().lower(),
             base_url=str(settings.get(f"{p}_BASE_URL", "") or "").strip().rstrip("/"),
             api_key=str(settings.get(f"{p}_API_KEY", "") or "").strip(),
             timeout_seconds=float(
@@ -155,6 +169,13 @@ class LLMConfig:
     def validate(self, *, prefix: str = "LLM") -> None:
         if self.provider not in SUPPORTED_PROVIDERS:
             raise ValueError(f"Unsupported {prefix}_PROVIDER: {self.provider}")
+        if (
+            self.provider == "openai_compatible"
+            and self.api_protocol not in SUPPORTED_OPENAI_COMPATIBLE_PROTOCOLS
+        ):
+            raise ValueError(
+                f"Unsupported {prefix}_API_PROTOCOL: {self.api_protocol}"
+            )
         if not self.model:
             raise ValueError(f"Missing {prefix}_MODEL")
         if self.provider in {"ollama", "openai_compatible"} and not self.base_url:

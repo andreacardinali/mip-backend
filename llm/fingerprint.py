@@ -25,6 +25,7 @@ def provider_config_fingerprint(
     base_url: str,
     json_config: dict[str, Any],
     think_enabled: bool,
+    api_protocol: str = "chat_completions",
 ) -> str:
     return fingerprint(
         {
@@ -33,5 +34,6 @@ def provider_config_fingerprint(
             "base_url": base_url,
             "json_config": json_config,
             "think_enabled": think_enabled,
+            "api_protocol": api_protocol,
         }
     )

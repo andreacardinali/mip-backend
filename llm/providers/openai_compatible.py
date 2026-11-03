@@ -15,7 +15,17 @@ from llm.rate_limit import LLMRateLimiter, estimate_tokens
 from llm.retry_hints import llm_response_delay
 
 MAX_ERROR_BODY_CHARACTERS = 2000
-PROTECTED_PATHS = frozenset({"model", "messages", "temperature", "max_tokens"})
+PROTECTED_PATHS = frozenset(
+    {
+        "model",
+        "messages",
+        "input",
+        "instructions",
+        "temperature",
+        "max_tokens",
+        "max_output_tokens",
+    }
+)
 JSON_SYSTEM_PROMPT = (
     "Return exactly one valid JSON object. "
     "Do not include Markdown fences, XML tags, explanations, comments, "
@@ -38,6 +48,7 @@ class OpenAICompatibleProvider(LLMProvider):
         rate_limit_safety_factor: float = 0.9,
         retry_max_delay: float = 120.0,
         json_config: dict[str, Any] | None = None,
+        api_protocol: str = "chat_completions",
     ) -> None:
         self.base_url = base_url.strip().rstrip("/")
         self.api_key = api_key.strip()
@@ -46,6 +57,9 @@ class OpenAICompatibleProvider(LLMProvider):
             raise ValueError("base_url cannot be empty")
         if not self.model:
             raise ValueError("model cannot be empty")
+        if api_protocol not in {"chat_completions", "responses"}:
+            raise ValueError(f"Unsupported OpenAI-compatible API protocol: {api_protocol}")
+        self.api_protocol = api_protocol
 
         self.timeout = timeout
         self.json_config = dict(json_config or {})
@@ -83,7 +97,7 @@ class OpenAICompatibleProvider(LLMProvider):
                 response = request_with_retry(
                     client,
                     "POST",
-                    f"{self.base_url}/chat/completions",
+                    f"{self.base_url}/{self._endpoint_path}",
                     policy=self.retry_policy,
                     retry_non_idempotent=True,
                     headers=headers,
@@ -100,18 +114,38 @@ class OpenAICompatibleProvider(LLMProvider):
                 ) from exc
             raw = self._decode_response(response)
 
-        return LLMResponse(data=parse_json_object(self._extract_text(raw)), raw=raw)
+        extract_text = (
+            self._extract_responses_text
+            if self.api_protocol == "responses"
+            else self._extract_text
+        )
+        return LLMResponse(data=parse_json_object(extract_text(raw)), raw=raw)
+
+    @property
+    def _endpoint_path(self) -> str:
+        if self.api_protocol == "responses":
+            return "responses"
+        return "chat/completions"
 
     def _build_request_body(self, request: LLMRequest) -> dict[str, Any]:
-        standard_body: dict[str, Any] = {
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content": JSON_SYSTEM_PROMPT},
-                {"role": "user", "content": request.prompt},
-            ],
-            "temperature": request.temperature,
-            "max_tokens": request.max_tokens,
-        }
+        if self.api_protocol == "responses":
+            standard_body: dict[str, Any] = {
+                "model": self.model,
+                "instructions": JSON_SYSTEM_PROMPT,
+                "input": request.prompt,
+                "temperature": request.temperature,
+                "max_output_tokens": request.max_tokens,
+            }
+        else:
+            standard_body = {
+                "model": self.model,
+                "messages": [
+                    {"role": "system", "content": JSON_SYSTEM_PROMPT},
+                    {"role": "user", "content": request.prompt},
+                ],
+                "temperature": request.temperature,
+                "max_tokens": request.max_tokens,
+            }
         body = deep_merge_dicts(standard_body, self.json_config)
         validate_protected_paths(body, standard_body, PROTECTED_PATHS)
         return body
@@ -153,6 +187,28 @@ class OpenAICompatibleProvider(LLMProvider):
                 f"finish_reason={choice.get('finish_reason')!r}, "
                 f"message={message!r}, usage={raw.get('usage')!r}"
             )
+        return text
+
+    @staticmethod
+    def _extract_responses_text(raw: dict[str, Any]) -> str:
+        output_text = raw.get("output_text")
+        if isinstance(output_text, str) and output_text.strip():
+            return output_text
+
+        text_parts: list[str] = []
+        for item in raw.get("output") or []:
+            if not isinstance(item, dict):
+                continue
+            for content in item.get("content") or []:
+                if (
+                    isinstance(content, dict)
+                    and content.get("type") in {"output_text", "text"}
+                    and isinstance(content.get("text"), str)
+                ):
+                    text_parts.append(content["text"])
+        text = "".join(text_parts)
+        if not text.strip():
+            raise RuntimeError(f"LLM returned no textual content: {raw}")
         return text
 
     @staticmethod

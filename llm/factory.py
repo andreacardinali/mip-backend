@@ -41,6 +41,7 @@ def create_provider(config: LLMConfig) -> LLMProvider:
             rate_limit_safety_factor=config.rate_limit_safety_factor,
             retry_max_delay=config.retry_max_seconds,
             json_config=config.json_config,
+            api_protocol=config.api_protocol,
         )
     else:
         raise ValueError(f"Unsupported LLM provider: {config.provider}")
@@ -53,7 +54,11 @@ def create_provider(config: LLMConfig) -> LLMProvider:
             provider_name=config.provider,
             model=config.model,
             config=PersistentQueueConfig(
-                queue_key=f"{config.provider}:{config.model}",
+                queue_key=(
+                    f"{config.provider}:{config.model}"
+                    if config.api_protocol == "chat_completions"
+                    else f"{config.provider}:{config.model}:{config.api_protocol}"
+                ),
                 max_attempts=config.max_retries + 1,
                 tokens_per_minute=config.tokens_per_minute,
                 requests_per_minute=config.requests_per_minute,
@@ -83,6 +88,7 @@ def create_provider(config: LLMConfig) -> LLMProvider:
                 base_url=config.base_url,
                 json_config=config.json_config,
                 think_enabled=config.think_enabled,
+                api_protocol=config.api_protocol,
             ),
             config=LLMCacheConfig(
                 enabled=True,

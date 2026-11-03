@@ -179,6 +179,12 @@ nonnegative integers; `0` disables the time-based safeguard (other candidate
 eligibility rules still apply). Invalid values return `invalid_configuration`
 without loading AI candidates or calling the provider.
 
+For an OpenAI-compatible endpoint, set `MARKET_ANALYSIS_ENRICHMENT_LLM_PROVIDER`
+to `openai_compatible` and provide `MODEL`, `BASE_URL` and `API_KEY`. The
+`MARKET_ANALYSIS_ENRICHMENT_LLM_API_PROTOCOL` setting accepts `chat_completions`
+(default) or `responses`. The base URL should include the API version prefix,
+such as `/v1`; the provider appends `/chat/completions` or `/responses`.
+
 ## Temporary Development Utilities
 
 MIP currently has a single live development instance. Periodic database dumps
