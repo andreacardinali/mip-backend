@@ -299,6 +299,33 @@ def test_opportunity_filters_and_limit_are_applied_by_sql(watchlist_match) -> No
     )
 
 
+@pytest.mark.parametrize(
+    ("evidence", "expected"),
+    [
+        ({"quant": {"llm_eligible": True}}, True),
+        ({"quant": {"llm_eligible": False}}, False),
+        ({"quant": {}}, None),
+        ({"quant": {"llm_eligible": "false"}}, None),
+        (None, None),
+    ],
+)
+def test_get_opportunity_exposes_boolean_llm_eligibility(evidence, expected) -> None:
+    repository = runpy.run_path("market_screener/api_repository.py")[
+        "MarketScreenerApiRepository"
+    ]
+    payload = {"opportunity_id": "opportunity", "evidence": evidence}
+
+    def execute(statement, params):
+        return SimpleNamespace(scalar_one_or_none=lambda: payload)
+
+    result = repository(SimpleNamespace(execute=execute)).get_opportunity(
+        user_id="owner", opportunity_id="opportunity"
+    )
+
+    assert result["llm_eligible"] is expected
+    assert result["evidence"] is evidence
+
+
 def test_watchlist_filter_applies_before_limit() -> None:
     routines = [
         routine

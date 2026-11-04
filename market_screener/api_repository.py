@@ -110,7 +110,21 @@ class MarketScreenerApiRepository:
             ),
             {"user_id": user_id, "opportunity_id": opportunity_id},
         ).scalar_one_or_none()
-        return dict(p) if p is not None else None
+        if p is None:
+            return None
+
+        payload = dict(p)
+        evidence = payload.get("evidence")
+        quant_evidence = evidence.get("quant") if isinstance(evidence, dict) else None
+        llm_eligible = (
+            quant_evidence.get("llm_eligible")
+            if isinstance(quant_evidence, dict)
+            else None
+        )
+        payload["llm_eligible"] = (
+            llm_eligible if isinstance(llm_eligible, bool) else None
+        )
+        return payload
 
     def list_runs(self, limit=50):
         return [
