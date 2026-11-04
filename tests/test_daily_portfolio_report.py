@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime, time, timezone
 from decimal import Decimal
 from unittest.mock import MagicMock
 
@@ -38,12 +38,14 @@ def test_format_portfolio_report_uses_reporting_currency_and_handles_unknown_cos
 
 
 def test_daily_portfolio_report_uses_selected_destination_and_stable_daily_key():
-    report_date = date(2025, 10, 26)
+    now = datetime(2025, 10, 26, 20, 30, tzinfo=timezone.utc)
     subscription = {
         "user_id": "user-id",
         "portfolio_id": "portfolio-id",
         "notification_source_id": "source-id",
         "portfolio_name": "Long-term",
+        "display_timezone": "Europe/Rome",
+        "daily_portfolio_report_time": time(21, 0),
     }
     summary = {
         "portfolio_currency": "USD",
@@ -62,7 +64,7 @@ def test_daily_portfolio_report_uses_selected_destination_and_stable_daily_key()
     queue = MagicMock()
     queue.enqueue.return_value = True
 
-    result = publish_daily_portfolio_reports(db, queue, report_date)
+    result = publish_daily_portfolio_reports(db, queue, now)
 
     assert result == {"processed": 1, "queued": 1, "skipped": 0}
     arguments = queue.enqueue.call_args.kwargs
@@ -74,3 +76,25 @@ def test_daily_portfolio_report_uses_selected_destination_and_stable_daily_key()
     assert arguments["entity_id"] is None
     assert arguments["event_key"] == "2025-10-26"
     assert "25,00 EUR (+25,00%)" in arguments["message"]
+
+
+def test_daily_portfolio_report_waits_until_user_local_delivery_time():
+    subscription = {
+        "user_id": "user-id",
+        "portfolio_id": "portfolio-id",
+        "notification_source_id": "source-id",
+        "portfolio_name": "Long-term",
+        "display_timezone": "Europe/Rome",
+        "daily_portfolio_report_time": time(21, 0),
+    }
+    db = MagicMock()
+    db.execute.return_value.mappings.return_value.all.return_value = [subscription]
+    queue = MagicMock()
+
+    result = publish_daily_portfolio_reports(
+        db, queue, datetime(2025, 10, 26, 19, 30, tzinfo=timezone.utc)
+    )
+
+    assert result == {"processed": 1, "queued": 0, "skipped": 0}
+    queue.enqueue.assert_not_called()
+    assert db.execute.call_count == 1

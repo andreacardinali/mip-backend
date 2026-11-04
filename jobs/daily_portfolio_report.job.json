@@ -5,8 +5,8 @@
   "description": "Invia il riepilogo giornaliero dei portfolio che hanno attivato la relativa categoria.",
   "python_module": "jobs.daily_portfolio_report.worker",
   "trigger": {
-    "type": "cron",
-    "cron_expression": "0 21 * * *"
+    "type": "interval",
+    "interval_minutes": 1
   },
   "enabled_by_default": true
 }

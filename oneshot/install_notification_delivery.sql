@@ -4,8 +4,12 @@ CREATE TABLE IF NOT EXISTS public.user_notification_delivery (
     user_id uuid PRIMARY KEY REFERENCES public.users(user_id) ON DELETE CASCADE,
     paused boolean NOT NULL DEFAULT false,
     default_source_id uuid REFERENCES public.user_sources(source_id),
+    daily_portfolio_report_time time NOT NULL DEFAULT TIME '21:00',
     updated_at timestamptz NOT NULL DEFAULT now()
 );
+
+ALTER TABLE public.user_notification_delivery
+    ADD COLUMN IF NOT EXISTS daily_portfolio_report_time time NOT NULL DEFAULT TIME '21:00';
 
 INSERT INTO public.user_notification_delivery (user_id, default_source_id)
 SELECT u.user_id, destination.source_id
@@ -34,17 +38,24 @@ WHERE ar.user_id = ns.user_id
   AND ar.conditions->>'source_id' IS NULL;
 
 CREATE OR REPLACE FUNCTION public.sp_get_user_notification_delivery(p_user_id uuid)
-RETURNS TABLE(paused boolean, default_source_id uuid)
+RETURNS TABLE(
+    paused boolean,
+    default_source_id uuid,
+    daily_portfolio_report_time time
+)
 LANGUAGE sql STABLE
 AS $$
-    SELECT COALESCE(delivery.paused, false), delivery.default_source_id
+    SELECT COALESCE(delivery.paused, false), delivery.default_source_id,
+           COALESCE(delivery.daily_portfolio_report_time, TIME '21:00')
     FROM public.users u
     LEFT JOIN public.user_notification_delivery delivery ON delivery.user_id = u.user_id
     WHERE u.user_id = p_user_id;
 $$;
 
+DROP FUNCTION IF EXISTS public.sp_save_user_notification_delivery(uuid, boolean, uuid);
+
 CREATE OR REPLACE FUNCTION public.sp_save_user_notification_delivery(
-    p_user_id uuid, p_paused boolean, p_source_id uuid
+    p_user_id uuid, p_paused boolean, p_source_id uuid, p_report_time time
 )
 RETURNS boolean
 LANGUAGE plpgsql
@@ -52,6 +63,10 @@ AS $$
 BEGIN
     IF p_paused IS NULL THEN
         RAISE EXCEPTION 'Notification pause must be a boolean' USING ERRCODE = '22023';
+    END IF;
+
+    IF p_report_time IS NULL THEN
+        RAISE EXCEPTION 'Daily portfolio report time is required' USING ERRCODE = '22023';
     END IF;
 
     IF p_source_id IS NOT NULL AND NOT EXISTS (
@@ -63,11 +78,14 @@ BEGIN
             USING ERRCODE = '22023';
     END IF;
 
-    INSERT INTO public.user_notification_delivery (user_id, paused, default_source_id)
-    VALUES (p_user_id, p_paused, p_source_id)
+    INSERT INTO public.user_notification_delivery (
+        user_id, paused, default_source_id, daily_portfolio_report_time
+    )
+    VALUES (p_user_id, p_paused, p_source_id, p_report_time)
     ON CONFLICT (user_id) DO UPDATE
     SET paused = EXCLUDED.paused,
         default_source_id = EXCLUDED.default_source_id,
+        daily_portfolio_report_time = EXCLUDED.daily_portfolio_report_time,
         updated_at = now();
     RETURN true;
 END;

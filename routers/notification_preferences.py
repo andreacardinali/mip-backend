@@ -1,3 +1,4 @@
+from datetime import time
 from typing import Any, Literal
 from uuid import UUID
 
@@ -49,6 +50,7 @@ class DeliveryPreferencesPayload(BaseModel):
 
     paused: StrictBool
     default_source_id: UUID | None
+    daily_portfolio_report_time: time
 
 
 class ScreenerSummaryPayload(BaseModel):
@@ -215,7 +217,8 @@ def update_notification_delivery(
             text(
                 """
                 SELECT public.sp_save_user_notification_delivery(
-                    CAST(:user_id AS uuid), :paused, CAST(:source_id AS uuid)
+                    CAST(:user_id AS uuid), :paused, CAST(:source_id AS uuid),
+                    CAST(:report_time AS time)
                 )
             """
             ),
@@ -227,6 +230,7 @@ def update_notification_delivery(
                     if payload.default_source_id
                     else None
                 ),
+                "report_time": payload.daily_portfolio_report_time,
             },
         ).scalar_one()
         db.commit()

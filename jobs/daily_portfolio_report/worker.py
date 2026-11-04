@@ -1,21 +1,24 @@
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import text
 
 from job_runtime.database import run_transactional
 from notifications.queue import NotificationQueue
-from scheduler_triggers import SCHEDULER_TIMEZONE
-
 _SUBSCRIPTIONS = text(
     """
     SELECT subscription.user_id, subscription.collection_id AS portfolio_id,
-           subscription.notification_source_id, portfolio.name AS portfolio_name
+           subscription.notification_source_id, portfolio.name AS portfolio_name,
+           account.display_timezone,
+           COALESCE(delivery.daily_portfolio_report_time, TIME '21:00')
+               AS daily_portfolio_report_time
     FROM public.collection_intelligence_subscriptions subscription
     JOIN public.portfolios portfolio
       ON portfolio.portfolio_id = subscription.collection_id
      AND portfolio.user_id = subscription.user_id
     JOIN public.users account ON account.user_id = subscription.user_id
+        LEFT JOIN public.user_notification_delivery delivery
+            ON delivery.user_id = subscription.user_id
     WHERE subscription.collection_type = 'PORTFOLIO'
       AND 'DAILY_PORTFOLIO_REPORT' = ANY(subscription.enabled_categories)
       AND account.is_active
@@ -78,11 +81,16 @@ def format_portfolio_report(summary, report_date: date) -> tuple[str, str, dict]
     return message, currency, context
 
 
-def publish_daily_portfolio_reports(db, queue, report_date: date) -> dict:
+def publish_daily_portfolio_reports(db, queue, now: datetime | None = None) -> dict:
+    now = now or datetime.now(timezone.utc)
     subscriptions = db.execute(_SUBSCRIPTIONS).mappings().all()
     queued = 0
     skipped = 0
     for subscription in subscriptions:
+        local_now = now.astimezone(ZoneInfo(subscription["display_timezone"]))
+        if local_now.time() < subscription["daily_portfolio_report_time"]:
+            continue
+        report_date = local_now.date()
         parameters = {
             "portfolio_id": subscription["portfolio_id"],
             "user_id": subscription["user_id"],
@@ -124,10 +132,8 @@ def publish_daily_portfolio_reports(db, queue, report_date: date) -> dict:
 
 
 def run() -> dict:
-    report_date = datetime.now(ZoneInfo(SCHEDULER_TIMEZONE)).date()
-
     def operation(db):
         queue = NotificationQueue(db)
-        return publish_daily_portfolio_reports(db, queue, report_date)
+        return publish_daily_portfolio_reports(db, queue)
 
     return run_transactional(operation)
