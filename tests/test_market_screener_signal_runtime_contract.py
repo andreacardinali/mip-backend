@@ -71,7 +71,7 @@ def test_screener_summary_preference_is_opt_in(name) -> None:
         ("changed", "SUCCESS", None),
     ],
 )
-def test_snapshot_summary_reuses_comparison_and_queue(
+def test_snapshot_changes_enqueue_per_collection_signal_notifications(
     monkeypatch, scenario, expected_status, expected_reason
 ) -> None:
     namespace = runpy.run_path("market_screener/service.py")
@@ -84,15 +84,23 @@ def test_snapshot_summary_reuses_comparison_and_queue(
         "changed_count": 0 if scenario == "unchanged" else 1,
         "removed_count": 0 if scenario == "unchanged" else 3,
         "opportunity_count": 42,
-        "changes": [
+        "changes": [] if scenario == "unchanged" else [
             {
                 "change_type": "NEW",
-                "current": {"symbol": "AAA", "direction": "BULLISH"},
+                "current": {
+                    "instrument_id": "instrument-a",
+                    "signal_id": "signal-a",
+                    "symbol": "AAA",
+                    "direction": "BULLISH",
+                    "strategy_code": "RSI",
+                },
                 "private_detail": "not exported",
             },
             {
                 "change_type": "CHANGED",
                 "current": {
+                    "instrument_id": "instrument-b",
+                    "signal_id": "signal-b",
                     "symbol": "BBB",
                     "direction": "BEARISH",
                     "verdict": "WATCH",
@@ -101,7 +109,12 @@ def test_snapshot_summary_reuses_comparison_and_queue(
             },
             {
                 "change_type": "REMOVED",
-                "previous": {"symbol": "CCC", "direction": "BULLISH"},
+                "previous": {
+                    "instrument_id": "instrument-c",
+                    "signal_id": "signal-c",
+                    "symbol": "CCC",
+                    "direction": "BULLISH",
+                },
             },
         ],
     }
@@ -110,9 +123,28 @@ def test_snapshot_summary_reuses_comparison_and_queue(
         calls.append(("comparison", snapshot_id))
         return None if scenario == "incomplete" else comparison
 
-    def recipients():
-        calls.append("recipients")
-        return ["owner", "other"]
+    def recipients(*, instrument_id):
+        calls.append(("recipients", instrument_id))
+        recipients_for_instrument = [
+            {
+                "user_id": "owner",
+                "collection_type": "WATCHLIST",
+                "collection_id": f"collection-{instrument_id}",
+                "collection_name": "My watchlist",
+                "source_id": "telegram-source",
+            }
+        ]
+        if instrument_id == "instrument-a":
+            recipients_for_instrument.append(
+                {
+                    "user_id": "owner",
+                    "collection_type": "PORTFOLIO",
+                    "collection_id": "second-collection",
+                    "collection_name": "My portfolio",
+                    "source_id": "portfolio-source",
+                }
+            )
+        return recipients_for_instrument
 
     def queue(**payload):
         calls.append(payload)
@@ -124,7 +156,7 @@ def test_snapshot_summary_reuses_comparison_and_queue(
         enqueue.__globals__,
         "MarketScreenerApiRepository",
         lambda db: SimpleNamespace(
-            get_snapshot_changes=get_changes, list_summary_recipients=recipients
+            get_snapshot_changes=get_changes, list_signal_recipients=recipients
         ),
     )
     monkeypatch.setitem(
@@ -141,49 +173,50 @@ def test_snapshot_summary_reuses_comparison_and_queue(
     elif scenario != "changed":
         assert calls == [("comparison", "snapshot")]
     else:
-        assert result["outcomes"] == {"CREATED": 1, "DUPLICATE": 1}
-        assert calls[:2] == [("comparison", "snapshot"), "recipients"]
-        for payload, user_id in zip(calls[2:], ["owner", "other"], strict=True):
-            assert payload["notification_key"] == f"SCREENER_SUMMARY:{user_id}:snapshot"
-            assert payload["notification_type"] == "SCREENER_SUMMARY"
-            assert payload["severity"] == "LOW"
-            assert payload["entity_id"] is None and payload["symbol"] is None
-            assert payload["context"] == {
-                "ranking_snapshot_id": "snapshot",
-                "previous_snapshot_id": "previous",
-                "new_count": 2,
-                "changed_count": 1,
-                "removed_count": 3,
-                "opportunity_count": 42,
-                "changes": [
-                    {
-                        "change_type": "NEW",
-                        "symbol": "AAA",
-                        "direction": "BULLISH",
-                        "verdict": None,
-                        "ranking_position": None,
-                    },
-                    {
-                        "change_type": "CHANGED",
-                        "symbol": "BBB",
-                        "direction": "BEARISH",
-                        "verdict": "WATCH",
-                        "ranking_position": 2,
-                    },
-                    {
-                        "change_type": "REMOVED",
-                        "symbol": "CCC",
-                        "direction": "BULLISH",
-                        "verdict": None,
-                        "ranking_position": None,
-                    },
-                ],
-            }
-            assert payload["message"] == (
-                "Nuove entrate: 2 (AAA)\n"
-                "Cambi del segnale: 1 (BBB)\n"
-                "Uscite: 3 (CCC)"
+        assert result["outcomes"] == {"CREATED": 4}
+        assert [call for call in calls if isinstance(call, tuple)] == [
+            ("comparison", "snapshot"),
+            ("recipients", "instrument-a"),
+            ("recipients", "instrument-b"),
+            ("recipients", "instrument-c"),
+        ]
+        payload_calls = [call for call in calls if isinstance(call, dict)]
+        for payload, (symbol, change_type) in zip(
+            payload_calls,
+            [
+                ("AAA", "NEW"),
+                ("AAA", "NEW"),
+                ("BBB", "CHANGED"),
+                ("CCC", "REMOVED"),
+            ],
+            strict=True,
+        ):
+            assert payload["notification_key"].startswith(
+                "MARKET_SIGNAL:"
+                f"{payload['context']['collection_type']}:"
+                f"{payload['context']['collection_id']}:"
             )
+            assert payload["notification_type"] == "MARKET_SIGNAL"
+            assert payload["severity"] == "LOW"
+            assert payload["entity_id"] is None and payload["symbol"] == symbol
+            assert payload["source_id"] == (
+                "portfolio-source"
+                if payload["context"]["collection_type"] == "PORTFOLIO"
+                else "telegram-source"
+            )
+            assert payload["context"]["change_type"] == change_type
+            assert payload["context"]["collection_type"] in {
+                "WATCHLIST",
+                "PORTFOLIO",
+            }
+            assert payload["context"]["collection_name"] in {
+                "My watchlist",
+                "My portfolio",
+            }
+            assert symbol in payload["message"]
+        assert payload_calls[0]["notification_key"] != payload_calls[1]["notification_key"]
+        assert payload_calls[1]["source_id"] == "portfolio-source"
+        assert payload_calls[1]["context"]["collection_name"] == "My portfolio"
 
 
 def test_summary_recipient_repository_calls_only_stored_routine() -> None:
@@ -202,6 +235,29 @@ def test_summary_recipient_repository_calls_only_stored_routine() -> None:
     ]
     assert calls == [
         "SELECT user_id FROM public.sp_market_screener_summary_recipients()"
+    ]
+
+
+def test_signal_recipient_repository_calls_collection_routine() -> None:
+    repository = runpy.run_path("market_screener/api_repository.py")[
+        "MarketScreenerApiRepository"
+    ]
+    calls = []
+    expected = [{"user_id": UUID(int=1), "collection_type": "WATCHLIST"}]
+
+    def execute(statement, params):
+        calls.append((str(statement), params))
+        return SimpleNamespace(mappings=lambda: iter(expected))
+
+    assert repository(SimpleNamespace(execute=execute)).list_signal_recipients(
+        instrument_id="instrument-id"
+    ) == expected
+    assert calls == [
+        (
+            "SELECT * FROM public.sp_market_screener_signal_recipients("
+            "CAST(:instrument_id AS uuid))",
+            {"instrument_id": "instrument-id"},
+        )
     ]
 
 

@@ -41,34 +41,22 @@ class NotificationQueue:
 
         fallback_channel = (channel or self.default_channel).upper()
 
-        # Compatibility path for existing test doubles and external callers
-        # that still expose the pre-preferences repository interface.
-        resolve_target = getattr(self.repo, "resolve_target", None)
-        if resolve_target is None:
-            source_id = self.repo.resolve_source_id(
-                user_id=user_id,
-                channel=fallback_channel,
-            )
-            if not source_id:
-                return EnqueueResult(EnqueueStatus.SOURCE_NOT_FOUND)
-            target_source_id = source_id
-            target_channel = fallback_channel
-        else:
-            target = resolve_target(
-                user_id=user_id,
-                notification_type=notification_type,
-                severity=severity,
-                fallback_channel=fallback_channel,
-                **({"source_id": source_id} if source_id is not None else {}),
-            )
-            if target.resolution_status == "PAUSED":
-                return EnqueueResult(EnqueueStatus.DISABLED)
-            if target.resolution_status == "PREFERENCE_DISABLED":
-                return EnqueueResult(EnqueueStatus.PREFERENCE_DISABLED)
-            if not target.source_id or not target.channel:
-                return EnqueueResult(EnqueueStatus.SOURCE_NOT_FOUND)
-            target_source_id = target.source_id
-            target_channel = target.channel
+        target = self.repo.resolve_target(
+            user_id=user_id,
+            notification_type=notification_type,
+            severity=severity,
+            fallback_channel=fallback_channel,
+            context=context,
+            **({"source_id": source_id} if source_id is not None else {}),
+        )
+        if target.resolution_status == "PAUSED":
+            return EnqueueResult(EnqueueStatus.DISABLED)
+        if target.resolution_status == "PREFERENCE_DISABLED":
+            return EnqueueResult(EnqueueStatus.PREFERENCE_DISABLED)
+        if not target.source_id or not target.channel:
+            return EnqueueResult(EnqueueStatus.SOURCE_NOT_FOUND)
+        target_source_id = target.source_id
+        target_channel = target.channel
 
         notification_id = self.repo.enqueue(
             user_id=user_id,

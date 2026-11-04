@@ -1552,7 +1552,7 @@ canonical ISO dates and integer confidence values before entering SQL history.
 
 `CollectionEventPublisher` then projects events onto subscribed portfolios,
 watchlists and universes by category: `DAILY_MOVER`, `UPCOMING_CATALYST`,
-`BREAKING_CATALYST` or `NEWS`. Daily Mover also matches the exact instrument.
+`BREAKING_CATALYST`, `NEWS` or `MARKET_SIGNAL`. Daily Mover also matches the exact instrument.
 Each collection can select an enabled notification destination; an unset choice
 uses the user's default destination. The selected destination is validated as
 belonging to that user and is passed through to the notification queue.
@@ -1562,6 +1562,12 @@ projection. Daily Mover's estimated portfolio impact in percentage points is
 Existing severity formulas are unchanged and are not mathematically proportional
 to portfolio impact. NEWS retains the Breaking Catalyst queue type with a NEWS
 category in its notification context.
+
+Market-signal notifications are generated for new, changed and removed screener
+snapshot signals. Each notification is routed separately to every opted-in
+portfolio, watchlist or universe that contains the affected instrument, and is
+sent only when the user's global `MARKET_SIGNAL` preference is enabled. The
+collection destination takes precedence over the user's default destination.
 
 The separate `daily_portfolio_report` job runs daily at 21:00 in the scheduler
 timezone. It sends an aggregate summary only to portfolios opted into

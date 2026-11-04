@@ -19,7 +19,7 @@ ALTER TABLE public.collection_intelligence_subscriptions
     ADD CONSTRAINT collection_intelligence_categories_check
     CHECK (enabled_categories <@ ARRAY[
         'DAILY_MOVER', 'UPCOMING_CATALYST', 'BREAKING_CATALYST', 'NEWS',
-        'DAILY_PORTFOLIO_REPORT'
+        'DAILY_PORTFOLIO_REPORT', 'MARKET_SIGNAL'
     ]::text[]);
 
 CREATE OR REPLACE FUNCTION public.sp_validate_collection_intelligence_categories()
@@ -136,6 +136,75 @@ BEGIN
             updated_at = now();
     RETURN true;
 END
+$$;
+
+CREATE OR REPLACE FUNCTION public.sp_market_screener_signal_recipients(
+        p_instrument_id uuid
+)
+RETURNS TABLE(
+        user_id uuid,
+        collection_type text,
+        collection_id uuid,
+        collection_name text,
+        source_id uuid
+)
+LANGUAGE sql STABLE
+AS $$
+        SELECT u.user_id, c.collection_type, c.collection_id, c.collection_name,
+                     COALESCE(collection_source.source_id, default_source.source_id)
+        FROM public.users u
+        CROSS JOIN LATERAL public.sp_list_monitoring_collections(u.user_id) c
+        LEFT JOIN public.notification_subscriptions preference
+            ON preference.user_id = u.user_id
+         AND preference.portfolio_id IS NULL
+         AND UPPER(preference.event_type) = 'MARKET_SIGNAL'
+        LEFT JOIN public.collection_intelligence_subscriptions subscription
+            ON subscription.user_id = u.user_id
+         AND subscription.collection_type = c.collection_type
+         AND subscription.collection_id = c.collection_id
+        LEFT JOIN public.user_sources collection_source
+            ON collection_source.user_id = u.user_id
+         AND collection_source.source_id = subscription.notification_source_id
+         AND COALESCE((collection_source.config->>'enabled')::boolean, true)
+        LEFT JOIN public.user_notification_delivery delivery
+            ON delivery.user_id = u.user_id
+        LEFT JOIN public.user_sources default_source
+            ON default_source.user_id = u.user_id
+         AND default_source.source_id = delivery.default_source_id
+         AND COALESCE((default_source.config->>'enabled')::boolean, true)
+        WHERE u.is_active
+            AND 'MARKET_SIGNAL' = ANY(c.enabled_categories)
+            AND COALESCE(preference.enabled, true)
+            AND (
+                    (c.collection_type = 'PORTFOLIO' AND EXISTS (
+                            SELECT 1
+                            FROM public.positions position
+                            JOIN public.portfolios portfolio
+                                ON portfolio.portfolio_id = position.portfolio_id
+                            WHERE portfolio.user_id = u.user_id
+                                AND position.portfolio_id = c.collection_id
+                                AND position.instrument_id = p_instrument_id
+                                AND position.quantity <> 0
+                    ))
+                    OR (c.collection_type = 'WATCHLIST' AND EXISTS (
+                            SELECT 1
+                            FROM public.watchlist_items item
+                            JOIN public.instruments instrument
+                                ON instrument.entity_id = item.entity_id
+                            WHERE item.watchlist_id = c.collection_id
+                                AND instrument.instrument_id = p_instrument_id
+                    ))
+                    OR (c.collection_type = 'UNIVERSE' AND EXISTS (
+                            SELECT 1
+                            FROM public.market_universe_members member
+                            WHERE member.universe_id = c.collection_id
+                                AND member.instrument_id = p_instrument_id
+                                AND member.valid_from <= now()
+                                AND (member.valid_to IS NULL OR member.valid_to > now())
+                    ))
+            )
+            AND COALESCE(collection_source.source_id, default_source.source_id) IS NOT NULL
+        ORDER BY u.user_id, c.collection_type, c.collection_name, c.collection_id
 $$;
 
 CREATE OR REPLACE FUNCTION public.sp_get_collection_intelligence_candidates(p_branch text)

@@ -35,6 +35,7 @@ class NotificationRepository:
         notification_type: str,
         severity: str,
         fallback_channel: str,
+        context: dict[str, Any],
         source_id: str | None = None,
     ) -> NotificationTarget:
         row = (
@@ -47,7 +48,8 @@ class NotificationRepository:
                         :notification_type,
                         :severity,
                         :fallback_channel,
-                        CAST(:source_id AS uuid)
+                        CAST(:source_id AS uuid),
+                        CAST(:context AS jsonb)
                     )
                     """
                 ),
@@ -57,6 +59,7 @@ class NotificationRepository:
                     "severity": severity,
                     "fallback_channel": fallback_channel,
                     "source_id": source_id,
+                    "context": json.dumps(context),
                 },
             )
             .mappings()

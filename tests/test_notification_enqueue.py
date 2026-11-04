@@ -23,6 +23,14 @@ class FakeRepository:
     def resolve_source_id(self, **kwargs):
         return self.source_id
 
+    def resolve_target(self, **kwargs):
+        source_id = kwargs.get("source_id") or self.source_id
+        return NotificationTarget(
+            source_id,
+            kwargs["fallback_channel"] if source_id else None,
+            "RESOLVED" if source_id else "SOURCE_NOT_FOUND",
+        )
+
     def enqueue(self, **kwargs):
         return self.notification_id
 
@@ -50,6 +58,7 @@ class EnqueueTests(unittest.TestCase):
         queue.repo.enqueue.return_value = "notification"
         self.assertTrue(self._enqueue(queue, source_id="owned"))
         self.assertEqual(queue.repo.enqueue.call_args.kwargs["source_id"], "owned")
+        self.assertEqual(queue.repo.resolve_target.call_args.kwargs["context"], {})
 
     def test_rule_destination_is_normalized_and_invalid_ids_are_rejected(self):
         payload = {

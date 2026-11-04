@@ -175,6 +175,7 @@ def evaluate_and_enqueue_market_alerts(
             for match in evaluated:
                 context = {
                     **match.context,
+                    "alert_rule_id": str(selected.rule_id),
                     "entry_price": candidate.last_price,
                     "session_key": session_key,
                     "once_per_session": selected.conditions.get(
@@ -238,7 +239,10 @@ def evaluate_and_enqueue_market_alerts(
                 else m.message
             ),
             context=(
-                {"events": [match.context for match, _ in group]}
+                {
+                    "alert_rule_id": str(m.rule.rule_id),
+                    "events": [match.context for match, _ in group],
+                }
                 if digest
                 else m.context
             ),

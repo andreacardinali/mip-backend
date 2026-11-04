@@ -168,80 +168,77 @@ def enqueue_snapshot_summary(
         return {"status": "SKIPPED", "reason": "incomplete_snapshot"}
     if not comparison.get("previous_snapshot_id"):
         return {"status": "SKIPPED", "reason": "initial_snapshot"}
-    counts = {
-        key: int(comparison[key])
-        for key in ("new_count", "changed_count", "removed_count")
-    }
-    if not any(counts.values()):
+    changes = [
+        change
+        for change in comparison.get("changes") or []
+        if isinstance(change, dict)
+        and str(change.get("change_type") or "").upper()
+        in {"NEW", "CHANGED", "REMOVED"}
+    ]
+    if not changes:
         return {"status": "SKIPPED", "reason": "no_changes"}
-    context = {
-        "ranking_snapshot_id": str(comparison["ranking_snapshot_id"]),
-        "previous_snapshot_id": str(comparison["previous_snapshot_id"]),
-        **counts,
-        "opportunity_count": int(comparison.get("opportunity_count") or 0),
-    }
-    change_groups = {
-        "NEW": ("new_count", "Nuove entrate"),
-        "CHANGED": ("changed_count", "Cambi del segnale"),
-        "REMOVED": ("removed_count", "Uscite"),
-    }
-    details: dict[str, list[dict[str, Any]]] = {key: [] for key in change_groups}
-    for change in comparison.get("changes") or []:
-        if not isinstance(change, dict):
-            continue
+    queue = NotificationQueue(db, enabled=enabled)
+    outcomes: dict[str, int] = {}
+    for change in changes:
         change_type = str(change.get("change_type") or "").upper()
-        if change_type not in change_groups:
-            continue
         current = change.get("current") or {}
         previous = change.get("previous") or {}
         item = current if change_type != "REMOVED" else previous
         symbol = change.get("symbol") or item.get("symbol")
-        if not symbol:
+        instrument_id = item.get("instrument_id") or change.get("instrument_id")
+        if not symbol or not instrument_id:
             continue
-        details[change_type].append(
-            {
+        signal_id = item.get("signal_id") or change.get("signal_id")
+        signal_name = item.get("strategy_code") or item.get("origin") or "segnale"
+        action = {
+            "NEW": "Nuovo",
+            "CHANGED": "Aggiornato",
+            "REMOVED": "Rimosso",
+        }[change_type]
+        message = f"{action} segnale {signal_name} su {symbol}"
+        if item.get("direction"):
+            message += f" ({item['direction']})"
+        if item.get("verdict"):
+            message += f" - {item['verdict']}"
+        for recipient in repository.list_signal_recipients(
+            instrument_id=str(instrument_id)
+        ):
+            collection_type = str(recipient["collection_type"])
+            collection_id = str(recipient["collection_id"])
+            recipient_user_id = str(recipient["user_id"])
+            identity = str(signal_id or instrument_id)
+            context = {
+                "ranking_snapshot_id": str(comparison["ranking_snapshot_id"]),
+                "previous_snapshot_id": str(comparison["previous_snapshot_id"]),
                 "change_type": change_type,
-                "symbol": str(symbol),
+                "instrument_id": str(instrument_id),
+                "signal_id": str(signal_id) if signal_id else None,
+                "strategy_code": item.get("strategy_code"),
                 "direction": item.get("direction"),
                 "verdict": item.get("verdict"),
                 "ranking_position": item.get("ranking_position"),
+                "collection_type": collection_type,
+                "collection_id": collection_id,
+                "collection_name": recipient.get("collection_name"),
             }
-        )
-
-    detail_limit = 5
-    message_lines = []
-    for change_type, (count_key, label) in change_groups.items():
-        symbols = [item["symbol"] for item in details[change_type][:detail_limit]]
-        suffix = f" ({', '.join(symbols)}" if symbols else ""
-        overflow = max(len(details[change_type]) - detail_limit, 0)
-        if suffix and overflow:
-            suffix += f", +{overflow}"
-        if suffix:
-            suffix += ")"
-        message_lines.append(f"{label}: {counts[count_key]}{suffix}")
-    message = "\n".join(message_lines)
-    context["changes"] = [
-        item
-        for change_type in change_groups
-        for item in details[change_type][:detail_limit]
-    ]
-    queue = NotificationQueue(db, enabled=enabled)
-    outcomes: dict[str, int] = {}
-    for user_id in repository.list_summary_recipients():
-        result = queue.enqueue(
-            user_id=user_id,
-            notification_key=f"SCREENER_SUMMARY:{user_id}:{snapshot_id}",
-            notification_type="SCREENER_SUMMARY",
-            entity_id=None,
-            symbol=None,
-            event_key=snapshot_id,
-            severity="LOW",
-            title="Riepilogo screener",
-            message=message,
-            context=context,
-        )
-        outcomes[result.status] = outcomes.get(result.status, 0) + 1
-    return {"status": "SUCCESS", "counts": counts, "outcomes": outcomes}
+            result = queue.enqueue(
+                user_id=recipient_user_id,
+                notification_key=(
+                    f"MARKET_SIGNAL:{collection_type}:{collection_id}:"
+                    f"{snapshot_id}:{identity}:{change_type}"
+                ),
+                notification_type="MARKET_SIGNAL",
+                entity_id=None,
+                symbol=str(symbol),
+                event_key=snapshot_id,
+                severity="LOW",
+                title=f"Segnale screener: {symbol}",
+                message=message,
+                context=context,
+                source_id=str(recipient["source_id"]),
+            )
+            outcomes[result.status] = outcomes.get(result.status, 0) + 1
+    return {"status": "SUCCESS", "outcomes": outcomes}
 
 
 def build_market_screener_ranking(

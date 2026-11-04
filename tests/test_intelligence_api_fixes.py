@@ -44,7 +44,7 @@ def test_collection_intelligence_update_is_scoped_to_authenticated_user(
     database.execute.return_value.scalar_one.return_value = owned
     monkeypatch.setattr(module, "SessionLocal", lambda: database)
     payload = module.CollectionIntelligencePayload(
-        enabled_categories=["NEWS", "NEWS"],
+        enabled_categories=["NEWS", "MARKET_SIGNAL", "NEWS"],
         notification_source_id=UUID(RUN_ID),
     )
     if owned:
@@ -62,7 +62,7 @@ def test_collection_intelligence_update_is_scoped_to_authenticated_user(
         database.commit.assert_not_called()
     parameters = database.execute.call_args.args[1]
     assert parameters["user_id"] == USER_ID
-    assert parameters["categories"] == ["NEWS"]
+    assert parameters["categories"] == ["MARKET_SIGNAL", "NEWS"]
     assert parameters["source_id"] == RUN_ID
     database.close.assert_called_once()
 

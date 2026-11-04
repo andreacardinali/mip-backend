@@ -128,4 +128,122 @@ BEGIN
 END;
 $$;
 
+CREATE OR REPLACE FUNCTION public.sp_resolve_user_notification_target(
+    p_user_id uuid,
+    p_notification_type character varying,
+    p_severity character varying,
+    p_fallback_channel character varying,
+    p_source_id uuid
+) RETURNS TABLE(source_id uuid, channel character varying, resolution_status character varying)
+    LANGUAGE plpgsql STABLE
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT * FROM public.sp_resolve_user_notification_target(
+        p_user_id, p_notification_type, p_severity, p_fallback_channel,
+        p_source_id, NULL::jsonb
+    );
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.sp_resolve_user_notification_target(
+    p_user_id uuid,
+    p_notification_type character varying,
+    p_severity character varying,
+    p_fallback_channel character varying,
+    p_source_id uuid,
+    p_context jsonb
+) RETURNS TABLE(source_id uuid, channel character varying, resolution_status character varying)
+    LANGUAGE plpgsql STABLE
+    AS $$
+DECLARE
+    v_delivery record;
+    v_source public.user_sources%ROWTYPE;
+    v_preference_enabled boolean;
+    v_preference_source_id uuid;
+    v_severity_min character varying;
+    v_has_preference boolean;
+    v_severity_rank integer;
+    v_minimum_rank integer;
+BEGIN
+    SELECT * INTO v_delivery FROM public.sp_get_user_notification_delivery(p_user_id);
+    IF v_delivery.paused THEN
+        RETURN QUERY SELECT NULL::uuid, NULL::varchar, 'PAUSED'::varchar;
+        RETURN;
+    END IF;
+
+    SELECT p.enabled, p.source_id, p.severity_min
+    INTO v_preference_enabled, v_preference_source_id, v_severity_min
+    FROM public.sp_get_user_notification_preferences(p_user_id) p
+    WHERE UPPER(p.notification_type) = UPPER(p_notification_type);
+    v_has_preference := FOUND;
+
+    IF NOT v_has_preference THEN
+        SELECT ns.enabled, ns.source_id, ns.severity_min
+        INTO v_preference_enabled, v_preference_source_id, v_severity_min
+        FROM public.notification_subscriptions ns
+        WHERE ns.user_id = p_user_id
+          AND ns.portfolio_id IS NULL
+          AND UPPER(ns.event_type) = UPPER(p_notification_type);
+        v_has_preference := FOUND;
+    END IF;
+
+    IF v_has_preference AND NOT v_preference_enabled THEN
+        RETURN QUERY SELECT NULL::uuid, NULL::varchar, 'PREFERENCE_DISABLED'::varchar;
+        RETURN;
+    END IF;
+
+    IF v_has_preference AND v_severity_min IS NOT NULL THEN
+        v_severity_rank := CASE UPPER(p_severity)
+            WHEN 'LOW' THEN 1
+            WHEN 'MEDIUM' THEN 2
+            WHEN 'HIGH' THEN 3
+            WHEN 'CRITICAL' THEN 4
+            ELSE 0
+        END;
+        v_minimum_rank := CASE UPPER(v_severity_min)
+            WHEN 'LOW' THEN 1
+            WHEN 'MEDIUM' THEN 2
+            WHEN 'HIGH' THEN 3
+            WHEN 'CRITICAL' THEN 4
+            ELSE 0
+        END;
+        IF v_severity_rank < v_minimum_rank THEN
+            RETURN QUERY SELECT NULL::uuid, NULL::varchar, 'PREFERENCE_DISABLED'::varchar;
+            RETURN;
+        END IF;
+    END IF;
+
+    IF COALESCE(p_context, '{}'::jsonb) ? 'alert_rule_id'
+       AND NOT EXISTS (
+           SELECT 1
+           FROM public.alert_rules ar
+           WHERE ar.rule_id::text = p_context->>'alert_rule_id'
+             AND ar.user_id = p_user_id
+             AND ar.enabled
+             AND UPPER(ar.alert_type) = UPPER(p_notification_type)
+       ) THEN
+        RETURN QUERY SELECT NULL::uuid, NULL::varchar, 'PREFERENCE_DISABLED'::varchar;
+        RETURN;
+    END IF;
+
+    SELECT us.* INTO v_source
+    FROM public.user_sources us
+    WHERE us.user_id = p_user_id
+      AND us.source_id = COALESCE(
+          p_source_id,
+          v_preference_source_id,
+          v_delivery.default_source_id
+      )
+      AND COALESCE((us.config->>'enabled')::boolean, true);
+
+    IF v_source.source_id IS NULL THEN
+        RETURN QUERY SELECT NULL::uuid, NULL::varchar, 'SOURCE_NOT_FOUND'::varchar;
+        RETURN;
+    END IF;
+
+    RETURN QUERY SELECT v_source.source_id, UPPER(v_source.source_type)::varchar, 'RESOLVED'::varchar;
+END;
+$$;
+
 COMMIT;

@@ -154,6 +154,16 @@ class MarketScreenerApiRepository:
             ).scalars()
         ]
 
+    def list_signal_recipients(self, *, instrument_id: str) -> list[dict[str, Any]]:
+        rows = self.db.execute(
+            text(
+                "SELECT * FROM public.sp_market_screener_signal_recipients("
+                "CAST(:instrument_id AS uuid))"
+            ),
+            {"instrument_id": instrument_id},
+        ).mappings()
+        return [dict(row) for row in rows]
+
     def list_snapshot_items(self, snapshot_id):
         return [
             dict(x)

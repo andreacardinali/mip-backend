@@ -40,6 +40,7 @@ class CollectionIntelligencePayload(BaseModel):
             "BREAKING_CATALYST",
             "NEWS",
             "DAILY_PORTFOLIO_REPORT",
+            "MARKET_SIGNAL",
         ]
     ]
     notification_source_id: UUID | None = None

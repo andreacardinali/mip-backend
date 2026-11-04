@@ -126,6 +126,16 @@ def test_alert_rule_management_includes_disabled_owner_rules():
     assert "WHERE r.enabled" not in routine
 
 
+def test_notification_target_resolver_applies_preferences_and_alert_rules():
+    routines = schema_functions("sp_resolve_user_notification_target")
+    routine = next(value for value in routines if "p_context jsonb" in value)
+    assert "sp_get_user_notification_preferences(p_user_id)" in routine
+    assert "v_severity_rank < v_minimum_rank" in routine
+    assert "ar.user_id = p_user_id" in routine
+    assert "ar.enabled" in routine
+    assert "v_preference_source_id" in routine
+
+
 @pytest.mark.parametrize(
     "name",
     ["sp_get_user_notification_preferences", "sp_upsert_user_notification_preference"],
