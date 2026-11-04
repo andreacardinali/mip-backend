@@ -37,7 +37,15 @@ WHERE ar.user_id = ns.user_id
   AND COALESCE((us.config->>'enabled')::boolean, true)
   AND ar.conditions->>'source_id' IS NULL;
 
-CREATE OR REPLACE FUNCTION public.sp_get_user_notification_delivery(p_user_id uuid)
+DROP FUNCTION IF EXISTS public.sp_resolve_user_notification_target(
+    uuid, varchar, varchar, varchar
+);
+DROP FUNCTION IF EXISTS public.sp_resolve_user_notification_target(
+    uuid, varchar, varchar, varchar, uuid
+);
+DROP FUNCTION IF EXISTS public.sp_get_user_notification_delivery(uuid);
+
+CREATE FUNCTION public.sp_get_user_notification_delivery(p_user_id uuid)
 RETURNS TABLE(
     paused boolean,
     default_source_id uuid,
