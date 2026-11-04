@@ -62,6 +62,7 @@ def evaluate_and_enqueue_market_alerts(
         }
     candidate_count = 0
     matches = []
+    timezones: dict[str, str] = {}
     now = datetime.now(UTC)
     market_time = MarketTimeService(
         SQLExchangeHoursRepository(db), ExchangeCalendarsProvider()
@@ -128,7 +129,18 @@ def evaluate_and_enqueue_market_alerts(
                     if candidate.last_price >= candidate.reference_price
                     else "DOWN"
                 )
-            evaluated = evaluate_alerts([selected], [candidate], now=now)
+            if selected.user_id not in timezones:
+                get_timezone = getattr(repo, "display_timezone", None)
+                timezone = get_timezone(selected.user_id) if callable(get_timezone) else "UTC"
+                timezones[selected.user_id] = (
+                    timezone if isinstance(timezone, str) else "UTC"
+                )
+            evaluated = evaluate_alerts(
+                [selected],
+                [candidate],
+                now=now,
+                display_timezone=timezones[selected.user_id],
+            )
             if selected.alert_type in (
                 "FIXED_PRICE",
                 "PERCENT_MOVE",

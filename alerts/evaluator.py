@@ -6,6 +6,7 @@ from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 from math import isfinite
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from alerts.models import AlertCandidate, AlertMatch, AlertRule
 from alerts.rule_configuration import effective_rule
@@ -28,6 +29,18 @@ def observation_time(item: AlertCandidate) -> datetime | None:
         return as_utc(datetime.fromisoformat(item.observed_at or ""))
     except (ValueError, TypeError, OverflowError):
         return None
+
+
+def _format_timestamp(value: str | None, timezone_name: str) -> str:
+    try:
+        timestamp = as_utc(datetime.fromisoformat(value or ""))
+    except (ValueError, TypeError, OverflowError):
+        return value or "Non disponibile"
+    try:
+        timezone = ZoneInfo(timezone_name)
+    except (ZoneInfoNotFoundError, TypeError):
+        timezone = UTC
+    return timestamp.astimezone(timezone).strftime("%Y-%m-%d %H:%M %Z")
 
 
 def candidate_is_eligible(
@@ -144,6 +157,7 @@ def evaluate_alerts(
     candidates: Iterable[AlertCandidate],
     *,
     now: datetime | None = None,
+    display_timezone: str = "UTC",
 ) -> list[AlertMatch]:
     items = list(candidates)
     out = []
@@ -186,11 +200,20 @@ def evaluate_alerts(
                     f"Regola: {rule.name}",
                     f"Prezzo: {item.last_price}",
                     f"Soglia: {selected.conditions['threshold']} ({price_direction})",
-                    f"Osservato: {item.observed_at}",
+                    f"Rilevato: {_format_timestamp(item.observed_at, display_timezone)}",
                 ]
                 if rule.alert_type == "PERCENT_MOVE":
                     change = (item.last_price / item.reference_price - 1) * 100
-                    lines.append(f"Variazione: {change:+.2f}%")
+                    threshold = _number(selected.conditions.get("threshold"), 0)
+                    lines.extend(
+                        [
+                            f"Variazione osservata: {change:+.2f}%",
+                            f"Soglia configurata: {threshold:.2f}% ({price_direction})",
+                            "Riferimento: "
+                            f"{item.reference_price} alla chiusura del "
+                            f"{_format_timestamp(item.reference_at, display_timezone)}",
+                        ]
+                    )
             elif rule.alert_type == "SIGNAL_CHANGE":
                 title = f"{item.symbol}: {item.event_type}"
                 lines = [

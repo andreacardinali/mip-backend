@@ -83,7 +83,27 @@ def test_snapshot_summary_reuses_comparison_and_queue(
         "new_count": 0 if scenario == "unchanged" else 2,
         "changed_count": 0 if scenario == "unchanged" else 1,
         "removed_count": 0 if scenario == "unchanged" else 3,
-        "changes": [{"private_detail": "not exported"}],
+        "opportunity_count": 42,
+        "changes": [
+            {
+                "change_type": "NEW",
+                "current": {"symbol": "AAA", "direction": "BULLISH"},
+                "private_detail": "not exported",
+            },
+            {
+                "change_type": "CHANGED",
+                "current": {
+                    "symbol": "BBB",
+                    "direction": "BEARISH",
+                    "verdict": "WATCH",
+                    "ranking_position": 2,
+                },
+            },
+            {
+                "change_type": "REMOVED",
+                "previous": {"symbol": "CCC", "direction": "BULLISH"},
+            },
+        ],
     }
 
     def get_changes(snapshot_id):
@@ -134,9 +154,35 @@ def test_snapshot_summary_reuses_comparison_and_queue(
                 "new_count": 2,
                 "changed_count": 1,
                 "removed_count": 3,
+                "opportunity_count": 42,
+                "changes": [
+                    {
+                        "change_type": "NEW",
+                        "symbol": "AAA",
+                        "direction": "BULLISH",
+                        "verdict": None,
+                        "ranking_position": None,
+                    },
+                    {
+                        "change_type": "CHANGED",
+                        "symbol": "BBB",
+                        "direction": "BEARISH",
+                        "verdict": "WATCH",
+                        "ranking_position": 2,
+                    },
+                    {
+                        "change_type": "REMOVED",
+                        "symbol": "CCC",
+                        "direction": "BULLISH",
+                        "verdict": None,
+                        "ranking_position": None,
+                    },
+                ],
             }
             assert payload["message"] == (
-                "Nuove entrate: 2\nCambi del segnale: 1\nUscite: 3"
+                "Nuove entrate: 2 (AAA)\n"
+                "Cambi del segnale: 1 (BBB)\n"
+                "Uscite: 3 (CCC)"
             )
 
 

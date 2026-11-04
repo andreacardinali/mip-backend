@@ -11,6 +11,38 @@ CREATE TABLE IF NOT EXISTS public.collection_intelligence_subscriptions (
 );
 
 ALTER TABLE public.collection_intelligence_subscriptions
+    DROP CONSTRAINT IF EXISTS collection_intelligence_subscriptions_enabled_categories_check,
+    DROP CONSTRAINT IF EXISTS collection_intelligence_subscriptions_check,
+    DROP CONSTRAINT IF EXISTS collection_intelligence_categories_check;
+
+ALTER TABLE public.collection_intelligence_subscriptions
+    ADD CONSTRAINT collection_intelligence_categories_check
+    CHECK (enabled_categories <@ ARRAY[
+        'DAILY_MOVER', 'UPCOMING_CATALYST', 'BREAKING_CATALYST', 'NEWS',
+        'DAILY_PORTFOLIO_REPORT'
+    ]::text[]);
+
+CREATE OR REPLACE FUNCTION public.sp_validate_collection_intelligence_categories()
+RETURNS trigger LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF NEW.collection_type <> 'PORTFOLIO'
+       AND 'DAILY_PORTFOLIO_REPORT' = ANY(NEW.enabled_categories) THEN
+        RAISE EXCEPTION 'DAILY_PORTFOLIO_REPORT is only available for portfolios';
+    END IF;
+    RETURN NEW;
+END
+$$;
+
+DROP TRIGGER IF EXISTS collection_intelligence_categories_guard
+    ON public.collection_intelligence_subscriptions;
+CREATE TRIGGER collection_intelligence_categories_guard
+    BEFORE INSERT OR UPDATE OF collection_type, enabled_categories
+    ON public.collection_intelligence_subscriptions
+    FOR EACH ROW
+    EXECUTE FUNCTION public.sp_validate_collection_intelligence_categories();
+
+ALTER TABLE public.collection_intelligence_subscriptions
     ADD COLUMN IF NOT EXISTS notification_source_id uuid
     REFERENCES public.user_sources(source_id) ON DELETE SET NULL;
 

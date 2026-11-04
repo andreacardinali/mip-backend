@@ -329,10 +329,11 @@ def _next_run_time(
 ) -> datetime | None:
     next_run_time = getattr(scheduled_job, "next_run_time", None)
     if next_run_time is not None:
-        return next_run_time
+        return next_run_time.astimezone(UTC)
 
     now = datetime.now(scheduler.timezone)
-    return trigger.get_next_fire_time(None, now)
+    next_run_time = trigger.get_next_fire_time(None, now)
+    return next_run_time.astimezone(UTC) if next_run_time is not None else None
 
 
 def recover_stale_runs() -> int:

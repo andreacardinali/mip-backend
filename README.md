@@ -1563,6 +1563,12 @@ Existing severity formulas are unchanged and are not mathematically proportional
 to portfolio impact. NEWS retains the Breaking Catalyst queue type with a NEWS
 category in its notification context.
 
+The separate `daily_portfolio_report` job runs daily at 21:00 in the scheduler
+timezone. It sends an aggregate summary only to portfolios opted into
+`DAILY_PORTFOLIO_REPORT`, using the selected notification destination when set
+and otherwise the user's default. It is independent of `DAILY_MOVER` and the
+shared intelligence event pipeline.
+
 Collection membership is deduplicated before valuation. Missing or nonpositive
 prices and unavailable FX leave market values unknown. Allocation is unavailable
 for every position in a portfolio if any nonzero position cannot be valued;
@@ -1572,7 +1578,8 @@ Review and validate `oneshot/install_collection_intelligence.sql` against the
 current PostgreSQL schema, back up the development database, and manually install
 it before running the updated APIs/jobs. It installs subscription routines, shared
 coverage, shared-event persistence and research history, plus per-collection
-notification destinations, in one transaction.
+notification destinations, the portfolio-report category constraint, and its
+collection-type guard, in one transaction.
 No SQL is run on startup.
 Offline tests mock the database and providers; they do not certify the SQL runtime.
 

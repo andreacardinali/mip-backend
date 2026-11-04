@@ -33,7 +33,13 @@ def _serialize_row(row) -> dict:
 
 class CollectionIntelligencePayload(BaseModel):
     enabled_categories: list[
-        Literal["DAILY_MOVER", "UPCOMING_CATALYST", "BREAKING_CATALYST", "NEWS"]
+        Literal[
+            "DAILY_MOVER",
+            "UPCOMING_CATALYST",
+            "BREAKING_CATALYST",
+            "NEWS",
+            "DAILY_PORTFOLIO_REPORT",
+        ]
     ]
     notification_source_id: UUID | None = None
 
@@ -76,6 +82,14 @@ def update_collection_intelligence(
     payload: CollectionIntelligencePayload,
     current_user: CurrentUser = Depends(get_current_user),
 ):
+    if (
+        collection_type != "PORTFOLIO"
+        and "DAILY_PORTFOLIO_REPORT" in payload.enabled_categories
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="DAILY_PORTFOLIO_REPORT is only available for portfolios",
+        )
     db = SessionLocal()
     try:
         saved = db.execute(

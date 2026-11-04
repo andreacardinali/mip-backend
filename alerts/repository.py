@@ -152,6 +152,17 @@ class AlertRepository:
             for r in rows
         ]
 
+    def display_timezone(self, user_id: str) -> str:
+        return str(
+            self.db.execute(
+                text(
+                    "SELECT public.sp_get_user_display_timezone(CAST(:user_id AS uuid))"
+                ),
+                {"user_id": user_id},
+            ).scalar()
+            or "UTC"
+        )
+
     def list_rule_candidates(
         self, rule_id: str, *, limit: int = 500
     ) -> list[dict[str, Any]]:

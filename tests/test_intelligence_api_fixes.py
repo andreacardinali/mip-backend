@@ -1,8 +1,10 @@
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 import pytest
 from fastapi import HTTPException
@@ -13,6 +15,23 @@ from routers import portfolios, positions, watchlist_items
 USER_ID = "00000000-0000-0000-0000-000000000001"
 JOB_ID = "00000000-0000-0000-0000-000000000002"
 RUN_ID = "00000000-0000-0000-0000-000000000003"
+
+
+@pytest.mark.parametrize(
+    ("fold", "expected_utc"),
+    [
+        (0, datetime(2025, 10, 26, 0, 30, tzinfo=UTC)),
+        (1, datetime(2025, 10, 26, 1, 30, tzinfo=UTC)),
+    ],
+)
+def test_scheduler_next_run_time_normalizes_dst_fold_to_utc(fold, expected_utc):
+    from scheduler import _next_run_time
+
+    local_time = datetime(
+        2025, 10, 26, 2, 30, tzinfo=ZoneInfo("Europe/Rome"), fold=fold
+    )
+
+    assert _next_run_time(SimpleNamespace(next_run_time=local_time), None) == expected_utc
 
 
 @pytest.mark.parametrize("owned", [True, False])
@@ -46,6 +65,28 @@ def test_collection_intelligence_update_is_scoped_to_authenticated_user(
     assert parameters["categories"] == ["NEWS"]
     assert parameters["source_id"] == RUN_ID
     database.close.assert_called_once()
+
+
+@pytest.mark.parametrize("collection_type", ["WATCHLIST", "UNIVERSE"])
+def test_daily_portfolio_report_category_is_rejected_for_non_portfolios(
+    monkeypatch, collection_type
+):
+    from routers import notification_preferences as module
+
+    database = MagicMock()
+    monkeypatch.setattr(module, "SessionLocal", lambda: database)
+    payload = module.CollectionIntelligencePayload(
+        enabled_categories=["DAILY_PORTFOLIO_REPORT"]
+    )
+
+    with pytest.raises(HTTPException) as error:
+        module.update_collection_intelligence(
+            collection_type, UUID(JOB_ID), payload, {"user_id": USER_ID}
+        )
+
+    assert error.value.status_code == 422
+    database.execute.assert_not_called()
+    database.close.assert_not_called()
 
 
 @pytest.mark.parametrize("operation", ["entities", "cache", "prices"])

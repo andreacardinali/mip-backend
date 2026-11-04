@@ -51,6 +51,27 @@ def test_match():
     )
 
 
+def test_percent_move_message_separates_observed_change_and_threshold_in_user_timezone():
+    selected = replace(rule(threshold=5), alert_type="PERCENT_MOVE")
+    candidate = item(
+        last_price=106,
+        reference_price=100,
+        reference_at="2026-06-01T11:00:00+00:00",
+        observed_at="2026-06-01T12:00:00+00:00",
+    )
+    match = evaluate_alerts(
+        [selected],
+        [candidate],
+        now=datetime(2026, 6, 1, 12, tzinfo=UTC),
+        display_timezone="Europe/Rome",
+    )[0]
+
+    assert "Variazione osservata: +6.00%" in match.message
+    assert "Soglia configurata: 5.00% (ANY)" in match.message
+    assert "Rilevato: 2026-06-01 14:00 CEST" in match.message
+    assert "chiusura del 2026-06-01 13:00 CEST" in match.message
+
+
 def test_conflict_rejected():
     assert (
         evaluate_alerts([rule(max_conflict_score=0.2)], [item(conflict_score=0.5)])
