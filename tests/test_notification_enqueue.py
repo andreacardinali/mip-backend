@@ -1,6 +1,7 @@
 import runpy
 import sys
 import unittest
+from datetime import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -186,6 +187,7 @@ def test_delivery_api_saves_authenticated_owner(notification_api, paused, source
         json={
             "paused": paused,
             "default_source_id": source_id,
+            "daily_portfolio_report_time": "21:00",
         },
     )
     assert response.status_code == 200
@@ -195,6 +197,7 @@ def test_delivery_api_saves_authenticated_owner(notification_api, paused, source
         "user_id": authentication["user"]["user_id"],
         "paused": paused,
         "source_id": source_id.lower() if source_id else None,
+        "report_time": time(21, 0),
     }
     assert response.json()["delivery"] == {"paused": False, "default_source_id": None}
     database.commit.assert_called_once_with()
@@ -207,10 +210,27 @@ def test_delivery_api_saves_authenticated_owner(notification_api, paused, source
     [
         {},
         {"paused": True},
-        {"paused": "false", "default_source_id": None},
-        {"paused": 0, "default_source_id": None},
-        {"paused": False, "default_source_id": "invalid"},
-        {"paused": False, "default_source_id": None, "user_id": "other"},
+        {
+            "paused": "false",
+            "default_source_id": None,
+            "daily_portfolio_report_time": "21:00",
+        },
+        {
+            "paused": 0,
+            "default_source_id": None,
+            "daily_portfolio_report_time": "21:00",
+        },
+        {
+            "paused": False,
+            "default_source_id": "invalid",
+            "daily_portfolio_report_time": "21:00",
+        },
+        {
+            "paused": False,
+            "default_source_id": None,
+            "daily_portfolio_report_time": "21:00",
+            "user_id": "other",
+        },
     ],
 )
 def test_delivery_api_rejects_invalid_payload_before_database(
@@ -235,6 +255,7 @@ def test_delivery_api_rolls_back_database_errors(notification_api, sqlstate, sta
         json={
             "paused": False,
             "default_source_id": None,
+            "daily_portfolio_report_time": "21:00",
         },
     )
     assert response.status_code == status
