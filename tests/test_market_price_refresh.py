@@ -75,3 +75,43 @@ def test_price_refresh_batches_quotes_and_retries_only_failed_item(monkeypatch):
             }
         ],
     }
+
+
+def test_scheduled_worker_discovers_candidates_before_processing(monkeypatch):
+    from jobs.market_price_refresh import worker
+
+    events = []
+
+    class DiscoverySession:
+        def commit(self):
+            events.append("commit")
+
+        def rollback(self):
+            events.append("rollback")
+
+        def close(self):
+            events.append("close")
+
+    monkeypatch.setattr(worker, "SessionLocal", DiscoverySession)
+    monkeypatch.setattr(
+        worker,
+        "enqueue_stale_market_price_refreshes",
+        lambda db: events.append("discover")
+        or {"candidates_count": 8, "enqueued_count": 6},
+    )
+    monkeypatch.setattr(
+        worker,
+        "process_price_refresh_queue",
+        lambda: events.append("process")
+        or {"status": "SUCCESS", "claimed": 6},
+    )
+
+    result = worker.run()
+
+    assert events == ["discover", "commit", "close", "process"]
+    assert result == {
+        "status": "SUCCESS",
+        "claimed": 6,
+        "candidates_discovered": 8,
+        "candidates_enqueued": 6,
+    }

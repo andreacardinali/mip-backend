@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, replace
+from datetime import UTC, datetime
 from typing import Any
 
 from market_analysis.lifecycle import (
@@ -20,6 +21,7 @@ from market_analysis.scan import (
     ScanResult,
     scan_members,
 )
+from market_time.repository import SQLExchangeHoursRepository
 from services.market_analysis_lake import save_scan_evaluations
 
 
@@ -77,6 +79,19 @@ def run_member_analysis_scan(
     effective_config = config or ScanConfig()
     quant_config = quant_config or QuantPrefilterConfig()
     repository = MarketAnalysisRepository(db)
+    exchange_codes = tuple(
+        sorted(
+            {
+                exchange
+                for member in members
+                if (exchange := getattr(member, "exchange", None))
+            }
+        )
+    )
+    exchange_timezones = SQLExchangeHoursRepository(db).get_exchange_timezones(
+        exchange_codes
+    )
+    observed_at = datetime.now(UTC)
     run_id = repository.start_scan_run(
         universe_id=universe_id,
         config={**asdict(effective_config), "quant": asdict(quant_config)},
@@ -98,6 +113,8 @@ def run_member_analysis_scan(
                     batch_members,
                     market_data_service=market_data_service,
                     config=effective_config,
+                    observed_at=observed_at,
+                    exchange_timezones=exchange_timezones,
                 )
                 scan_parts.append(batch_result)
             scanned = ScanResult(
@@ -116,6 +133,8 @@ def run_member_analysis_scan(
                 members,
                 market_data_service=market_data_service,
                 config=effective_config,
+                observed_at=observed_at,
+                exchange_timezones=exchange_timezones,
             )
 
         quant_results = prefilter_evaluated_signals(

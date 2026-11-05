@@ -1,6 +1,6 @@
 import json
 
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 from sqlalchemy.orm import Session
 
 from market_data.models import ExchangeReference
@@ -25,6 +25,26 @@ class SQLExchangeHoursRepository:
             .one_or_none()
         )
         return ExchangeHours(**row) if row is not None else None
+
+    def get_exchange_timezones(self, exchanges: tuple[str, ...]) -> dict[str, str]:
+        if not exchanges:
+            return {}
+        rows = (
+            self.db.execute(
+                text(
+                    "SELECT exchange, timezone_name "
+                    "FROM public.exchanges WHERE exchange IN :exchanges"
+                ).bindparams(bindparam("exchanges", expanding=True)),
+                {"exchanges": exchanges},
+            )
+            .mappings()
+            .all()
+        )
+        return {
+            row["exchange"]: row["timezone_name"]
+            for row in rows
+            if row["timezone_name"]
+        }
 
 
 class SQLExchangeRepository:

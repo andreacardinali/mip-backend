@@ -63,6 +63,19 @@ Screener installers, then restart
 the updated processes. Scheduler bootstrap discovers the job manifests. No
 installation SQL runs automatically at application startup.
 
+## Scheduled Market Price Refresh
+
+The scheduled market-price refresh first discovers stale instruments from
+currently valid members of active market universes, portfolio positions and
+watchlists, then processes the shared refresh queue. Discovery uses the same
+30-second freshness threshold and deduplicated queue routine as user-triggered
+refreshes; the authenticated refresh endpoint remains user-scoped.
+
+Before enabling the updated scheduled worker on an existing database, manually
+apply `oneshot/install_market_price_refresh_discovery.sql`. The installer is
+temporary operational SQL and does not run on application startup. Its
+candidate and enqueue counts are reported by the scheduled job.
+
 For overview analysis diagnostics, review and manually apply
 `oneshot/install_screener_run_diagnostics.sql` after the execution-request
 installer. It preserves the existing scheduler recovery lock and synchronizes

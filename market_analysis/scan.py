@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Protocol
+from zoneinfo import ZoneInfo
 
 from market_analysis.models import ScoreBreakdown, SignalCandidate
 from market_analysis.scoring import build_score_breakdown, score_technical_snapshot
@@ -189,7 +190,31 @@ def _evaluate(member, bars, config, snapshot=None):
     )
 
 
-def evaluate_member(member, *, market_data_service, config, observed_at=None):
+def _as_utc(value):
+    if value is None:
+        return datetime.now(UTC)
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+def _completed_bars(bars, config, observed_at, timezone_name=None):
+    if config.interval.lower() not in {"d", "1d", "1day"}:
+        return bars
+    timezone = ZoneInfo(timezone_name) if timezone_name else UTC
+    today = observed_at.astimezone(timezone).date()
+    return [
+        bar
+        for bar in bars
+        if datetime.fromtimestamp(bar.timestamp, UTC).astimezone(timezone).date()
+        < today
+    ]
+
+
+def evaluate_member(
+    member, *, market_data_service, config, observed_at=None, exchange_timezone=None
+):
+    observed_at = _as_utc(observed_at)
     bars = market_data_service.get_ohlcv(
         HistoryRequest(
             instrument=member.to_reference(),
@@ -197,6 +222,7 @@ def evaluate_member(member, *, market_data_service, config, observed_at=None):
             interval=config.interval,
         )
     )
+    bars = _completed_bars(bars, config, observed_at, exchange_timezone)
     if len(bars) < config.minimum_bars:
         raise ValueError(
             f"insufficient history: {len(bars)} bars; minimum {config.minimum_bars}"
@@ -205,7 +231,15 @@ def evaluate_member(member, *, market_data_service, config, observed_at=None):
     return values[0] if values else None
 
 
-def scan_members(members, *, market_data_service, config):
+def scan_members(
+    members,
+    *,
+    market_data_service,
+    config,
+    observed_at=None,
+    exchange_timezones=None,
+):
+    observed_at = _as_utc(observed_at)
     candidates = []
     failures = []
     skipped = []
@@ -251,6 +285,8 @@ def scan_members(members, *, market_data_service, config):
                 bars = fetch_result.value
                 if bars is None:
                     raise ValueError("OHLCV batch result has no value")
+                timezone_name = (exchange_timezones or {}).get(member.exchange)
+                bars = _completed_bars(bars, config, observed_at, timezone_name)
                 if len(bars) < config.minimum_bars:
                     skipped.append(
                         ScanSkip(

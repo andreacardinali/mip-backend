@@ -70,6 +70,26 @@ def enqueue_user_price_refreshes(
     }
 
 
+def enqueue_stale_market_price_refreshes(
+    db: Session,
+    *,
+    max_age_seconds: int = LIVE_PRICE_MAX_AGE_SECONDS,
+) -> dict:
+    row = db.execute(
+        text(
+            """
+            SELECT candidates_count, enqueued_count
+            FROM sp_market_data_enqueue_stale_prices(:max_age_seconds)
+            """
+        ),
+        {"max_age_seconds": max_age_seconds},
+    ).one()
+    return {
+        "candidates_count": int(row.candidates_count),
+        "enqueued_count": int(row.enqueued_count),
+    }
+
+
 def _claim_due_jobs(db: Session, worker_id: str) -> list[dict]:
     db.execute(
         text(

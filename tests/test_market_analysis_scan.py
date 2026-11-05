@@ -80,6 +80,65 @@ def test_evaluate_member_uses_market_data_service() -> None:
         assert result.scores.technical is not None
 
 
+def test_scan_excludes_current_day_daily_bar_from_snapshot() -> None:
+    class SameDayMarketData(FakeMarketData):
+        def get_ohlcv(self, request):
+            bars = super().get_ohlcv(request)
+            bars.append(
+                PriceBar(
+                    timestamp=int(datetime(2026, 10, 23, 12, tzinfo=UTC).timestamp()),
+                    open=999,
+                    high=1000,
+                    low=998,
+                    close=999,
+                    volume=1000,
+                )
+            )
+            return bars
+
+    result = scan_members(
+        [member()],
+        market_data_service=SameDayMarketData(),
+        config=ScanConfig(minimum_bars=200),
+        observed_at=datetime(2026, 10, 23, tzinfo=UTC),
+    )
+
+    evaluation = result.evaluations[0]
+    prior_bar_timestamp = 1_700_000_000 + 219 * 86400
+    assert evaluation.bar_count == 220
+    assert evaluation.snapshot["market_price"] == 105.0
+    assert evaluation.snapshot["observed_timestamp"] == prior_bar_timestamp
+
+
+def test_scan_uses_exchange_local_day_for_daily_bar_cutoff() -> None:
+    class ExchangeLocalSameDayMarketData(FakeMarketData):
+        def get_ohlcv(self, request):
+            bars = super().get_ohlcv(request)
+            bars.append(
+                PriceBar(
+                    timestamp=int(datetime(2026, 10, 22, 18, tzinfo=UTC).timestamp()),
+                    open=999,
+                    high=1000,
+                    low=998,
+                    close=999,
+                    volume=1000,
+                )
+            )
+            return bars
+
+    result = scan_members(
+        [member()],
+        market_data_service=ExchangeLocalSameDayMarketData(),
+        config=ScanConfig(minimum_bars=200),
+        observed_at=datetime(2026, 10, 23, 2, tzinfo=UTC),
+        exchange_timezones={"XNAS": "America/New_York"},
+    )
+
+    evaluation = result.evaluations[0]
+    assert evaluation.bar_count == 220
+    assert evaluation.snapshot["market_price"] == 105.0
+
+
 def test_scan_isolates_provider_failure() -> None:
     result = scan_members(
         [member("GOOD"), member("BAD")],
