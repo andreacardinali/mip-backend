@@ -36,7 +36,7 @@ execution status, result and error; another user's execution returns 404.
 | `POST /api/screener/analyze` | `market_screener_context_analysis` | `SCREENER_UI` |
 | `POST /api/admin/entities/refresh` | `refresh_entities` | `ENTITIES_UI` |
 | `POST /api/admin/cache/cleanup` | `market_cache_cleanup` | `CACHE_UI` |
-| `POST /api/market-data/prices/refresh` | `market_price_refresh_request` | `PRICE_REFRESH_UI` |
+| `POST /api/market-data/prices/refresh` | `market_price_refresh_dispatcher` | `PRICE_REFRESH_UI` |
 | `POST /api/admin/system/scheduler/jobs/{job_key}/run` | Requested ordinary job | `ADMIN_UI` |
 
 Each started job logs its caller (`MANUAL`, `SCHEDULE`, or `JOB` for a nested
@@ -1546,9 +1546,11 @@ upgrade rolls back its transaction; rerun the corrected runner after a failure.
 Apply the migration before starting the updated backend. Restart the scheduler
 with the price-refresh dispatcher enabled. Also apply
 `oneshot/install_scheduler_execution_requests.sql` as described above:
-`/api/market-data/prices/refresh` returns HTTP 202 with a scheduler ticket, and its
-request worker subsequently populates the specialist price queue. The frontend
-must be upgraded with the backend. Job locks use
+`/api/market-data/prices/refresh` returns HTTP 202 with a scheduler ticket for the
+global `market_price_refresh_dispatcher`. The dispatcher discovers stale prices
+across active universes, positions and watchlists for all users, then processes
+up to 20 queued instruments per run. The frontend must be upgraded with the backend.
+Job locks use
 a dedicated database connection throughout each execution; size the connection
 pool accordingly and ensure server idle-in-transaction timeouts allow job runs.
 

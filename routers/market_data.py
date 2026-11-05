@@ -26,13 +26,13 @@ def currencies(current_user: CurrentUser = Depends(get_current_user)):
 
 
 @router.post("/prices/refresh", status_code=202)
-def refresh_user_prices(
+def refresh_market_prices(
     current_user: CurrentUser = Depends(get_current_user),
 ):
     db = SessionLocal()
     try:
         result = SchedulerRepository(db).request_run(
-            job_key="market_price_refresh_request",
+            job_key="market_price_refresh_dispatcher",
             requested_by=current_user["user_id"],
             payload={},
             source="PRICE_REFRESH_UI",

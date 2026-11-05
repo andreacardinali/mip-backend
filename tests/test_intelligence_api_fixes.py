@@ -154,9 +154,10 @@ def test_live_price_frontend_awaits_scheduler_before_polling():
         encoding="utf-8"
     )
     assert 'api.post<ExecutionRequest>("/market-data/prices/refresh"' in provider
+    assert "result.candidates_enqueued" in provider
     assert "response.data.job_run_id" in provider
     assert "await waitForJobRun" in provider
-    assert "if (result.enqueued_count > 0)" in provider
+    assert "if (result.candidates_enqueued > 0 || result.claimed > 0)" in provider
     assert "response.data.enqueued_count" not in provider
 
 
@@ -174,14 +175,14 @@ def test_price_refresh_api_only_enqueues_scheduler_request(monkeypatch, failed):
     monkeypatch.setattr(market_data, "SchedulerRepository", lambda session: repository)
     if failed:
         with pytest.raises(RuntimeError, match="queue unavailable"):
-            market_data.refresh_user_prices({"user_id": USER_ID})
+            market_data.refresh_market_prices({"user_id": USER_ID})
         db.rollback.assert_called_once()
         db.commit.assert_not_called()
     else:
-        assert market_data.refresh_user_prices({"user_id": USER_ID}) == ticket
+        assert market_data.refresh_market_prices({"user_id": USER_ID}) == ticket
         db.commit.assert_called_once()
     repository.request_run.assert_called_once_with(
-        job_key="market_price_refresh_request",
+        job_key="market_price_refresh_dispatcher",
         requested_by=USER_ID,
         payload={},
         source="PRICE_REFRESH_UI",
