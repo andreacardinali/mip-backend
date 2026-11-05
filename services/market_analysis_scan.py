@@ -89,96 +89,129 @@ def run_member_analysis_scan(
         if incremental:
             db.commit()
             parts = []
-            for index, member in enumerate(members):
+            for batch_start in range(
+                0, len(members), effective_config.instrument_batch_size
+            ):
+                batch_members = members[
+                    batch_start : batch_start + effective_config.instrument_batch_size
+                ]
                 if on_progress:
-                    on_progress(index, len(members), member.symbol)
-                part = scan_members(
-                    [member],
+                    on_progress(batch_start, len(members), batch_members[0].symbol)
+                batch_result = scan_members(
+                    batch_members,
                     market_data_service=market_data_service,
                     config=effective_config,
                 )
-                try:
-                    member_assessment_ids = save_scan_evaluations(
-                        db,
-                        repository,
-                        run_id=run_id,
-                        members=[member],
-                        result=part,
-                        config=effective_config,
-                        quant_config=quant_config,
+                for batch_offset, member in enumerate(batch_members):
+                    index = batch_start + batch_offset
+                    instrument_id = str(member.instrument_id)
+                    part = ScanResult(
+                        processed=1,
+                        candidates=tuple(
+                            item
+                            for item in batch_result.candidates
+                            if str(item.member.instrument_id) == instrument_id
+                        ),
+                        failures=tuple(
+                            item
+                            for item in batch_result.failures
+                            if str(item.instrument_id) == instrument_id
+                        ),
+                        skipped=tuple(
+                            item
+                            for item in batch_result.skipped
+                            if str(item.instrument_id) == instrument_id
+                        ),
+                        evaluations=tuple(
+                            item
+                            for item in batch_result.evaluations
+                            if str(item.instrument_id) == instrument_id
+                        ),
                     )
-                    member_signal_ids = []
-                    for evaluated in part.candidates:
-                        quant_score, breakdown = score_evaluated_signal(
-                            evaluated, config=quant_config
+                    try:
+                        member_assessment_ids = save_scan_evaluations(
+                            db,
+                            repository,
+                            run_id=run_id,
+                            members=[member],
+                            result=part,
+                            config=effective_config,
+                            quant_config=quant_config,
                         )
-                        candidate = replace(
-                            evaluated.candidate,
-                            evidence={
-                                **evaluated.candidate.evidence,
-                                **(
-                                    {
-                                        "assessment_event_id": member_assessment_ids[
-                                            str(member.instrument_id)
-                                        ]
-                                    }
-                                    if str(member.instrument_id)
-                                    in member_assessment_ids
-                                    else {}
-                                ),
-                                "quant": {
-                                    "score": quant_score,
-                                    "breakdown": breakdown,
-                                    "llm_eligible": False,
-                                },
-                            },
-                        )
-                        member_signal_ids.append(
-                            repository.upsert_signal(
-                                instrument_id=member.instrument_id,
-                                universe_id=member.universe_id,
-                                candidate=candidate,
-                                scores=evaluated.scores.to_dict(),
+                        member_signal_ids = []
+                        for evaluated in part.candidates:
+                            quant_score, breakdown = score_evaluated_signal(
+                                evaluated, config=quant_config
                             )
+                            candidate = replace(
+                                evaluated.candidate,
+                                evidence={
+                                    **evaluated.candidate.evidence,
+                                    **(
+                                        {
+                                            "assessment_event_id": member_assessment_ids[
+                                                str(member.instrument_id)
+                                            ]
+                                        }
+                                        if str(member.instrument_id)
+                                        in member_assessment_ids
+                                        else {}
+                                    ),
+                                    "quant": {
+                                        "score": quant_score,
+                                        "breakdown": breakdown,
+                                        "llm_eligible": False,
+                                    },
+                                },
+                            )
+                            member_signal_ids.append(
+                                repository.upsert_signal(
+                                    instrument_id=member.instrument_id,
+                                    universe_id=member.universe_id,
+                                    candidate=candidate,
+                                    scores=evaluated.scores.to_dict(),
+                                )
+                            )
+                        events = (
+                            reconcile_persisted_signals(
+                                db, member_signal_ids, stability_minutes=30
+                            )
+                            if member_signal_ids
+                            else []
                         )
-                    events = (
-                        reconcile_persisted_signals(
-                            db, member_signal_ids, stability_minutes=30
+                        expired = expire_evaluated_signals(
+                            db, part, member_signal_ids
                         )
-                        if member_signal_ids
-                        else []
-                    )
-                    expired = expire_evaluated_signals(db, part, member_signal_ids)
-                    for failure in part.failures:
+                        for failure in part.failures:
+                            repository.record_scan_failure(
+                                run_id=run_id,
+                                instrument_id=failure.instrument_id,
+                                symbol=failure.symbol,
+                                reason=failure.reason,
+                            )
+                        db.commit()
+                    except Exception as error:
+                        db.rollback()
+                        failure = ScanFailure(
+                            instrument_id=member.instrument_id,
+                            symbol=member.symbol,
+                            reason=f"Persistence failed: {error}"[:500],
+                        )
                         repository.record_scan_failure(
                             run_id=run_id,
                             instrument_id=failure.instrument_id,
                             symbol=failure.symbol,
                             reason=failure.reason,
                         )
-                    db.commit()
-                except Exception as error:
-                    db.rollback()
-                    failure = ScanFailure(
-                        instrument_id=member.instrument_id,
-                        symbol=member.symbol,
-                        reason=f"Persistence failed: {error}"[:500],
-                    )
-                    repository.record_scan_failure(
-                        run_id=run_id,
-                        instrument_id=failure.instrument_id,
-                        symbol=failure.symbol,
-                        reason=failure.reason,
-                    )
-                    db.commit()
-                    part = ScanResult(processed=1, candidates=(), failures=(failure,))
-                else:
-                    assessment_ids.update(member_assessment_ids)
-                    member_lifecycle_events.extend(events)
-                    member_expired_signals += expired
-                parts.append(part)
-                if on_progress:
-                    on_progress(index + 1, len(members), member.symbol)
+                        db.commit()
+                        part = ScanResult(processed=1, candidates=(), failures=(failure,))
+                    else:
+                        assessment_ids.update(member_assessment_ids)
+                        member_lifecycle_events.extend(events)
+                        member_expired_signals += expired
+                    parts.append(part)
+                    if on_progress:
+                        on_progress(index + 1, len(members), member.symbol)
             result = ScanResult(
                 processed=len(members),
                 candidates=tuple(item for part in parts for item in part.candidates),

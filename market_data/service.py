@@ -13,6 +13,7 @@ from market_data.exceptions import (
     StaleMarketPriceError,
 )
 from market_data.models import (
+    BatchResult,
     ExchangeRateSnapshot,
     HistoryRequest,
     InstrumentProfile,
@@ -109,6 +110,9 @@ class MarketDataService:
             required=required,
         )
 
+    def get_quote_batch(self, references):
+        return _batch_map(references, lambda reference: self.get_quote(reference))
+
     def _validated_quote(self, provider, reference):
         quote = provider.get_quote(reference)
         if quote.timestamp is None:
@@ -141,6 +145,9 @@ class MarketDataService:
             lambda provider: provider.get_ohlcv(request),
             interval=request.interval,
         )
+
+    def get_ohlcv_batch(self, requests):
+        return _batch_map(requests, self.get_ohlcv)
 
     def get_exchange_rates(
         self, *, required: bool = True
@@ -259,6 +266,16 @@ class MarketDataService:
 
 def _has_fields(profile: InstrumentProfile, required: set[str]) -> bool:
     return all(getattr(profile, field, None) is not None for field in required)
+
+
+def _batch_map(items, operation):
+    results = []
+    for item in items:
+        try:
+            results.append(BatchResult(value=operation(item)))
+        except Exception as error:
+            results.append(BatchResult(error=error))
+    return results
 
 
 def _merge_profiles(profiles: list[InstrumentProfile]) -> InstrumentProfile:

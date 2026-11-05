@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from db import SessionLocal
 from market_data.factory import market_data
-from market_data.models import InstrumentReference
+from market_data.models import BatchResult, InstrumentReference
 
 logger = logging.getLogger(__name__)
 
@@ -239,15 +239,44 @@ def process_price_refresh_queue() -> dict:
     failed = 0
     errors: list[dict] = []
 
-    for job in jobs:
+    if jobs:
+        references = [
+            InstrumentReference(symbol=str(job["symbol"])) for job in jobs
+        ]
+        get_quote_batch = getattr(market_data, "get_quote_batch", None)
+        if get_quote_batch is None:
+            quote_results = []
+            for reference in references:
+                try:
+                    quote_results.append(
+                        BatchResult(
+                            value=market_data.get_quote(reference, required=True)
+                        )
+                    )
+                except Exception as error:
+                    quote_results.append(BatchResult(error=error))
+        else:
+            try:
+                quote_results = get_quote_batch(references)
+                if len(quote_results) != len(jobs):
+                    raise ValueError(
+                        "Quote batch result count does not match request count"
+                    )
+            except Exception as error:
+                quote_results = [BatchResult(error=error) for _ in jobs]
+    else:
+        quote_results = []
+
+    for job, quote_result in zip(jobs, quote_results):
         symbol = str(job["symbol"])
         started_at = datetime.now(UTC)
 
         try:
-            quote = market_data.get_quote(
-                InstrumentReference(symbol=symbol),
-                required=True,
-            )
+            if quote_result.error is not None:
+                raise quote_result.error
+            quote = quote_result.value
+            if quote is None:
+                raise RuntimeError("Provider returned no market quote")
             if quote.price is None or quote.timestamp is None:
                 raise RuntimeError("Provider returned an incomplete market quote")
 

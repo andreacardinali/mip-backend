@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 
 from market_analysis.scan import ScanConfig, ScanMember, evaluate_member, scan_members
-from market_data.models import PriceBar
+from market_data.models import BatchResult, PriceBar
 
 
 class FakeMarketData:
@@ -90,3 +90,32 @@ def test_scan_isolates_provider_failure() -> None:
     assert len(result.failures) == 1
     assert result.failures[0].symbol == "BAD"
     assert result.to_dict()["evaluated_instrument_ids"] == ["i-GOOD"]
+
+
+def test_scan_batches_requests_and_isolates_item_failures() -> None:
+    class BatchMarketData(FakeMarketData):
+        def __init__(self):
+            super().__init__(failing_symbol="BAD")
+            self.batches = []
+
+        def get_ohlcv_batch(self, requests):
+            self.batches.append([request.instrument.symbol for request in requests])
+            results = []
+            for request in requests:
+                try:
+                    results.append(BatchResult(value=self.get_ohlcv(request)))
+                except Exception as error:
+                    results.append(BatchResult(error=error))
+            return results
+
+    market_data = BatchMarketData()
+    result = scan_members(
+        [member("GOOD"), member("BAD"), member("NEXT")],
+        market_data_service=market_data,
+        config=ScanConfig(minimum_bars=200, instrument_batch_size=2),
+    )
+
+    assert market_data.batches == [["GOOD", "BAD"], ["NEXT"]]
+    assert result.processed == 3
+    assert [failure.symbol for failure in result.failures] == ["BAD"]
+    assert result.to_dict()["evaluated_instrument_ids"] == ["i-GOOD", "i-NEXT"]

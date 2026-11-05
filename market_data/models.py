@@ -128,6 +128,12 @@ class MarketQuote:
 
 
 @dataclass(frozen=True, slots=True)
+class BatchResult:
+    value: Any = None
+    error: Exception | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class PricePoint:
     timestamp: int
     price: float

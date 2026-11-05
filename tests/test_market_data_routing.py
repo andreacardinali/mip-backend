@@ -61,3 +61,29 @@ def test_falls_back_after_not_found():
         )
     )
     assert rows[0].timestamp == 3
+
+
+def test_ohlcv_batch_preserves_order_and_isolates_failures():
+    class SymbolFake(Fake):
+        def get_ohlcv(self, request):
+            if request.instrument.symbol == "BAD":
+                raise InstrumentNotFoundError("BAD")
+            return [PriceBar(4, 4, 4, 4, 4)]
+
+    provider = SymbolFake("first", {InstrumentType.STOCK})
+    service = MarketDataService(
+        ProviderRegistry([provider]), config(["first"])
+    )
+    results = service.get_ohlcv_batch(
+        [
+            HistoryRequest(
+                InstrumentReference(symbol=symbol, instrument_type=InstrumentType.STOCK)
+            )
+            for symbol in ("GOOD", "BAD", "NEXT")
+        ]
+    )
+
+    assert len(results) == 3
+    assert results[0].value[0].timestamp == 4
+    assert isinstance(results[1].error, Exception)
+    assert results[2].value[0].timestamp == 4

@@ -107,7 +107,11 @@ def test_incremental_scan_commits_each_member_before_loading_next(monkeypatch):
             market_data_service=object(),
             universe_id="universe",
             universe_code="context",
-            members=[SimpleNamespace(symbol="FIRST"), SimpleNamespace(symbol="SECOND")],
+            members=[
+                SimpleNamespace(symbol="FIRST", instrument_id="FIRST"),
+                SimpleNamespace(symbol="SECOND", instrument_id="SECOND"),
+            ],
+            config=ScanConfig(instrument_batch_size=1),
             incremental=True,
         )
     assert events == [
@@ -168,6 +172,7 @@ def test_incremental_scan_continues_after_member_persistence_failure(monkeypatch
             SimpleNamespace(symbol=symbol, instrument_id=symbol)
             for symbol in ("FIRST", "BAD", "THIRD")
         ],
+        config=ScanConfig(instrument_batch_size=1),
         incremental=True,
     )
     assert result["status"] == "PARTIAL"

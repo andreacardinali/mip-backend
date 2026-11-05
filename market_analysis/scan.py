@@ -13,7 +13,7 @@ from market_analysis.strategies import default_registry
 from market_analysis.strategies.registry import create_registry
 from market_analysis.technical import TechnicalConfig, analyze_price_bars
 from market_data.capabilities import InstrumentType
-from market_data.models import HistoryRequest, InstrumentReference
+from market_data.models import BatchResult, HistoryRequest, InstrumentReference
 
 
 class ScanSkipReason(StrEnum):
@@ -26,6 +26,7 @@ class ScanConfig:
     period: str = "1y"
     interval: str = "1d"
     minimum_bars: int = 200
+    instrument_batch_size: int = 20
     timeframe: str = "1D"
     enabled_strategies: tuple[str, ...] | None = None
     technical_config: TechnicalConfig = field(default_factory=TechnicalConfig)
@@ -35,6 +36,8 @@ class ScanConfig:
     def __post_init__(self):
         if self.minimum_bars < 2:
             raise ValueError("minimum_bars must be at least 2")
+        if self.instrument_batch_size < 1:
+            raise ValueError("instrument_batch_size must be at least 1")
 
     @classmethod
     def from_settings(cls, settings):
@@ -43,6 +46,9 @@ class ScanConfig:
             period=str(settings.get("MARKET_ANALYSIS_PERIOD", "1y")),
             interval=str(settings.get("MARKET_ANALYSIS_INTERVAL", "1d")),
             minimum_bars=int(settings.get("MARKET_ANALYSIS_MINIMUM_BARS", 200)),
+            instrument_batch_size=int(
+                settings.get("MARKET_ANALYSIS_INSTRUMENT_BATCH_SIZE", 20)
+            ),
             timeframe=str(settings.get("MARKET_ANALYSIS_TIMEFRAME", "1D")),
             enabled_strategies=tuple(
                 value.strip().upper()
@@ -204,64 +210,96 @@ def scan_members(members, *, market_data_service, config):
     failures = []
     skipped = []
     evaluations = []
-    for member in members:
-        try:
-            bars = market_data_service.get_ohlcv(
-                HistoryRequest(
-                    instrument=member.to_reference(),
-                    period=config.period,
-                    interval=config.interval,
-                )
+    get_ohlcv_batch = getattr(market_data_service, "get_ohlcv_batch", None)
+    for batch_start in range(0, len(members), config.instrument_batch_size):
+        batch_members = members[
+            batch_start : batch_start + config.instrument_batch_size
+        ]
+        requests = [
+            HistoryRequest(
+                instrument=member.to_reference(),
+                period=config.period,
+                interval=config.interval,
             )
-            if len(bars) < config.minimum_bars:
-                skipped.append(
-                    ScanSkip(
+            for member in batch_members
+        ]
+        if get_ohlcv_batch is None:
+            fetch_results = []
+            for request in requests:
+                try:
+                    fetch_results.append(
+                        BatchResult(value=market_data_service.get_ohlcv(request))
+                    )
+                except Exception as error:
+                    fetch_results.append(BatchResult(error=error))
+        else:
+            try:
+                fetch_results = get_ohlcv_batch(requests)
+                if len(fetch_results) != len(batch_members):
+                    raise ValueError(
+                        "OHLCV batch result count does not match request count"
+                    )
+            except Exception as error:
+                fetch_results = [
+                    BatchResult(error=error) for _ in batch_members
+                ]
+
+        for member, fetch_result in zip(batch_members, fetch_results):
+            try:
+                if fetch_result.error is not None:
+                    raise fetch_result.error
+                bars = fetch_result.value
+                if bars is None:
+                    raise ValueError("OHLCV batch result has no value")
+                if len(bars) < config.minimum_bars:
+                    skipped.append(
+                        ScanSkip(
+                            member.instrument_id,
+                            member.symbol,
+                            ScanSkipReason.INSUFFICIENT_HISTORY,
+                            f"insufficient history: {len(bars)} bars; minimum {config.minimum_bars}",
+                            len(bars),
+                            config.minimum_bars,
+                        )
+                    )
+                    continue
+                bars = sorted(bars, key=lambda bar: bar.timestamp)
+                snapshot = analyze_price_bars(bars, config=config.technical_config)
+                if snapshot is None:
+                    raise ValueError("technical snapshot unavailable")
+                values = _evaluate(member, bars, config, snapshot)
+                evaluations.append(
+                    ScanEvaluation(
                         member.instrument_id,
-                        member.symbol,
-                        ScanSkipReason.INSUFFICIENT_HISTORY,
-                        f"insufficient history: {len(bars)} bars; minimum {config.minimum_bars}",
+                        datetime.fromtimestamp(snapshot.observed_timestamp, UTC),
+                        config.enabled_strategies or default_registry.codes,
+                        config.timeframe,
+                        asdict(snapshot),
+                        hashlib.sha256(
+                            json.dumps(
+                                [asdict(bar) for bar in bars],
+                                sort_keys=True,
+                                allow_nan=False,
+                            ).encode("utf-8")
+                        ).hexdigest(),
                         len(bars),
-                        config.minimum_bars,
                     )
                 )
-                continue
-            bars = sorted(bars, key=lambda bar: bar.timestamp)
-            snapshot = analyze_price_bars(bars, config=config.technical_config)
-            if snapshot is None:
-                raise ValueError("technical snapshot unavailable")
-            values = _evaluate(member, bars, config, snapshot)
-            evaluations.append(
-                ScanEvaluation(
-                    member.instrument_id,
-                    datetime.fromtimestamp(snapshot.observed_timestamp, UTC),
-                    config.enabled_strategies or default_registry.codes,
-                    config.timeframe,
-                    asdict(snapshot),
-                    hashlib.sha256(
-                        json.dumps(
-                            [asdict(bar) for bar in bars],
-                            sort_keys=True,
-                            allow_nan=False,
-                        ).encode("utf-8")
-                    ).hexdigest(),
-                    len(bars),
-                )
-            )
-            if not values:
-                skipped.append(
-                    ScanSkip(
-                        member.instrument_id,
-                        member.symbol,
-                        ScanSkipReason.NO_TECHNICAL_SIGNAL,
-                        "no technical signal generated",
+                if not values:
+                    skipped.append(
+                        ScanSkip(
+                            member.instrument_id,
+                            member.symbol,
+                            ScanSkipReason.NO_TECHNICAL_SIGNAL,
+                            "no technical signal generated",
+                        )
                     )
+                    continue
+                candidates.extend(values)
+            except Exception as error:
+                failures.append(
+                    ScanFailure(member.instrument_id, member.symbol, str(error)[:500])
                 )
-                continue
-            candidates.extend(values)
-        except Exception as error:
-            failures.append(
-                ScanFailure(member.instrument_id, member.symbol, str(error)[:500])
-            )
     candidates.sort(
         key=lambda x: (
             -(x.scores.composite or 0),
