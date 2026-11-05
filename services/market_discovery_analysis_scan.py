@@ -239,6 +239,7 @@ def run_market_discovery_analysis_scan(
             "failed_symbols": [item.symbol for item in scan_result.failures],
             "skipped": len(scan_result.skipped),
             "skipped_by_reason": scan_result.to_dict()["skipped_by_reason"],
+            "evaluated_instrument_ids": scan_result.to_dict()["evaluated_instrument_ids"],
             "skipped_symbols": [item.symbol for item in scan_result.skipped],
             "skipped_insufficient_history": insufficient_history,
             "skipped_details": skipped_details,

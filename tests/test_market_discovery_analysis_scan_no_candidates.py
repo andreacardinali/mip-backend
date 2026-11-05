@@ -1,8 +1,9 @@
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 from market_analysis.quant_prefilter import QuantPrefilterConfig
-from market_analysis.scan import ScanConfig, ScanMember, ScanResult
+from market_analysis.scan import ScanConfig, ScanEvaluation, ScanMember, ScanResult
 from services.market_discovery_analysis_scan import (
     run_market_discovery_analysis_scan,
 )
@@ -118,7 +119,14 @@ def test_quant_exclusion_does_not_prevent_signal_persistence(monkeypatch):
     )
     monkeypatch.setattr(
         "services.market_discovery_analysis_scan.scan_members",
-        lambda *args, **kwargs: ScanResult(1, (evaluated,), ()),
+        lambda *args, **kwargs: ScanResult(
+            1,
+            (evaluated,),
+            (),
+            evaluations=(
+                ScanEvaluation("instrument", datetime(2025, 1, 1), (), "1D"),
+            ),
+        ),
     )
     monkeypatch.setattr(
         "services.market_discovery_analysis_scan.reconcile_persisted_signals",
@@ -139,6 +147,7 @@ def test_quant_exclusion_does_not_prevent_signal_persistence(monkeypatch):
     assert result["quant_candidates"] == 0
     assert result["persisted_signals"] == 1
     assert result["lifecycle_events"] == 1
+    assert result["evaluated_instrument_ids"] == ["instrument"]
     assert persisted[0]["candidate"].strategy_code == "TREND_PULLBACK"
 
 
