@@ -3,8 +3,9 @@ from tests.schema_contract import schema_function, schema_functions, schema_sql
 
 def test_enrichment_schema_contract_delegates_wrappers_to_shared_selection():
     definitions = schema_functions("sp_market_analysis_list_pending_llm_enrichment")
-    assert len(definitions) == 3
-    shared = next(sql for sql in definitions if "p_min_interval_minutes integer" in sql)
+    assert len(definitions) == 4
+    shared = next(sql for sql in definitions if "p_max_age_minutes integer" in sql)
+    assert "p_max_age_minutes integer" in shared
     assert "{quant,llm_eligible}" in shared
     assert "s.strategy_code <> 'SWING_EXIT'" in shared
     scoped = next(

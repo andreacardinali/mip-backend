@@ -29,17 +29,15 @@ def test_screener_analysis_timestamp_replaces_visible_rank() -> None:
     columns = columns_module.split("export function screenerOpportunityColumns(", 1)[1]
     columns = columns.split("\n}\n", 1)[0]
 
-    initial_state_module = Path(
-        "../mip-frontend/src/components/screenerOpportunityColumns.tsx"
-    ).read_text(encoding="utf-8")
-    assert 'field: "last_analysis_at", headerName: "Ultima analisi"' in columns
-    assert 'type: "dateTime"' in columns
-    assert "ranking_position: false" in initial_state_module
+    assert 'timestampColumn("last_analysis_at", "Ultimo calcolo indicatori",' in columns
+    assert 'field: "price_as_of" | "last_analysis_at"' in columns_module
+    assert 'type: "dateTime"' in columns_module
+    assert "ranking_position: false" in columns_module
     assert 'headerName: "#"' not in columns
     assert 'import { formatTimestamp } from "../services/timestamps";' in columns_module
     assert (
         'valueFormatter: (value: Date | null) => value ? formatTimestamp(value) : "Non registrata"'
-        in columns
+        in columns_module
     )
 
 
@@ -541,19 +539,14 @@ def test_analysis_lock_preserves_session_and_transaction_scopes() -> None:
     )
 
 
-def test_scheduler_progress_preserves_context_and_domain_fallback() -> None:
+def test_context_progress_returns_latest_run_for_requested_context() -> None:
     progress = schema_function("sp_market_screener_context_progress")
     assert "sp_market_screener_context_instruments(" in progress
-    assert "r.requested_by = p_user_id" in progress
-    assert "r.payload->>'context_type' = p_context_type" in progress
-    assert "r.payload->>'context_id' = p_context_id::text" in progress
-    assert "v_request.request_id IS NULL" in progress
-    assert (
-        "v_run->>'job_run_id' IS DISTINCT FROM v_request.job_run_id::text" in progress
-    )
-    assert "THEN RETURN v_run;" in progress
-    assert "sp_scheduler_execution_status(v_request.job_run_id, p_user_id)" in progress
-    assert "'screener_run_id', v_execution->'domain_run_id'" in progress
+    assert "r.phase_results #>> '{context,user_id}' = p_user_id::text" in progress
+    assert "r.phase_results #>> '{context,context_type}' = p_context_type" in progress
+    assert "r.phase_results #>> '{context,context_id}' = p_context_id::text" in progress
+    assert "ORDER BY r.started_at DESC, r.screener_run_id DESC LIMIT 1" in progress
+    assert "RETURN v_run;" in progress
 
 
 def test_screener_diagnostics_recovery_preserves_lock_and_run_identity() -> None:

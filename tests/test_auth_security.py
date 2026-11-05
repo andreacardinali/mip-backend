@@ -29,7 +29,11 @@ class GetCurrentUserTests(unittest.TestCase):
 
     @staticmethod
     def _call(token: str = "token"):
-        return get_current_user(token)
+        with (
+            patch("auth.security.settings.JWT_SECRET", "test-secret", create=True),
+            patch("auth.security.settings.JWT_ALGORITHM", "HS256", create=True),
+        ):
+            return get_current_user(token)
 
     @patch("auth.security.SessionLocal")
     @patch("auth.security.jwt.decode")
