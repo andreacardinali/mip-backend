@@ -37,7 +37,7 @@ def test_configured_enrichment_skips_provider_when_context_has_no_candidates(
             "contract_fingerprint": result["enrichment_fingerprint"],
             "limit": 7,
             "min_interval_minutes": 30 if interval is None else int(interval),
-                "max_age_minutes": 1440,
+            "max_age_minutes": 1440,
         }
     ]
 
@@ -55,7 +55,9 @@ def test_configured_enrichment_skips_provider_when_context_has_no_candidates(
         ("MAX_AGE_MINUTES", ""),
     ],
 )
-def test_invalid_freshness_interval_does_not_load_candidates(monkeypatch, setting, value):
+def test_invalid_freshness_interval_does_not_load_candidates(
+    monkeypatch, setting, value
+):
     def unexpected(*args, **kwargs):
         raise AssertionError("Invalid interval must not access candidates or provider")
 

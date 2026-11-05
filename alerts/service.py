@@ -131,7 +131,9 @@ def evaluate_and_enqueue_market_alerts(
                 )
             if selected.user_id not in timezones:
                 get_timezone = getattr(repo, "display_timezone", None)
-                timezone = get_timezone(selected.user_id) if callable(get_timezone) else "UTC"
+                timezone = (
+                    get_timezone(selected.user_id) if callable(get_timezone) else "UTC"
+                )
                 timezones[selected.user_id] = (
                     timezone if isinstance(timezone, str) else "UTC"
                 )

@@ -107,7 +107,9 @@ class LLMConfig:
             api_protocol=str(
                 settings.get(f"{p}_API_PROTOCOL", "chat_completions")
                 or "chat_completions"
-            ).strip().lower(),
+            )
+            .strip()
+            .lower(),
             base_url=str(settings.get(f"{p}_BASE_URL", "") or "").strip().rstrip("/"),
             api_key=str(settings.get(f"{p}_API_KEY", "") or "").strip(),
             timeout_seconds=float(
@@ -172,9 +174,7 @@ class LLMConfig:
             self.provider == "openai_compatible"
             and self.api_protocol not in SUPPORTED_OPENAI_COMPATIBLE_PROTOCOLS
         ):
-            raise ValueError(
-                f"Unsupported {prefix}_API_PROTOCOL: {self.api_protocol}"
-            )
+            raise ValueError(f"Unsupported {prefix}_API_PROTOCOL: {self.api_protocol}")
         if not self.model:
             raise ValueError(f"Missing {prefix}_MODEL")
         if self.provider in {"ollama", "openai_compatible"} and not self.base_url:

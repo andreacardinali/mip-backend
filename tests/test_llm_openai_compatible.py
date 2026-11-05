@@ -96,7 +96,9 @@ class OpenAICompatibleProviderTests(unittest.TestCase):
             '{"ok":true}',
         )
 
-    def test_responses_posts_to_responses_endpoint(self,):
+    def test_responses_posts_to_responses_endpoint(
+        self,
+    ):
         captured = {}
 
         class FakeClient:

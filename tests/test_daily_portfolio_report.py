@@ -1,4 +1,4 @@
-from datetime import date, datetime, time, timezone
+from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from unittest.mock import MagicMock
 
@@ -38,7 +38,7 @@ def test_format_portfolio_report_uses_reporting_currency_and_handles_unknown_cos
 
 
 def test_daily_portfolio_report_uses_selected_destination_and_stable_daily_key():
-    now = datetime(2025, 10, 26, 20, 30, tzinfo=timezone.utc)
+    now = datetime(2025, 10, 26, 20, 30, tzinfo=UTC)
     subscription = {
         "user_id": "user-id",
         "portfolio_id": "portfolio-id",
@@ -58,8 +58,16 @@ def test_daily_portfolio_report_uses_selected_destination_and_stable_daily_key()
     }
     db = MagicMock()
     db.execute.side_effect = [
-        MagicMock(mappings=MagicMock(return_value=MagicMock(all=MagicMock(return_value=[subscription])))),
-        MagicMock(mappings=MagicMock(return_value=MagicMock(first=MagicMock(return_value=summary)))),
+        MagicMock(
+            mappings=MagicMock(
+                return_value=MagicMock(all=MagicMock(return_value=[subscription]))
+            )
+        ),
+        MagicMock(
+            mappings=MagicMock(
+                return_value=MagicMock(first=MagicMock(return_value=summary))
+            )
+        ),
     ]
     queue = MagicMock()
     queue.enqueue.return_value = True
@@ -92,7 +100,7 @@ def test_daily_portfolio_report_waits_until_user_local_delivery_time():
     queue = MagicMock()
 
     result = publish_daily_portfolio_reports(
-        db, queue, datetime(2025, 10, 26, 19, 30, tzinfo=timezone.utc)
+        db, queue, datetime(2025, 10, 26, 19, 30, tzinfo=UTC)
     )
 
     assert result == {"processed": 1, "queued": 0, "skipped": 0}

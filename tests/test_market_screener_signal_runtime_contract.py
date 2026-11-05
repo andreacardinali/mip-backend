@@ -84,39 +84,43 @@ def test_snapshot_changes_enqueue_per_collection_signal_notifications(
         "changed_count": 0 if scenario == "unchanged" else 1,
         "removed_count": 0 if scenario == "unchanged" else 3,
         "opportunity_count": 42,
-        "changes": [] if scenario == "unchanged" else [
-            {
-                "change_type": "NEW",
-                "current": {
-                    "instrument_id": "instrument-a",
-                    "signal_id": "signal-a",
-                    "symbol": "AAA",
-                    "direction": "BULLISH",
-                    "strategy_code": "RSI",
+        "changes": (
+            []
+            if scenario == "unchanged"
+            else [
+                {
+                    "change_type": "NEW",
+                    "current": {
+                        "instrument_id": "instrument-a",
+                        "signal_id": "signal-a",
+                        "symbol": "AAA",
+                        "direction": "BULLISH",
+                        "strategy_code": "RSI",
+                    },
+                    "private_detail": "not exported",
                 },
-                "private_detail": "not exported",
-            },
-            {
-                "change_type": "CHANGED",
-                "current": {
-                    "instrument_id": "instrument-b",
-                    "signal_id": "signal-b",
-                    "symbol": "BBB",
-                    "direction": "BEARISH",
-                    "verdict": "WATCH",
-                    "ranking_position": 2,
+                {
+                    "change_type": "CHANGED",
+                    "current": {
+                        "instrument_id": "instrument-b",
+                        "signal_id": "signal-b",
+                        "symbol": "BBB",
+                        "direction": "BEARISH",
+                        "verdict": "WATCH",
+                        "ranking_position": 2,
+                    },
                 },
-            },
-            {
-                "change_type": "REMOVED",
-                "previous": {
-                    "instrument_id": "instrument-c",
-                    "signal_id": "signal-c",
-                    "symbol": "CCC",
-                    "direction": "BULLISH",
+                {
+                    "change_type": "REMOVED",
+                    "previous": {
+                        "instrument_id": "instrument-c",
+                        "signal_id": "signal-c",
+                        "symbol": "CCC",
+                        "direction": "BULLISH",
+                    },
                 },
-            },
-        ],
+            ]
+        ),
     }
 
     def get_changes(snapshot_id):
@@ -214,7 +218,9 @@ def test_snapshot_changes_enqueue_per_collection_signal_notifications(
                 "My portfolio",
             }
             assert symbol in payload["message"]
-        assert payload_calls[0]["notification_key"] != payload_calls[1]["notification_key"]
+        assert (
+            payload_calls[0]["notification_key"] != payload_calls[1]["notification_key"]
+        )
         assert payload_calls[1]["source_id"] == "portfolio-source"
         assert payload_calls[1]["context"]["collection_name"] == "My portfolio"
 
@@ -249,9 +255,12 @@ def test_signal_recipient_repository_calls_collection_routine() -> None:
         calls.append((str(statement), params))
         return SimpleNamespace(mappings=lambda: iter(expected))
 
-    assert repository(SimpleNamespace(execute=execute)).list_signal_recipients(
-        instrument_id="instrument-id"
-    ) == expected
+    assert (
+        repository(SimpleNamespace(execute=execute)).list_signal_recipients(
+            instrument_id="instrument-id"
+        )
+        == expected
+    )
     assert calls == [
         (
             "SELECT * FROM public.sp_market_screener_signal_recipients("
@@ -660,7 +669,7 @@ def test_manual_context_scan_records_history_with_transaction_boundaries(
             "enrichment_fingerprint": "fingerprint",
             "limit": 7,
             "min_interval_minutes": 45,
-                "max_age_minutes": 1440,
+            "max_age_minutes": 1440,
         }
         return [{"signal_id": "signal"}]
 

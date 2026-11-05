@@ -1,10 +1,11 @@
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import text
 
 from job_runtime.database import run_transactional
 from notifications.queue import NotificationQueue
+
 _SUBSCRIPTIONS = text(
     """
     SELECT subscription.user_id, subscription.collection_id AS portfolio_id,
@@ -82,7 +83,7 @@ def format_portfolio_report(summary, report_date: date) -> tuple[str, str, dict]
 
 
 def publish_daily_portfolio_reports(db, queue, now: datetime | None = None) -> dict:
-    now = now or datetime.now(timezone.utc)
+    now = now or datetime.now(UTC)
     subscriptions = db.execute(_SUBSCRIPTIONS).mappings().all()
     queued = 0
     skipped = 0

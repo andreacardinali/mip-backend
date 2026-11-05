@@ -84,7 +84,11 @@ def analyze_screener_context(
         ai_completed = 0
 
         def load_candidates(
-            *, contract_fingerprint, limit, min_interval_minutes=30, max_age_minutes=1440
+            *,
+            contract_fingerprint,
+            limit,
+            min_interval_minutes=30,
+            max_age_minutes=1440,
         ):
             nonlocal ai_total
             with db.begin_nested():

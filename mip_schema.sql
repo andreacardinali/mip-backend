@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict 4o6zX49HnGde69o2NBG1qy8JFoYNVABoigkplAzt1oLODvIisy7FIXdpva4MpnO
+\restrict uU2fmQdsz6cVjAjb0JMK5XeqbRy0lLDyooV4O3onVmhpySu3Bc4uZpnZ3CdorWu
 
 -- Dumped from database version 18.6 (Debian 18.6-1.pgdg13+2)
 -- Dumped by pg_dump version 18.6 (Debian 18.6-1.pgdg13+2)
@@ -4587,10 +4587,11 @@ $$;
 -- Name: sp_get_user_notification_delivery(uuid); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.sp_get_user_notification_delivery(p_user_id uuid) RETURNS TABLE(paused boolean, default_source_id uuid)
+CREATE FUNCTION public.sp_get_user_notification_delivery(p_user_id uuid) RETURNS TABLE(paused boolean, default_source_id uuid, daily_portfolio_report_time time without time zone)
     LANGUAGE sql STABLE
     AS $$
-    SELECT COALESCE(delivery.paused, false), delivery.default_source_id
+    SELECT COALESCE(delivery.paused, false), delivery.default_source_id,
+           COALESCE(delivery.daily_portfolio_report_time, TIME '21:00')
     FROM public.users u
     LEFT JOIN public.user_notification_delivery delivery ON delivery.user_id = u.user_id
     WHERE u.user_id = p_user_id;
@@ -5397,7 +5398,8 @@ BEGIN
     SET llm_score = p_llm_score,
         composite_score = COALESCE(p_composite_score, composite_score),
         llm_analysis = p_llm_analysis,
-        enrichment_fingerprint = BTRIM(p_enrichment_fingerprint)
+        enrichment_fingerprint = BTRIM(p_enrichment_fingerprint),
+        last_llm_analysis_at = clock_timestamp()
     WHERE signal_id = p_signal_id
       AND status IN ('CANDIDATE', 'CONFIRMED');
 
@@ -5532,21 +5534,12 @@ $$;
 --
 
 CREATE FUNCTION public.sp_market_analysis_list_pending_context_llm_enrichment(p_enrichment_fingerprint character varying, p_user_id uuid, p_context_type character varying, p_context_id uuid, p_limit integer DEFAULT 25) RETURNS SETOF jsonb
-    LANGUAGE plpgsql STABLE
+    LANGUAGE sql STABLE
     AS $$
-DECLARE
-    v_instrument_ids uuid[];
-BEGIN
-    SELECT array_agg(instrument_id) INTO v_instrument_ids
-    FROM public.sp_market_screener_context_instruments(
-        p_user_id, p_context_type, p_context_id
+    SELECT * FROM public.sp_market_analysis_list_pending_context_llm_enrichment(
+        p_enrichment_fingerprint, p_user_id, p_context_type, p_context_id,
+        p_limit, 30, 0
     );
-    RETURN QUERY
-    SELECT to_jsonb(pending)
-    FROM public.sp_market_analysis_list_pending_llm_enrichment(
-        p_enrichment_fingerprint, p_limit, COALESCE(v_instrument_ids, '{}'::uuid[])
-    ) pending;
-END;
 $$;
 
 
@@ -5555,6 +5548,20 @@ $$;
 --
 
 CREATE FUNCTION public.sp_market_analysis_list_pending_context_llm_enrichment(p_enrichment_fingerprint character varying, p_user_id uuid, p_context_type character varying, p_context_id uuid, p_limit integer, p_min_interval_minutes integer) RETURNS SETOF jsonb
+    LANGUAGE sql STABLE
+    AS $$
+    SELECT * FROM public.sp_market_analysis_list_pending_context_llm_enrichment(
+        p_enrichment_fingerprint, p_user_id, p_context_type, p_context_id,
+        p_limit, p_min_interval_minutes, 0
+    );
+$$;
+
+
+--
+-- Name: sp_market_analysis_list_pending_context_llm_enrichment(character varying, uuid, character varying, uuid, integer, integer, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_market_analysis_list_pending_context_llm_enrichment(p_enrichment_fingerprint character varying, p_user_id uuid, p_context_type character varying, p_context_id uuid, p_limit integer, p_min_interval_minutes integer, p_max_age_minutes integer) RETURNS SETOF jsonb
     LANGUAGE plpgsql STABLE
     AS $$
 DECLARE
@@ -5567,7 +5574,7 @@ BEGIN
     RETURN QUERY SELECT to_jsonb(pending)
     FROM public.sp_market_analysis_list_pending_llm_enrichment(
         p_enrichment_fingerprint, p_limit, COALESCE(v_instrument_ids, '{}'::uuid[]),
-        p_min_interval_minutes
+        p_min_interval_minutes, p_max_age_minutes
     ) pending;
 END;
 $$;
@@ -5594,7 +5601,7 @@ CREATE FUNCTION public.sp_market_analysis_list_pending_llm_enrichment(p_enrichme
     LANGUAGE sql STABLE
     AS $$
     SELECT * FROM public.sp_market_analysis_list_pending_llm_enrichment(
-        p_enrichment_fingerprint, p_limit, p_instrument_ids, 30
+        p_enrichment_fingerprint, p_limit, p_instrument_ids, 30, 0
     );
 $$;
 
@@ -5604,11 +5611,28 @@ $$;
 --
 
 CREATE FUNCTION public.sp_market_analysis_list_pending_llm_enrichment(p_enrichment_fingerprint character varying, p_limit integer, p_instrument_ids uuid[], p_min_interval_minutes integer) RETURNS TABLE(signal_id uuid, instrument_id uuid, entity_id uuid, symbol character varying, exchange character varying, entity_name character varying, strategy_code character varying, timeframe character varying, direction character varying, signal_type character varying, trend character varying, status character varying, confidence numeric, technical_score numeric, financial_score numeric, catalyst_score numeric, reference_price numeric, invalidation_price numeric, target_price numeric, observed_at timestamp with time zone, evidence jsonb)
+    LANGUAGE sql STABLE
+    AS $$
+    SELECT * FROM public.sp_market_analysis_list_pending_llm_enrichment(
+        p_enrichment_fingerprint, p_limit, p_instrument_ids,
+        p_min_interval_minutes, 0
+    );
+$$;
+
+
+--
+-- Name: sp_market_analysis_list_pending_llm_enrichment(character varying, integer, uuid[], integer, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_market_analysis_list_pending_llm_enrichment(p_enrichment_fingerprint character varying, p_limit integer, p_instrument_ids uuid[], p_min_interval_minutes integer, p_max_age_minutes integer) RETURNS TABLE(signal_id uuid, instrument_id uuid, entity_id uuid, symbol character varying, exchange character varying, entity_name character varying, strategy_code character varying, timeframe character varying, direction character varying, signal_type character varying, trend character varying, status character varying, confidence numeric, technical_score numeric, financial_score numeric, catalyst_score numeric, reference_price numeric, invalidation_price numeric, target_price numeric, observed_at timestamp with time zone, evidence jsonb)
     LANGUAGE plpgsql STABLE
     AS $_$
 BEGIN
     IF p_min_interval_minutes IS NULL OR p_min_interval_minutes < 0 THEN
         RAISE EXCEPTION 'p_min_interval_minutes must be nonnegative';
+    END IF;
+    IF p_max_age_minutes IS NULL OR p_max_age_minutes < 0 THEN
+        RAISE EXCEPTION 'p_max_age_minutes must be nonnegative';
     END IF;
     IF p_limit < 1 OR p_limit > 500 THEN
         RAISE EXCEPTION 'p_limit must be between 1 and 500';
@@ -5665,6 +5689,11 @@ BEGIN
           s.llm_analysis IS NULL
           OR s.enrichment_fingerprint IS DISTINCT FROM
              BTRIM(p_enrichment_fingerprint)
+          OR (p_max_age_minutes > 0 AND (
+              s.last_llm_analysis_at IS NULL
+              OR s.last_llm_analysis_at <= statement_timestamp()
+                  - make_interval(mins => p_max_age_minutes)
+          ))
       )
     ORDER BY
         COALESCE(s.composite_score, s.technical_score, 0) DESC,
@@ -6307,24 +6336,72 @@ BEGIN
         technical_score = EXCLUDED.technical_score,
         financial_score = EXCLUDED.financial_score,
         catalyst_score = EXCLUDED.catalyst_score,
-        llm_score = NULL,
+        llm_score = CASE
+            WHEN (trading_signals.evidence, trading_signals.reference_price,
+                  trading_signals.technical_score, trading_signals.financial_score,
+                  trading_signals.catalyst_score, trading_signals.invalidation_price,
+                  trading_signals.target_price, trading_signals.confidence,
+                  trading_signals.signal_type, trading_signals.trend,
+                  trading_signals.universe_id)
+                 IS DISTINCT FROM
+                 (EXCLUDED.evidence, EXCLUDED.reference_price,
+                  EXCLUDED.technical_score, EXCLUDED.financial_score,
+                  EXCLUDED.catalyst_score, EXCLUDED.invalidation_price,
+                  EXCLUDED.target_price, EXCLUDED.confidence,
+                  EXCLUDED.signal_type, EXCLUDED.trend,
+                  EXCLUDED.universe_id)
+            THEN NULL ELSE trading_signals.llm_score
+        END,
         composite_score = EXCLUDED.composite_score,
         reference_price = EXCLUDED.reference_price,
         invalidation_price = EXCLUDED.invalidation_price,
         target_price = EXCLUDED.target_price,
         observed_at = EXCLUDED.observed_at,
         evidence = EXCLUDED.evidence,
-        llm_analysis = NULL,
-        enrichment_fingerprint = NULL
-    WHERE (trading_signals.observed_at, trading_signals.evidence, trading_signals.reference_price,
-           trading_signals.technical_score, trading_signals.financial_score, trading_signals.catalyst_score,
-           trading_signals.invalidation_price, trading_signals.target_price, trading_signals.confidence,
-           trading_signals.signal_type, trading_signals.trend, trading_signals.universe_id)
+        llm_analysis = CASE
+            WHEN (trading_signals.evidence, trading_signals.reference_price,
+                  trading_signals.technical_score, trading_signals.financial_score,
+                  trading_signals.catalyst_score, trading_signals.invalidation_price,
+                  trading_signals.target_price, trading_signals.confidence,
+                  trading_signals.signal_type, trading_signals.trend,
+                  trading_signals.universe_id)
+                 IS DISTINCT FROM
+                 (EXCLUDED.evidence, EXCLUDED.reference_price,
+                  EXCLUDED.technical_score, EXCLUDED.financial_score,
+                  EXCLUDED.catalyst_score, EXCLUDED.invalidation_price,
+                  EXCLUDED.target_price, EXCLUDED.confidence,
+                  EXCLUDED.signal_type, EXCLUDED.trend,
+                  EXCLUDED.universe_id)
+            THEN NULL ELSE trading_signals.llm_analysis
+        END,
+        enrichment_fingerprint = CASE
+            WHEN (trading_signals.evidence, trading_signals.reference_price,
+                  trading_signals.technical_score, trading_signals.financial_score,
+                  trading_signals.catalyst_score, trading_signals.invalidation_price,
+                  trading_signals.target_price, trading_signals.confidence,
+                  trading_signals.signal_type, trading_signals.trend,
+                  trading_signals.universe_id)
+                 IS DISTINCT FROM
+                 (EXCLUDED.evidence, EXCLUDED.reference_price,
+                  EXCLUDED.technical_score, EXCLUDED.financial_score,
+                  EXCLUDED.catalyst_score, EXCLUDED.invalidation_price,
+                  EXCLUDED.target_price, EXCLUDED.confidence,
+                  EXCLUDED.signal_type, EXCLUDED.trend,
+                  EXCLUDED.universe_id)
+            THEN NULL ELSE trading_signals.enrichment_fingerprint
+        END
+    WHERE (trading_signals.observed_at, trading_signals.evidence,
+           trading_signals.reference_price, trading_signals.technical_score,
+           trading_signals.financial_score, trading_signals.catalyst_score,
+           trading_signals.invalidation_price, trading_signals.target_price,
+           trading_signals.confidence, trading_signals.signal_type,
+           trading_signals.trend, trading_signals.universe_id)
           IS DISTINCT FROM
           (EXCLUDED.observed_at, EXCLUDED.evidence, EXCLUDED.reference_price,
-           EXCLUDED.technical_score, EXCLUDED.financial_score, EXCLUDED.catalyst_score,
-           EXCLUDED.invalidation_price, EXCLUDED.target_price, EXCLUDED.confidence,
-           EXCLUDED.signal_type, EXCLUDED.trend, EXCLUDED.universe_id)
+           EXCLUDED.technical_score, EXCLUDED.financial_score,
+           EXCLUDED.catalyst_score, EXCLUDED.invalidation_price,
+           EXCLUDED.target_price, EXCLUDED.confidence, EXCLUDED.signal_type,
+           EXCLUDED.trend, EXCLUDED.universe_id)
     RETURNING signal_id INTO v_signal_id;
 
     IF v_signal_id IS NULL THEN
@@ -7323,28 +7400,18 @@ $$;
 CREATE FUNCTION public.sp_market_screener_context_progress(p_user_id uuid, p_context_type character varying, p_context_id uuid) RETURNS jsonb
     LANGUAGE plpgsql STABLE
     AS $$
-DECLARE v_request public.scheduler_manual_run_requests; v_run jsonb; v_execution jsonb;
+DECLARE
+    v_run jsonb;
 BEGIN
     PERFORM 1 FROM public.sp_market_screener_context_instruments(
         p_user_id, p_context_type, p_context_id
     );
-    SELECT r.* INTO v_request FROM public.scheduler_manual_run_requests r
-    JOIN public.scheduler_jobs job ON job.job_id = r.job_id
-    WHERE job.job_key = 'market_screener_context_analysis' AND r.requested_by = p_user_id
-      AND r.payload->>'context_type' = p_context_type
-      AND r.payload->>'context_id' = p_context_id::text
-    ORDER BY r.requested_at DESC LIMIT 1;
     SELECT to_jsonb(r) INTO v_run FROM public.market_screener_runs r
     WHERE r.phase_results #>> '{context,user_id}' = p_user_id::text
       AND r.phase_results #>> '{context,context_type}' = p_context_type
       AND r.phase_results #>> '{context,context_id}' = p_context_id::text
     ORDER BY r.started_at DESC, r.screener_run_id DESC LIMIT 1;
-    IF v_request.request_id IS NULL OR (
-        v_run IS NOT NULL AND (v_run->>'started_at')::timestamptz > v_request.requested_at
-        AND v_run->>'job_run_id' IS DISTINCT FROM v_request.job_run_id::text
-    ) THEN RETURN v_run; END IF;
-    v_execution := public.sp_scheduler_execution_status(v_request.job_run_id, p_user_id);
-    RETURN v_execution || jsonb_build_object('screener_run_id', v_execution->'domain_run_id');
+    RETURN v_run;
 END;
 $$;
 
@@ -8193,6 +8260,71 @@ CREATE FUNCTION public.sp_market_screener_session_analysis_lock(p_release boolea
     SELECT CASE WHEN p_release
         THEN pg_advisory_unlock(hashtext('market_screener_analysis'))
         ELSE pg_try_advisory_lock(hashtext('market_screener_analysis')) END;
+$$;
+
+
+--
+-- Name: sp_market_screener_signal_recipients(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_market_screener_signal_recipients(p_instrument_id uuid) RETURNS TABLE(user_id uuid, collection_type text, collection_id uuid, collection_name text, source_id uuid)
+    LANGUAGE sql STABLE
+    AS $$
+        SELECT u.user_id, c.collection_type, c.collection_id, c.collection_name,
+                     COALESCE(collection_source.source_id, default_source.source_id)
+        FROM public.users u
+        CROSS JOIN LATERAL public.sp_list_monitoring_collections(u.user_id) c
+        LEFT JOIN public.notification_subscriptions preference
+            ON preference.user_id = u.user_id
+         AND preference.portfolio_id IS NULL
+         AND UPPER(preference.event_type) = 'MARKET_SIGNAL'
+        LEFT JOIN public.collection_intelligence_subscriptions subscription
+            ON subscription.user_id = u.user_id
+         AND subscription.collection_type = c.collection_type
+         AND subscription.collection_id = c.collection_id
+        LEFT JOIN public.user_sources collection_source
+            ON collection_source.user_id = u.user_id
+         AND collection_source.source_id = subscription.notification_source_id
+         AND COALESCE((collection_source.config->>'enabled')::boolean, true)
+        LEFT JOIN public.user_notification_delivery delivery
+            ON delivery.user_id = u.user_id
+        LEFT JOIN public.user_sources default_source
+            ON default_source.user_id = u.user_id
+         AND default_source.source_id = delivery.default_source_id
+         AND COALESCE((default_source.config->>'enabled')::boolean, true)
+        WHERE u.is_active
+            AND 'MARKET_SIGNAL' = ANY(c.enabled_categories)
+            AND COALESCE(preference.enabled, true)
+            AND (
+                    (c.collection_type = 'PORTFOLIO' AND EXISTS (
+                            SELECT 1
+                            FROM public.positions position
+                            JOIN public.portfolios portfolio
+                                ON portfolio.portfolio_id = position.portfolio_id
+                            WHERE portfolio.user_id = u.user_id
+                                AND position.portfolio_id = c.collection_id
+                                AND position.instrument_id = p_instrument_id
+                                AND position.quantity <> 0
+                    ))
+                    OR (c.collection_type = 'WATCHLIST' AND EXISTS (
+                            SELECT 1
+                            FROM public.watchlist_items item
+                            JOIN public.instruments instrument
+                                ON instrument.entity_id = item.entity_id
+                            WHERE item.watchlist_id = c.collection_id
+                                AND instrument.instrument_id = p_instrument_id
+                    ))
+                    OR (c.collection_type = 'UNIVERSE' AND EXISTS (
+                            SELECT 1
+                            FROM public.market_universe_members member
+                            WHERE member.universe_id = c.collection_id
+                                AND member.instrument_id = p_instrument_id
+                                AND member.valid_from <= now()
+                                AND (member.valid_to IS NULL OR member.valid_to > now())
+                    ))
+            )
+            AND COALESCE(collection_source.source_id, default_source.source_id) IS NOT NULL
+        ORDER BY u.user_id, c.collection_type, c.collection_name, c.collection_id
 $$;
 
 
@@ -10319,15 +10451,19 @@ $$;
 
 
 --
--- Name: sp_save_user_notification_delivery(uuid, boolean, uuid); Type: FUNCTION; Schema: public; Owner: -
+-- Name: sp_save_user_notification_delivery(uuid, boolean, uuid, time without time zone); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.sp_save_user_notification_delivery(p_user_id uuid, p_paused boolean, p_source_id uuid) RETURNS boolean
+CREATE FUNCTION public.sp_save_user_notification_delivery(p_user_id uuid, p_paused boolean, p_source_id uuid, p_report_time time without time zone) RETURNS boolean
     LANGUAGE plpgsql
     AS $$
 BEGIN
     IF p_paused IS NULL THEN
         RAISE EXCEPTION 'Notification pause must be a boolean' USING ERRCODE = '22023';
+    END IF;
+
+    IF p_report_time IS NULL THEN
+        RAISE EXCEPTION 'Daily portfolio report time is required' USING ERRCODE = '22023';
     END IF;
 
     IF p_source_id IS NOT NULL AND NOT EXISTS (
@@ -10339,11 +10475,14 @@ BEGIN
             USING ERRCODE = '22023';
     END IF;
 
-    INSERT INTO public.user_notification_delivery (user_id, paused, default_source_id)
-    VALUES (p_user_id, p_paused, p_source_id)
+    INSERT INTO public.user_notification_delivery (
+        user_id, paused, default_source_id, daily_portfolio_report_time
+    )
+    VALUES (p_user_id, p_paused, p_source_id, p_report_time)
     ON CONFLICT (user_id) DO UPDATE
     SET paused = EXCLUDED.paused,
         default_source_id = EXCLUDED.default_source_id,
+        daily_portfolio_report_time = EXCLUDED.daily_portfolio_report_time,
         updated_at = now();
     RETURN true;
 END;
@@ -12539,6 +12678,23 @@ $$;
 
 
 --
+-- Name: sp_validate_collection_intelligence_categories(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sp_validate_collection_intelligence_categories() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF NEW.collection_type <> 'PORTFOLIO'
+       AND 'DAILY_PORTFOLIO_REPORT' = ANY(NEW.enabled_categories) THEN
+        RAISE EXCEPTION 'DAILY_PORTFOLIO_REPORT is only available for portfolios';
+    END IF;
+    RETURN NEW;
+END
+$$;
+
+
+--
 -- Name: trg_llm_response_cache_timestamps(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -13007,8 +13163,8 @@ CREATE TABLE public.collection_intelligence_subscriptions (
     enabled_categories text[] DEFAULT '{}'::text[] CONSTRAINT collection_intelligence_subscriptio_enabled_categories_not_null NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     notification_source_id uuid,
-    CONSTRAINT collection_intelligence_subscriptions_collection_type_check CHECK ((collection_type = ANY (ARRAY['PORTFOLIO'::text, 'WATCHLIST'::text, 'UNIVERSE'::text]))),
-    CONSTRAINT collection_intelligence_subscriptions_enabled_categories_check CHECK ((enabled_categories <@ ARRAY['DAILY_MOVER'::text, 'UPCOMING_CATALYST'::text, 'BREAKING_CATALYST'::text, 'NEWS'::text]))
+    CONSTRAINT collection_intelligence_categories_check CHECK ((enabled_categories <@ ARRAY['DAILY_MOVER'::text, 'UPCOMING_CATALYST'::text, 'BREAKING_CATALYST'::text, 'NEWS'::text, 'DAILY_PORTFOLIO_REPORT'::text, 'MARKET_SIGNAL'::text])),
+    CONSTRAINT collection_intelligence_subscriptions_collection_type_check CHECK ((collection_type = ANY (ARRAY['PORTFOLIO'::text, 'WATCHLIST'::text, 'UNIVERSE'::text])))
 );
 
 
@@ -14094,7 +14250,8 @@ CREATE TABLE public.user_notification_delivery (
     user_id uuid NOT NULL,
     paused boolean DEFAULT false NOT NULL,
     default_source_id uuid,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    daily_portfolio_report_time time without time zone DEFAULT '21:00:00'::time without time zone NOT NULL
 );
 
 
@@ -15613,6 +15770,13 @@ CREATE TRIGGER analytical_lake_timestamps BEFORE INSERT OR DELETE OR UPDATE ON p
 
 
 --
+-- Name: collection_intelligence_subscriptions collection_intelligence_categories_guard; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER collection_intelligence_categories_guard BEFORE INSERT OR UPDATE OF collection_type, enabled_categories ON public.collection_intelligence_subscriptions FOR EACH ROW EXECUTE FUNCTION public.sp_validate_collection_intelligence_categories();
+
+
+--
 -- Name: alert_events trg_alert_events_updated_at; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -16652,5 +16816,5 @@ ALTER TABLE ONLY public.watchlists
 -- PostgreSQL database dump complete
 --
 
-\unrestrict 4o6zX49HnGde69o2NBG1qy8JFoYNVABoigkplAzt1oLODvIisy7FIXdpva4MpnO
+\unrestrict uU2fmQdsz6cVjAjb0JMK5XeqbRy0lLDyooV4O3onVmhpySu3Bc4uZpnZ3CdorWu
 

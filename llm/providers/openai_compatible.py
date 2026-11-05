@@ -57,7 +57,9 @@ class OpenAICompatibleProvider(LLMProvider):
         if not self.model:
             raise ValueError("model cannot be empty")
         if api_protocol not in {"chat_completions", "responses"}:
-            raise ValueError(f"Unsupported OpenAI-compatible API protocol: {api_protocol}")
+            raise ValueError(
+                f"Unsupported OpenAI-compatible API protocol: {api_protocol}"
+            )
         self.api_protocol = api_protocol
 
         self.timeout = timeout

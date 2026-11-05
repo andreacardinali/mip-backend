@@ -198,8 +198,7 @@ def _enrich_resilient(*, provider, signals, max_tokens, progress):
                 sensitive_values=(getattr(provider, "api_key", ""),),
             )
             logger.warning(
-                "LLM enrichment stopped: endpoint unavailable "
-                "status=%s error=%s",
+                "LLM enrichment stopped: endpoint unavailable " "status=%s error=%s",
                 get_http_status(error),
                 safe_error[:500],
             )

@@ -31,7 +31,9 @@ def test_scheduler_next_run_time_normalizes_dst_fold_to_utc(fold, expected_utc):
         2025, 10, 26, 2, 30, tzinfo=ZoneInfo("Europe/Rome"), fold=fold
     )
 
-    assert _next_run_time(SimpleNamespace(next_run_time=local_time), None) == expected_utc
+    assert (
+        _next_run_time(SimpleNamespace(next_run_time=local_time), None) == expected_utc
+    )
 
 
 @pytest.mark.parametrize("owned", [True, False])
