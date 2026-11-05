@@ -1,3 +1,5 @@
+import pytest
+
 from market_analysis.scan import ScanConfig
 from services.market_analysis_scan import run_market_analysis_scan
 
@@ -67,7 +69,7 @@ def test_universe_delegates_to_shared_member_scan(monkeypatch) -> None:
     assert captured["incremental"] is True
 
 
-def test_incremental_scan_commits_each_member_before_loading_next(monkeypatch):
+def test_incremental_scan_failure_before_persistence_marks_run_failed(monkeypatch):
     from types import SimpleNamespace
 
     import pytest
@@ -90,7 +92,7 @@ def test_incremental_scan_commits_each_member_before_loading_next(monkeypatch):
     def scan(members, **kwargs):
         events.append(members[0].symbol)
         if members[0].symbol == "SECOND":
-            assert events[-2] == "commit"
+            assert events == ["commit", "FIRST", "SECOND"]
             raise RuntimeError("interrupted")
         return ScanResult(processed=1, candidates=(), failures=())
 
@@ -117,7 +119,6 @@ def test_incremental_scan_commits_each_member_before_loading_next(monkeypatch):
     assert events == [
         "commit",
         "FIRST",
-        "commit",
         "SECOND",
         "rollback",
         "FAILED",
@@ -125,14 +126,18 @@ def test_incremental_scan_commits_each_member_before_loading_next(monkeypatch):
     ]
 
 
-def test_incremental_scan_continues_after_member_persistence_failure(monkeypatch):
+@pytest.mark.parametrize("incremental", [False, True])
+def test_scan_continues_after_member_persistence_failure(monkeypatch, incremental):
     from types import SimpleNamespace
+
+    import pytest
 
     from market_analysis.scan import ScanResult
     from services import market_analysis_scan as service
 
     events = []
     failures = []
+    current_symbol = []
 
     class Repository:
         def __init__(self, db):
@@ -148,16 +153,23 @@ def test_incremental_scan_continues_after_member_persistence_failure(monkeypatch
             failures.append(kwargs)
 
     def scan(members, **kwargs):
-        events.append(members[0].symbol)
+        events.append(f"scan:{members[0].symbol}")
         return ScanResult(processed=1, candidates=(), failures=())
 
+    def save(*args, members, **kwargs):
+        current_symbol[:] = [members[0].symbol]
+        events.append(f"save:{members[0].symbol}")
+        return {}
+
     def expire(*args):
-        if events[-1] == "BAD":
+        events.append(f"expire:{current_symbol[0]}")
+        if current_symbol[0] == "BAD":
             raise RuntimeError("write failed")
         return 1
 
     monkeypatch.setattr(service, "MarketAnalysisRepository", Repository)
     monkeypatch.setattr(service, "scan_members", scan)
+    monkeypatch.setattr(service, "save_scan_evaluations", save)
     monkeypatch.setattr(service, "expire_evaluated_signals", expire)
     db = SimpleNamespace(
         commit=lambda: events.append("commit"),
@@ -173,24 +185,130 @@ def test_incremental_scan_continues_after_member_persistence_failure(monkeypatch
             for symbol in ("FIRST", "BAD", "THIRD")
         ],
         config=ScanConfig(instrument_batch_size=1),
-        incremental=True,
+        incremental=incremental,
     )
     assert result["status"] == "PARTIAL"
     assert result["failed_symbols"] == ["BAD"]
     assert result["expired_signals"] == 2
     assert failures[0]["symbol"] == "BAD"
-    assert events == [
+    expected_scan_events = (
+        ["commit", "scan:FIRST", "scan:BAD", "scan:THIRD"]
+        if incremental
+        else ["scan:FIRST"]
+    )
+    assert events[: len(expected_scan_events)] == expected_scan_events
+    assert events[len(expected_scan_events) :] == [
+        "save:FIRST",
+        "expire:FIRST",
         "commit",
-        "FIRST",
-        "commit",
-        "BAD",
+        "save:BAD",
+        "expire:BAD",
         "rollback",
         "commit",
-        "THIRD",
+        "save:THIRD",
+        "expire:THIRD",
         "commit",
         "COMPLETED",
         "commit",
     ]
+
+
+@pytest.mark.parametrize("incremental", [False, True])
+def test_scan_persists_global_llm_eligibility_once_per_signal(monkeypatch, incremental):
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from market_analysis.models import (
+        ScoreBreakdown,
+        SignalCandidate,
+        SignalDirection,
+        SignalType,
+        TrendType,
+    )
+    from market_analysis.quant_prefilter import QuantPrefilterConfig
+    from market_analysis.scan import EvaluatedSignal, ScanMember, ScanResult
+    from services import market_analysis_scan as service
+
+    stored = []
+    scan_count = []
+
+    class Repository:
+        def __init__(self, db):
+            pass
+
+        def start_scan_run(self, **kwargs):
+            return "run"
+
+        def finish_scan_run(self, **kwargs):
+            pass
+
+        def upsert_signal(self, *, candidate, **kwargs):
+            stored.append(candidate.evidence["quant"]["llm_eligible"])
+            return str(len(stored))
+
+        def record_scan_failure(self, **kwargs):
+            raise AssertionError(f"unexpected scan failure: {kwargs}")
+
+    members = [
+        ScanMember("universe", f"instrument-{index}", None, f"SYM{index}")
+        for index in range(3)
+    ]
+    evaluated = []
+    for index, member in enumerate(members):
+        candidate = SignalCandidate(
+            strategy_code="TECH",
+            timeframe="1D",
+            direction=SignalDirection.LONG,
+            signal_type=SignalType.BUY,
+            trend=TrendType.BULLISH,
+            reference_price=10.0,
+            observed_at=datetime(2026, 1, 1, tzinfo=UTC),
+            confidence=0.2 + index * 0.3,
+            reasons=(),
+            evidence={},
+        )
+        evaluated.append(
+            EvaluatedSignal(member, candidate, ScoreBreakdown(technical=50.0))
+        )
+
+    def scan(batch, **kwargs):
+        scan_count.append(batch[0].symbol)
+        return ScanResult(
+            processed=len(batch),
+            candidates=tuple(
+                item
+                for item in evaluated
+                if item.member.instrument_id
+                in {member.instrument_id for member in batch}
+            ),
+            failures=(),
+        )
+
+    monkeypatch.setattr(service, "MarketAnalysisRepository", Repository)
+    monkeypatch.setattr(service, "scan_members", scan)
+    monkeypatch.setattr(service, "save_scan_evaluations", lambda *args, **kwargs: {})
+    monkeypatch.setattr(service, "reconcile_persisted_signals", lambda *args, **kwargs: [])
+    monkeypatch.setattr(service, "expire_evaluated_signals", lambda *args: 0)
+    db = SimpleNamespace(commit=lambda: None, rollback=lambda: None)
+    result = service.run_member_analysis_scan(
+        db,
+        market_data_service=object(),
+        universe_id="universe",
+        universe_code="context",
+        members=members,
+        config=ScanConfig(instrument_batch_size=1),
+        quant_config=QuantPrefilterConfig(limit=1),
+        incremental=incremental,
+    )
+
+    assert scan_count == (
+        [member.symbol for member in members]
+        if incremental
+        else [members[0].symbol]
+    )
+    assert len(stored) == 3
+    assert stored == [False, False, True]
+    assert result["quant_candidates"] == 1
 
 
 def test_lake_preserves_no_signal_evaluations_without_run_in_identity(monkeypatch):
