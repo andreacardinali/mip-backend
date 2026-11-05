@@ -267,7 +267,7 @@ def process_price_refresh_queue() -> dict:
     else:
         quote_results = []
 
-    for job, quote_result in zip(jobs, quote_results):
+    for job, quote_result in zip(jobs, quote_results, strict=True):
         symbol = str(job["symbol"])
         started_at = datetime.now(UTC)
 

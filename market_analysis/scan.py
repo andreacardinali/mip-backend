@@ -244,7 +244,7 @@ def scan_members(members, *, market_data_service, config):
                     BatchResult(error=error) for _ in batch_members
                 ]
 
-        for member, fetch_result in zip(batch_members, fetch_results):
+        for member, fetch_result in zip(batch_members, fetch_results, strict=True):
             try:
                 if fetch_result.error is not None:
                     raise fetch_result.error
