@@ -15,12 +15,15 @@ CREATE OR REPLACE FUNCTION public.sp_market_screener_enrich_opportunity_payload(
             'source_exchange', instrument.exchange,
             'source_currency_code', instrument.currency_code,
             'source_isin', NULL,
+            'price_as_of', instrument.price_as_of,
             'last_analysis_at', (
                 SELECT max(r.finished_at)
                 FROM public.market_analysis_scan_runs r
                 WHERE r.status = 'COMPLETED'
                   AND (r.summary -> 'evaluated_instrument_ids') ? instrument.instrument_id::text
             ),
+            'signal_observed_at', signal.observed_at,
+            'last_llm_analysis_at', signal.last_llm_analysis_at,
             'strategy_code', opportunity.strategy_code,
             'signal_type', opportunity.signal_type,
             'signal_timeframe', opportunity.signal_timeframe,
@@ -61,6 +64,8 @@ CREATE OR REPLACE FUNCTION public.sp_market_screener_enrich_opportunity_payload(
     FROM public.market_screener_opportunities opportunity
     JOIN public.instruments instrument
       ON instrument.instrument_id = opportunity.instrument_id
+        JOIN public.trading_signals signal
+            ON signal.signal_id = opportunity.signal_id
     JOIN public.entities entity
       ON entity.entity_id = coalesce(
           opportunity.entity_id,
