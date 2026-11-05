@@ -83,7 +83,9 @@ def analyze_screener_context(
         ai_total = 0
         ai_completed = 0
 
-        def load_candidates(*, contract_fingerprint, limit, min_interval_minutes=30):
+        def load_candidates(
+            *, contract_fingerprint, limit, min_interval_minutes=30, max_age_minutes=1440
+        ):
             nonlocal ai_total
             with db.begin_nested():
                 candidates = enrichment_repository.list_pending_context(
@@ -91,6 +93,7 @@ def analyze_screener_context(
                     enrichment_fingerprint=contract_fingerprint,
                     limit=limit,
                     min_interval_minutes=min_interval_minutes,
+                    max_age_minutes=max_age_minutes,
                 )
             ai_total = len(candidates)
             if incremental:

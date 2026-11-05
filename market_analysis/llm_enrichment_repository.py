@@ -11,14 +11,20 @@ class MarketAnalysisLLMEnrichmentRepository:
         self.db = db
 
     def list_pending(
-        self, *, enrichment_fingerprint: str, limit: int, min_interval_minutes: int = 30
+        self,
+        *,
+        enrichment_fingerprint: str,
+        limit: int,
+        min_interval_minutes: int = 30,
+        max_age_minutes: int = 1440,
     ) -> list[dict[str, Any]]:
         rows = self.db.execute(
             text(
                 """
                 SELECT * FROM public.sp_market_analysis_list_pending_llm_enrichment(
                     CAST(:enrichment_fingerprint AS varchar), CAST(:limit AS integer),
-                    NULL::uuid[], CAST(:min_interval_minutes AS integer)
+                    NULL::uuid[], CAST(:min_interval_minutes AS integer),
+                    CAST(:max_age_minutes AS integer)
                 )
             """
             ),
@@ -26,6 +32,7 @@ class MarketAnalysisLLMEnrichmentRepository:
                 "enrichment_fingerprint": enrichment_fingerprint,
                 "limit": limit,
                 "min_interval_minutes": min_interval_minutes,
+                "max_age_minutes": max_age_minutes,
             },
         ).mappings()
         return [dict(row) for row in rows]
@@ -39,6 +46,7 @@ class MarketAnalysisLLMEnrichmentRepository:
         enrichment_fingerprint: str,
         limit: int,
         min_interval_minutes: int = 30,
+        max_age_minutes: int = 1440,
     ) -> list[dict[str, Any]]:
         return list(
             self.db.execute(
@@ -47,7 +55,8 @@ class MarketAnalysisLLMEnrichmentRepository:
                 SELECT * FROM public.sp_market_analysis_list_pending_context_llm_enrichment(
                     CAST(:enrichment_fingerprint AS varchar), CAST(:user_id AS uuid),
                     CAST(:context_type AS varchar), CAST(:context_id AS uuid),
-                    CAST(:limit AS integer), CAST(:min_interval_minutes AS integer)
+                    CAST(:limit AS integer), CAST(:min_interval_minutes AS integer),
+                    CAST(:max_age_minutes AS integer)
                 )
             """
                 ),
@@ -58,6 +67,7 @@ class MarketAnalysisLLMEnrichmentRepository:
                     enrichment_fingerprint=enrichment_fingerprint,
                     limit=limit,
                     min_interval_minutes=min_interval_minutes,
+                    max_age_minutes=max_age_minutes,
                 ),
             ).scalars()
         )

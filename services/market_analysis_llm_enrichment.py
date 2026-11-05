@@ -39,10 +39,11 @@ def run_configured_market_analysis_llm_enrichment(
         limit = int(settings.get(f"{prefix}_RUN_MAX_SIGNALS", 25))
         batch_size = int(settings.get(f"{prefix}_LLM_REQUEST_MAX_SIGNALS", 1))
         min_interval_minutes = int(settings.get(f"{prefix}_MIN_INTERVAL_MINUTES", 30))
+        max_age_minutes = int(settings.get(f"{prefix}_MAX_AGE_MINUTES", 1440))
         if min(max_tokens, limit, batch_size) < 1:
             raise ValueError("Enrichment limits must be positive")
-        if min_interval_minutes < 0:
-            raise ValueError("Enrichment minimum interval must be nonnegative")
+        if min(min_interval_minutes, max_age_minutes) < 0:
+            raise ValueError("Enrichment freshness intervals must be nonnegative")
     except (TypeError, ValueError):
         logger.warning("LLM enrichment unavailable: invalid configuration")
         return {"status": "FAILED", "reason": "invalid_configuration"}
@@ -51,6 +52,7 @@ def run_configured_market_analysis_llm_enrichment(
         contract_fingerprint=contract_fingerprint,
         limit=limit,
         min_interval_minutes=min_interval_minutes,
+        max_age_minutes=max_age_minutes,
     )
     if not candidates:
         return {

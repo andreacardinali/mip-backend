@@ -36,13 +36,18 @@ def _compact_result(result: dict[str, Any]) -> dict[str, Any]:
 
 
 def _load_pending_candidates(
-    *, contract_fingerprint: str, limit: int, min_interval_minutes: int = 30
+    *,
+    contract_fingerprint: str,
+    limit: int,
+    min_interval_minutes: int = 30,
+    max_age_minutes: int = 1440,
 ):
     return run_transactional(
         lambda db: MarketAnalysisLLMEnrichmentRepository(db).list_pending(
             enrichment_fingerprint=contract_fingerprint,
             limit=limit,
             min_interval_minutes=min_interval_minutes,
+            max_age_minutes=max_age_minutes,
         )
     )
 

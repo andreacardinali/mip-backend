@@ -37,12 +37,25 @@ def test_configured_enrichment_skips_provider_when_context_has_no_candidates(
             "contract_fingerprint": result["enrichment_fingerprint"],
             "limit": 7,
             "min_interval_minutes": 30 if interval is None else int(interval),
+                "max_age_minutes": 1440,
         }
     ]
 
 
-@pytest.mark.parametrize("interval", ["-1", "invalid", "1.5", ""])
-def test_invalid_freshness_interval_does_not_load_candidates(monkeypatch, interval):
+@pytest.mark.parametrize(
+    ("setting", "value"),
+    [
+        ("MIN_INTERVAL_MINUTES", "-1"),
+        ("MIN_INTERVAL_MINUTES", "invalid"),
+        ("MIN_INTERVAL_MINUTES", "1.5"),
+        ("MIN_INTERVAL_MINUTES", ""),
+        ("MAX_AGE_MINUTES", "-1"),
+        ("MAX_AGE_MINUTES", "invalid"),
+        ("MAX_AGE_MINUTES", "1.5"),
+        ("MAX_AGE_MINUTES", ""),
+    ],
+)
+def test_invalid_freshness_interval_does_not_load_candidates(monkeypatch, setting, value):
     def unexpected(*args, **kwargs):
         raise AssertionError("Invalid interval must not access candidates or provider")
 
@@ -51,7 +64,7 @@ def test_invalid_freshness_interval_does_not_load_candidates(monkeypatch, interv
         settings={
             "MARKET_ANALYSIS_ENRICHMENT_LLM_MODEL": "test-model",
             "MARKET_ANALYSIS_ENRICHMENT_LLM_BASE_URL": "http://localhost:11434",
-            "MARKET_ANALYSIS_ENRICHMENT_MIN_INTERVAL_MINUTES": interval,
+            f"MARKET_ANALYSIS_ENRICHMENT_{setting}": value,
         },
         load_candidates=unexpected,
         persist_enrichment=unexpected,
@@ -84,6 +97,7 @@ def test_candidate_repository_passes_freshness_interval_to_sql(context):
         "enrichment_fingerprint": "fingerprint",
         "limit": 7,
         "min_interval_minutes": 45,
+        "max_age_minutes": 240,
     }
     if context:
         parameters.update(user_id="owner", context_type="WATCHLIST", context_id="list")
@@ -92,6 +106,7 @@ def test_candidate_repository_passes_freshness_interval_to_sql(context):
         assert repository.list_pending(**parameters) == []
     statement, bound_parameters = calls[0]
     assert "CAST(:min_interval_minutes AS integer)" in statement
+    assert "CAST(:max_age_minutes AS integer)" in statement
     assert bound_parameters == parameters
     if not context:
         assert "NULL::uuid[]" in statement

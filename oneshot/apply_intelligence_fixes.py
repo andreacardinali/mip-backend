@@ -26,8 +26,6 @@ FUNCTION_NAMES = (
     "sp_enqueue_market_price_refresh",
     "sp_market_analysis_expire_evaluated_signals",
     "sp_market_analysis_reconcile_signal_lifecycle",
-    "sp_market_analysis_upsert_signal",
-    "sp_market_analysis_list_pending_llm_enrichment",
     "sp_market_screener_list_ranking_inputs",
     "sp_market_discovery_build_candidates",
     "sp_market_discovery_list_scan_candidates",
@@ -37,11 +35,6 @@ FUNCTION_OVERLOADS = {
     "sp_update_user_preferences": (
         "p_user_id uuid, p_reporting_currency character",
         "p_user_id uuid, p_reporting_currency character, p_display_timezone text",
-    ),
-    "sp_market_analysis_list_pending_llm_enrichment": (
-        "p_enrichment_fingerprint character varying, p_limit integer, p_instrument_ids uuid[], p_min_interval_minutes integer",
-        "p_enrichment_fingerprint character varying, p_limit integer, p_instrument_ids uuid[]",
-        "p_enrichment_fingerprint character varying, p_limit integer DEFAULT 25",
     ),
 }
 

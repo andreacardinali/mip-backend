@@ -179,6 +179,11 @@ nonnegative integers; `0` disables the time-based safeguard (other candidate
 eligibility rules still apply). Invalid values return `invalid_configuration`
 without loading AI candidates or calling the provider.
 
+Set `MARKET_ANALYSIS_ENRICHMENT_MAX_AGE_MINUTES=1440` to refresh AI analysis
+when it is older than the configured maximum age (default: 24 hours). The
+timestamp-only `observed_at` change does not make an analysis stale. Values must
+be nonnegative integers; `0` disables maximum-age refresh.
+
 For an OpenAI-compatible endpoint, set `MARKET_ANALYSIS_ENRICHMENT_LLM_PROVIDER`
 to `openai_compatible` and provide `MODEL`, `BASE_URL` and `API_KEY`. The
 `MARKET_ANALYSIS_ENRICHMENT_LLM_API_PROTOCOL` setting accepts `chat_completions`
@@ -859,10 +864,14 @@ is required; activity visibility depends on the database user's permissions.
 Existing databases must also install the incremental-analysis routines. After
 backup, review and manually apply
 `oneshot/install_screener_incremental_analysis.sql` using PostgreSQL tooling
-with `ON_ERROR_STOP=1`, after the context and context-AI installers. It installs
-the session lock, progress routines and configurable AI freshness overloads,
-matching `mip_schema.sql`. It is transactional and safe to reapply; it does not
-run on startup. A missing `sp_market_screener_session_analysis_lock(boolean)`
+with `ON_ERROR_STOP=1`, after the supported intelligence-fixes runner and the
+`oneshot/install_screener_contexts.sql` and
+`oneshot/install_screener_context_ai.sql` installers. This live-derived
+installer updates signal upsert and LLM persistence, records successful
+analysis timestamps, and installs freshness-aware selectors while preserving
+legacy overload behavior. It also installs the session lock and progress
+routines. It is transactional and safe to reapply; it does not run on startup.
+A missing `sp_market_screener_session_analysis_lock(boolean)`
 indicates that this database upgrade has not been applied. Apply this installer
 last when reapplying the older context-AI installer, which replaces the legacy
 candidate-selection overload.
@@ -1502,9 +1511,15 @@ from this checkout. The upgrade is transactional and safe to repeat; no legacy
 historical acquisition costs are guessed or backfilled. Keep this checkout with
 the deployment record because the migration reads its schema definitions.
 
-For pending AI enrichment, the runner installs both reviewed overloads, placing
-the instrument-scoped implementation before the two-argument compatibility
-wrapper. Missing, duplicate or unreviewed overload signatures are rejected.
+The runner deliberately excludes `sp_market_analysis_upsert_signal` and
+`sp_market_analysis_list_pending_llm_enrichment`: their live-derived definitions
+and compatibility overloads are owned by
+`oneshot/install_screener_incremental_analysis.sql`, not by the potentially
+stale schema dump. Do not apply the standalone
+`oneshot/intelligence_fixes.sql` or `oneshot/apply_intelligence_fixes.sql` files;
+they contain older definitions of these routines. Use this runner for
+intelligence fixes, then apply the incremental-analysis installer last among the
+screener context and enrichment installers.
 
 For user preferences, both reviewed overloads are installed, including the
 GUI-only display timezone. The preflight adds `users.display_timezone` with a
