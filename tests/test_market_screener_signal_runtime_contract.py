@@ -660,6 +660,7 @@ def test_manual_context_scan_records_history_with_transaction_boundaries(
             "enrichment_fingerprint": "fingerprint",
             "limit": 7,
             "min_interval_minutes": 45,
+                "max_age_minutes": 1440,
         }
         return [{"signal_id": "signal"}]
 
