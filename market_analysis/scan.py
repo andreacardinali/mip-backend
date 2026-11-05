@@ -211,6 +211,17 @@ def _completed_bars(bars, config, observed_at, timezone_name=None):
     ]
 
 
+def _insufficient_history_skip(member, available_bars, required_bars):
+    return ScanSkip(
+        member.instrument_id,
+        member.symbol,
+        ScanSkipReason.INSUFFICIENT_HISTORY,
+        f"insufficient history: {available_bars} bars; minimum {required_bars}",
+        available_bars,
+        required_bars,
+    )
+
+
 def evaluate_member(
     member, *, market_data_service, config, observed_at=None, exchange_timezone=None
 ):
@@ -222,6 +233,10 @@ def evaluate_member(
             interval=config.interval,
         )
     )
+    if len(bars) < config.minimum_bars:
+        raise ValueError(
+            f"insufficient history: {len(bars)} bars; minimum {config.minimum_bars}"
+        )
     bars = _completed_bars(bars, config, observed_at, exchange_timezone)
     if len(bars) < config.minimum_bars:
         raise ValueError(
@@ -285,17 +300,19 @@ def scan_members(
                 bars = fetch_result.value
                 if bars is None:
                     raise ValueError("OHLCV batch result has no value")
+                if len(bars) < config.minimum_bars:
+                    skipped.append(
+                        _insufficient_history_skip(
+                            member, len(bars), config.minimum_bars
+                        )
+                    )
+                    continue
                 timezone_name = (exchange_timezones or {}).get(member.exchange)
                 bars = _completed_bars(bars, config, observed_at, timezone_name)
                 if len(bars) < config.minimum_bars:
                     skipped.append(
-                        ScanSkip(
-                            member.instrument_id,
-                            member.symbol,
-                            ScanSkipReason.INSUFFICIENT_HISTORY,
-                            f"insufficient history: {len(bars)} bars; minimum {config.minimum_bars}",
-                            len(bars),
-                            config.minimum_bars,
+                        _insufficient_history_skip(
+                            member, len(bars), config.minimum_bars
                         )
                     )
                     continue
