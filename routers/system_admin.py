@@ -11,7 +11,12 @@ from job_runtime.requests import REQUEST_ONLY_JOBS, SUPERSEDED_JOBS
 from scheduler_repository import SchedulerRepository
 from scheduler_triggers import SCHEDULER_TIMEZONE, build_trigger
 from services.entity_refresh_request import RefreshEntitiesRequest
+from services.market_price_refresh import live_price_max_age_seconds
 from services.market_screener_pipeline_request import MarketScreenerPipelineRequest
+from market_time.calendar import ExchangeCalendarsProvider
+from market_time.models import MarketStatus
+from market_time.repository import SQLExchangeHoursRepository
+from market_time.service import MarketTimeService
 
 router = APIRouter()
 
@@ -27,6 +32,62 @@ class CronPreview(BaseModel):
     cron_expression: str
 
 
+def _outdated_price_instruments(db, *, limit: int, observed_at: datetime) -> dict:
+    max_age_seconds = live_price_max_age_seconds()
+    candidates = (
+        db.execute(
+            text(
+                """
+                  SELECT symbol, exchange, data_source, last_price, price_as_of
+                FROM public.instruments
+                WHERE last_price IS NULL
+                   OR price_as_of IS NULL
+                   OR price_as_of < :observed_at - (:max_age_seconds * interval '1 second')
+                ORDER BY price_as_of ASC NULLS FIRST, symbol
+                """
+            ),
+            {
+                "max_age_seconds": max_age_seconds,
+                "observed_at": observed_at,
+            },
+        )
+        .mappings()
+        .all()
+    )
+    market_time = MarketTimeService(
+        SQLExchangeHoursRepository(db), ExchangeCalendarsProvider()
+    )
+    market_statuses = {}
+    for exchange in {row["exchange"] for row in candidates if row["exchange"]}:
+        market_statuses[exchange] = market_time.snapshot(
+            exchange, at=observed_at
+        ).status
+
+    issues = []
+    for candidate in candidates:
+        row = dict(candidate)
+        status = market_statuses.get(row["exchange"], MarketStatus.UNKNOWN)
+        missing_price = row["last_price"] is None
+        missing_timestamp = row["price_as_of"] is None
+        if missing_price:
+            issue = "MISSING_PRICE"
+        elif status == MarketStatus.OPEN and missing_timestamp:
+            issue = "MISSING_TIMESTAMP"
+        elif status == MarketStatus.OPEN:
+            issue = "NOT_UPDATED_DURING_OPEN_MARKET"
+        else:
+            continue
+        row["issue"] = issue
+        row["market_status"] = status.value
+        issues.append(row)
+
+    return {
+        "max_age_seconds": max_age_seconds,
+        "instruments": issues[:limit],
+        "truncated": len(issues) > limit,
+    }
+
+
 @router.get("/diagnostics")
 def get_pipeline_diagnostics(
     limit: int = Query(default=50, ge=1, le=200),
@@ -39,8 +100,9 @@ def get_pipeline_diagnostics(
             result = db.execute(text(statement), parameters or {})
             return [dict(row) for row in result.mappings().all()]
 
+        generated_at = datetime.now(UTC)
         return {
-            "generated_at": datetime.now(UTC),
+            "generated_at": generated_at,
             "window_days": 7,
             "ingestion": {
                 "by_stage_source": rows(
@@ -112,6 +174,9 @@ def get_pipeline_diagnostics(
                     LIMIT :limit
                     """,
                     {"limit": limit},
+                ),
+                "outdated_instruments": _outdated_price_instruments(
+                    db, limit=limit, observed_at=generated_at
                 ),
             },
             "notifications": {

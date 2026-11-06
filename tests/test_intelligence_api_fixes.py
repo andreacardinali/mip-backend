@@ -1,5 +1,5 @@
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -855,6 +855,7 @@ def test_pipeline_diagnostics_returns_bounded_pipeline_sections(monkeypatch):
         [{"job_key": "market_analysis_scan", "status": "SUCCESS"}],
         [{"status": "RETRY", "job_count": 2, "dispatcher_attempts": 4, "http_404_count": 1}],
         [{"symbol": "ABC", "status": "RETRY", "attempt_count": 2}],
+        [],
         [{"status": "SENT", "channel": "EMAIL", "notification_count": 1}],
         [{"status": "FAILED", "channel": "EMAIL", "attempt_count": 3}],
         [{"channel": "EMAIL", "configured_sources": 2, "ready_sources": 1}],
@@ -869,14 +870,93 @@ def test_pipeline_diagnostics_returns_bounded_pipeline_sections(monkeypatch):
     assert result["processing"]["recent_runs"] == result_sets[3]
     assert result["price_refresh"]["by_status"] == result_sets[4]
     assert result["price_refresh"]["recent_jobs"] == result_sets[5]
-    assert result["notifications"]["recent"] == result_sets[7]
-    assert result["notifications"]["channels"] == result_sets[8]
-    assert db.execute.call_count == 9
+    assert result["price_refresh"]["outdated_instruments"]["instruments"] == []
+    assert result["notifications"]["recent"] == result_sets[8]
+    assert result["notifications"]["channels"] == result_sets[9]
+    assert db.execute.call_count == 10
     assert db.execute.call_args_list[1].args[1] == {"limit": 10}
     assert db.execute.call_args_list[3].args[1] == {"limit": 10}
     assert db.execute.call_args_list[5].args[1] == {"limit": 10}
-    assert db.execute.call_args_list[7].args[1] == {"limit": 10}
+    assert db.execute.call_args_list[8].args[1] == {"limit": 10}
     db.close.assert_called_once()
+
+
+def test_price_diagnostics_only_marks_old_prices_while_market_is_open(monkeypatch):
+    from routers import system_admin
+
+    observed_at = datetime.now(UTC)
+
+    class Result:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return [
+                {
+                    "symbol": "OPEN",
+                    "exchange": "NYSE",
+                    "last_price": 10,
+                    "price_as_of": observed_at - timedelta(minutes=2),
+                },
+                {
+                    "symbol": "OPEN-NO-TIMESTAMP",
+                    "exchange": "NYSE",
+                    "last_price": 15,
+                    "price_as_of": None,
+                },
+                {
+                    "symbol": "CLOSED",
+                    "exchange": "XETRA",
+                    "last_price": 20,
+                    "price_as_of": observed_at - timedelta(minutes=2),
+                },
+                {
+                    "symbol": "MISSING",
+                    "exchange": "XETRA",
+                    "last_price": None,
+                    "price_as_of": None,
+                },
+                {
+                    "symbol": "NO-TIMESTAMP-CLOSED",
+                    "exchange": "XETRA",
+                    "last_price": 5,
+                    "price_as_of": None,
+                },
+            ]
+
+    class MarketTime:
+        def snapshot(self, exchange, *, at):
+            status = {
+                "NYSE": system_admin.MarketStatus.OPEN,
+                "XETRA": system_admin.MarketStatus.CLOSED,
+            }[exchange]
+            return SimpleNamespace(status=status)
+
+    db = MagicMock()
+    db.execute.return_value = Result()
+    monkeypatch.setattr(system_admin, "live_price_max_age_seconds", lambda: 30)
+    monkeypatch.setattr(
+        system_admin,
+        "MarketTimeService",
+        lambda repository, calendars: MarketTime(),
+    )
+
+    result = system_admin._outdated_price_instruments(
+        db, limit=10, observed_at=observed_at
+    )
+
+    assert [row["symbol"] for row in result["instruments"]] == [
+        "OPEN",
+        "OPEN-NO-TIMESTAMP",
+        "MISSING",
+    ]
+    assert result["instruments"][0]["issue"] == "NOT_UPDATED_DURING_OPEN_MARKET"
+    assert result["instruments"][1]["issue"] == "MISSING_TIMESTAMP"
+    assert result["instruments"][2]["issue"] == "MISSING_PRICE"
+    assert result["instruments"][0]["market_status"] == "OPEN"
+    assert result["instruments"][2]["market_status"] == "CLOSED"
+    assert result["max_age_seconds"] == 30
+    assert result["truncated"] is False
 
 
 @pytest.mark.parametrize("manual_request", [False, True])
