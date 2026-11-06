@@ -6,7 +6,7 @@
   "python_module": "jobs.market_price_refresh.discovery",
   "trigger": {
     "type": "interval",
-    "interval_minutes": 1440
+    "interval_minutes": 1
   },
   "enabled_by_default": true
 }

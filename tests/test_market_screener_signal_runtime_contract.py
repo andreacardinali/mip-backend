@@ -3,6 +3,7 @@ import re
 import runpy
 import sys
 from contextlib import nullcontext
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from uuid import UUID
@@ -274,7 +275,21 @@ def test_opportunity_filters_and_limit_are_applied_by_sql(watchlist_match) -> No
         "MarketScreenerApiRepository"
     ]
     calls = []
-    results = [{"opportunity_id": "late-match", "consensus_direction": "BULLISH"}]
+    now = datetime.now(UTC)
+    stale = {
+        "opportunity_id": "stale",
+        "last_price": 10,
+        "price_as_of": (now - timedelta(days=4)).isoformat(),
+        "last_analysis_at": now.isoformat(),
+    }
+    fresh = {
+        "opportunity_id": "fresh",
+        "consensus_direction": "BULLISH",
+        "last_price": 10,
+        "price_as_of": now.isoformat(),
+        "last_analysis_at": now.isoformat(),
+    }
+    results = [stale, fresh]
 
     def execute(statement, params):
         calls.append((str(statement), params))
@@ -290,11 +305,11 @@ def test_opportunity_filters_and_limit_are_applied_by_sql(watchlist_match) -> No
             context_id="watchlist",
             limit=1,
         )
-        == results
+        == [fresh]
     )
     statement, params = calls[0]
     assert "sp_market_screener_list_filtered_opportunities" in statement
-    assert params["limit"] == 1
+    assert params["limit"] == 1000
     assert "fetch_limit" not in params
     assert params["consensus_direction"] == "BULLISH"
     assert params["strategy_code"] == "SUPERTREND"
@@ -320,7 +335,14 @@ def test_get_opportunity_exposes_boolean_llm_eligibility(evidence, expected) -> 
     repository = runpy.run_path("market_screener/api_repository.py")[
         "MarketScreenerApiRepository"
     ]
-    payload = {"opportunity_id": "opportunity", "evidence": evidence}
+    now = datetime.now(UTC).isoformat()
+    payload = {
+        "opportunity_id": "opportunity",
+        "evidence": evidence,
+        "last_price": 10,
+        "price_as_of": now,
+        "last_analysis_at": now,
+    }
 
     def execute(statement, params):
         return SimpleNamespace(scalar_one_or_none=lambda: payload)
@@ -331,6 +353,51 @@ def test_get_opportunity_exposes_boolean_llm_eligibility(evidence, expected) -> 
 
     assert result["llm_eligible"] is expected
     assert result["evidence"] is evidence
+
+
+def test_get_opportunity_hides_payload_without_fresh_price_or_analysis() -> None:
+    repository = runpy.run_path("market_screener/api_repository.py")[
+        "MarketScreenerApiRepository"
+    ]
+
+    def execute(statement, params):
+        return SimpleNamespace(
+            scalar_one_or_none=lambda: {
+                "opportunity_id": "stale",
+                "last_price": 10,
+                "price_as_of": None,
+                "last_analysis_at": datetime.now(UTC).isoformat(),
+            }
+        )
+
+    assert (
+        repository(SimpleNamespace(execute=execute)).get_opportunity(
+            user_id="owner", opportunity_id="stale"
+        )
+        is None
+    )
+
+
+def test_opportunity_freshness_rejects_future_timestamps_and_non_finite_prices() -> None:
+    is_fresh = runpy.run_path("market_screener/api_repository.py")[
+        "_opportunity_is_fresh"
+    ]
+    now = datetime.now(UTC)
+
+    assert not is_fresh(
+        {
+            "last_price": 10,
+            "price_as_of": (now + timedelta(minutes=1)).isoformat(),
+            "last_analysis_at": now.isoformat(),
+        }
+    )
+    assert not is_fresh(
+        {
+            "last_price": float("nan"),
+            "price_as_of": now.isoformat(),
+            "last_analysis_at": now.isoformat(),
+        }
+    )
 
 
 def test_watchlist_filter_applies_before_limit() -> None:

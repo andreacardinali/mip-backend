@@ -1,9 +1,53 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+from math import isfinite
 from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
+
+from config.settings import settings
+
+
+def _parse_timestamp(value: Any) -> datetime | None:
+    if isinstance(value, str):
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    elif isinstance(value, datetime):
+        parsed = value
+    else:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _opportunity_is_fresh(payload: dict[str, Any]) -> bool:
+    try:
+        price_max_age = timedelta(
+            hours=int(settings.get("MARKET_SCREENER_MAX_PRICE_AGE_HOURS", 72))
+        )
+        analysis_max_age = timedelta(
+            hours=int(settings.get("MARKET_SCREENER_MAX_ANALYSIS_AGE_HOURS", 72))
+        )
+        if price_max_age.total_seconds() <= 0 or analysis_max_age.total_seconds() <= 0:
+            return False
+        last_price = float(payload.get("last_price"))
+        if not isfinite(last_price) or last_price <= 0:
+            return False
+        now = datetime.now(UTC)
+        price_as_of = _parse_timestamp(payload.get("price_as_of"))
+        last_analysis_at = _parse_timestamp(payload.get("last_analysis_at"))
+        if price_as_of is None or last_analysis_at is None:
+            return False
+        price_age = now - price_as_of
+        analysis_age = now - last_analysis_at
+        return (
+            timedelta(0) <= price_age <= price_max_age
+            and timedelta(0) <= analysis_age <= analysis_max_age
+        )
+    except (TypeError, ValueError, OverflowError):
+        return False
 
 
 class MarketScreenerApiRepository:
@@ -98,10 +142,11 @@ class MarketScreenerApiRepository:
                 "context_id": context_id,
                 "minimum_score": minimum_score,
                 "query": query,
-                "limit": limit,
+                "limit": max(limit, 1000),
             },
         ).scalars()
-        return [dict(row) for row in rows]
+        fresh = [dict(row) for row in rows if _opportunity_is_fresh(dict(row))]
+        return fresh[:limit]
 
     def get_opportunity(self, *, user_id: str, opportunity_id: str):
         p = self.db.execute(
@@ -114,6 +159,8 @@ class MarketScreenerApiRepository:
             return None
 
         payload = dict(p)
+        if not _opportunity_is_fresh(payload):
+            return None
         evidence = payload.get("evidence")
         quant_evidence = evidence.get("quant") if isinstance(evidence, dict) else None
         llm_eligible = (

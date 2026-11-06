@@ -15,6 +15,7 @@ CREATE OR REPLACE FUNCTION public.sp_market_screener_enrich_opportunity_payload(
             'source_exchange', instrument.exchange,
             'source_currency_code', instrument.currency_code,
             'source_isin', NULL,
+            'last_price', instrument.last_price,
             'price_as_of', instrument.price_as_of,
             'last_analysis_at', (
                 SELECT max(r.finished_at)

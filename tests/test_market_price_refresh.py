@@ -17,7 +17,7 @@ def test_scheduled_refresh_manifests_load_with_expected_cadence():
     )
 
     assert dispatcher["trigger"]["interval_minutes"] == 1
-    assert discovery["trigger"]["interval_minutes"] == 1440
+    assert discovery["trigger"]["interval_minutes"] == 1
 
 
 def test_live_price_max_age_seconds_setting(monkeypatch):

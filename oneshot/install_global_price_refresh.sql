@@ -19,7 +19,7 @@ FROM public.sp_register_scheduler_job(
     p_python_module => 'jobs.market_price_refresh.discovery',
     p_trigger_type => 'interval',
     p_cron_expression => NULL,
-    p_interval_minutes => 1440,
+    p_interval_minutes => 1,
     p_enabled_by_default => TRUE,
     p_description => 'Finds stale prices across active market universes and enqueues them for refresh.'
 ) AS registration;
