@@ -20,6 +20,22 @@ def test_scheduled_refresh_manifests_load_with_expected_cadence():
     assert discovery["trigger"]["interval_minutes"] == 1440
 
 
+def test_live_price_max_age_seconds_setting(monkeypatch):
+    monkeypatch.setattr(service.settings, "get", lambda key, default=None: default)
+    assert service.live_price_max_age_seconds() == 30
+
+    monkeypatch.setattr(service.settings, "get", lambda key, default=None: "120")
+    assert service.live_price_max_age_seconds() == 120
+
+    monkeypatch.setattr(service.settings, "get", lambda key, default=None: "0")
+    try:
+        service.live_price_max_age_seconds()
+    except ValueError as error:
+        assert "MARKET_PRICE_REFRESH_MAX_AGE_SECONDS" in str(error)
+    else:
+        raise AssertionError("non-positive max age must be rejected")
+
+
 def test_price_refresh_batches_quotes_and_retries_only_failed_item(monkeypatch):
     jobs = [
         {

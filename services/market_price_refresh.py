@@ -5,16 +5,29 @@ from uuid import UUID
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from config.settings import settings
 from db import SessionLocal
 from market_data.factory import market_data
 from market_data.models import BatchResult, InstrumentReference
 
 logger = logging.getLogger(__name__)
 
-LIVE_PRICE_MAX_AGE_SECONDS = 30
+LIVE_PRICE_MAX_AGE_SECONDS_SETTING = "MARKET_PRICE_REFRESH_MAX_AGE_SECONDS"
 BATCH_SIZE = 20
 STALE_PROCESSING_MINUTES = 10
 RETRY_DELAYS_SECONDS = (60, 300, 900, 3600, 21600, 86400)
+
+
+def live_price_max_age_seconds() -> int:
+    try:
+        max_age_seconds = int(settings.get(LIVE_PRICE_MAX_AGE_SECONDS_SETTING, 30))
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            f"{LIVE_PRICE_MAX_AGE_SECONDS_SETTING} must be a positive integer"
+        ) from error
+    if max_age_seconds < 1:
+        raise ValueError(f"{LIVE_PRICE_MAX_AGE_SECONDS_SETTING} must be >= 1")
+    return max_age_seconds
 
 
 def enqueue_price_refresh(
@@ -73,8 +86,10 @@ def enqueue_user_price_refreshes(
 def enqueue_stale_market_price_refreshes(
     db: Session,
     *,
-    max_age_seconds: int = LIVE_PRICE_MAX_AGE_SECONDS,
+    max_age_seconds: int | None = None,
 ) -> dict:
+    if max_age_seconds is None:
+        max_age_seconds = live_price_max_age_seconds()
     row = db.execute(
         text(
             """
