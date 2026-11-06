@@ -6,13 +6,10 @@ from pathlib import Path
 
 
 def migration_statements(
-    *,
-    upgrade: bool = False,
-    rename_job_only: bool = False,
-    catalog_only: bool = False,
+    *, upgrade: bool = False, rename_job_only: bool = False
 ) -> list[str]:
-    if sum((upgrade, rename_job_only, catalog_only)) > 1:
-        raise ValueError("Choose only one exchange registry operation")
+    if upgrade and rename_job_only:
+        raise ValueError("Choose either registry upgrade or scheduler rename only")
     schema = (Path(__file__).resolve().parents[1] / "mip_schema.sql").read_text(
         encoding="utf-8"
     )
@@ -49,17 +46,10 @@ def migration_statements(
         r"^CREATE FUNCTION public\.sp_upsert_exchange\(" + function_body_pattern,
         r"^CREATE FUNCTION public\.sp_sync_exchange_catalog\(" + function_body_pattern,
     )
-    catalog_pattern = (
-        r"^CREATE FUNCTION public\.sp_sync_exchange_catalog\("
-        + function_body_pattern
+    patterns = (() if rename_job_only else registry_patterns) + (
+        r"^CREATE FUNCTION public\.sp_migrate_exchange_sync_job\("
+        + function_body_pattern,
     )
-    if catalog_only:
-        patterns = (catalog_pattern,)
-    else:
-        patterns = (() if rename_job_only else registry_patterns) + (
-            r"^CREATE FUNCTION public\.sp_migrate_exchange_sync_job\("
-            + function_body_pattern,
-        )
     for pattern in patterns:
         matches = list(re.finditer(pattern, schema, flags=re.MULTILINE | re.DOTALL))
         if len(matches) != 1:
@@ -72,9 +62,7 @@ def migration_statements(
             .group()
             .replace("CREATE FUNCTION", "CREATE OR REPLACE FUNCTION", 1)
         )
-    if not catalog_only:
-        statements.append("SELECT public.sp_migrate_exchange_sync_job();")
-    return statements
+    return [*statements, "SELECT public.sp_migrate_exchange_sync_job();"]
 
 
 def main() -> None:
@@ -89,16 +77,9 @@ def main() -> None:
         action="store_true",
         help="Rename the existing scheduler job without changing registry objects",
     )
-    mode.add_argument(
-        "--catalog-only",
-        action="store_true",
-        help="Install only the exchange catalog synchronization function",
-    )
     args = parser.parse_args()
     statements = migration_statements(
-        upgrade=args.upgrade,
-        rename_job_only=args.rename_job_only,
-        catalog_only=args.catalog_only,
+        upgrade=args.upgrade, rename_job_only=args.rename_job_only
     )
     if not args.apply:
         print("BEGIN;\n" + "\n\n".join(statements) + "\nCOMMIT;")
