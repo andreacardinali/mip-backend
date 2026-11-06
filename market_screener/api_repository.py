@@ -8,6 +8,10 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from config.settings import settings
+from market_time.calendar import ExchangeCalendarsProvider
+from market_time.models import MarketStatus
+from market_time.repository import SQLExchangeHoursRepository
+from market_time.service import MarketTimeService
 
 
 def _parse_timestamp(value: Any) -> datetime | None:
@@ -22,7 +26,12 @@ def _parse_timestamp(value: Any) -> datetime | None:
     return parsed.astimezone(UTC)
 
 
-def _opportunity_is_fresh(payload: dict[str, Any]) -> bool:
+def _opportunity_is_fresh(
+    payload: dict[str, Any],
+    *,
+    market_time: MarketTimeService | None = None,
+    session_open_cache: dict[str, datetime | None] | None = None,
+) -> bool:
     try:
         price_max_age = timedelta(
             hours=int(settings.get("MARKET_SCREENER_MAX_PRICE_AGE_HOURS", 72))
@@ -45,9 +54,38 @@ def _opportunity_is_fresh(payload: dict[str, Any]) -> bool:
         return (
             timedelta(0) <= price_age <= price_max_age
             and timedelta(0) <= analysis_age <= analysis_max_age
+            and _price_is_current_for_market(
+                payload,
+                price_as_of,
+                market_time=market_time,
+                session_open_cache=session_open_cache,
+            )
         )
     except (TypeError, ValueError, OverflowError):
         return False
+
+
+def _price_is_current_for_market(
+    payload: dict[str, Any],
+    price_as_of: datetime,
+    *,
+    market_time: MarketTimeService | None,
+    session_open_cache: dict[str, datetime | None] | None,
+) -> bool:
+    exchange = payload.get("source_exchange")
+    if not isinstance(exchange, str) or not exchange.strip() or market_time is None:
+        return False
+    exchange = exchange.strip()
+    cache = session_open_cache if session_open_cache is not None else {}
+    if exchange not in cache:
+        clock = market_time.snapshot(exchange)
+        if clock.status == MarketStatus.UNKNOWN:
+            cache[exchange] = None
+        else:
+            session = clock.session or clock.previous_session
+            cache[exchange] = session.opens_at if session is not None else None
+    latest_session_open = cache[exchange]
+    return latest_session_open is not None and price_as_of >= latest_session_open
 
 
 class MarketScreenerApiRepository:
@@ -79,6 +117,9 @@ class MarketScreenerApiRepository:
 
     def __init__(self, db: Session):
         self.db = db
+        self.market_time = MarketTimeService(
+            SQLExchangeHoursRepository(db), ExchangeCalendarsProvider()
+        )
 
     def context_instruments(
         self, *, user_id: str, context_type: str, context_id: str
@@ -145,7 +186,16 @@ class MarketScreenerApiRepository:
                 "limit": max(limit, 1000),
             },
         ).scalars()
-        fresh = [dict(row) for row in rows if _opportunity_is_fresh(dict(row))]
+        session_open_cache: dict[str, datetime | None] = {}
+        fresh = [
+            dict(row)
+            for row in rows
+            if _opportunity_is_fresh(
+                dict(row),
+                market_time=self.market_time,
+                session_open_cache=session_open_cache,
+            )
+        ]
         return fresh[:limit]
 
     def get_opportunity(self, *, user_id: str, opportunity_id: str):
@@ -159,7 +209,7 @@ class MarketScreenerApiRepository:
             return None
 
         payload = dict(p)
-        if not _opportunity_is_fresh(payload):
+        if not _opportunity_is_fresh(payload, market_time=self.market_time):
             return None
         evidence = payload.get("evidence")
         quant_evidence = evidence.get("quant") if isinstance(evidence, dict) else None

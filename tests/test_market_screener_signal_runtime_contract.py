@@ -271,9 +271,8 @@ def test_signal_recipient_repository_calls_collection_routine() -> None:
 
 @pytest.mark.parametrize("watchlist_match", [None, False, True])
 def test_opportunity_filters_and_limit_are_applied_by_sql(watchlist_match) -> None:
-    repository = runpy.run_path("market_screener/api_repository.py")[
-        "MarketScreenerApiRepository"
-    ]
+    module = runpy.run_path("market_screener/api_repository.py")
+    repository = module["MarketScreenerApiRepository"]
     calls = []
     now = datetime.now(UTC)
     stale = {
@@ -288,6 +287,7 @@ def test_opportunity_filters_and_limit_are_applied_by_sql(watchlist_match) -> No
         "last_price": 10,
         "price_as_of": now.isoformat(),
         "last_analysis_at": now.isoformat(),
+        "source_exchange": "NYSE",
     }
     results = [stale, fresh]
 
@@ -295,18 +295,23 @@ def test_opportunity_filters_and_limit_are_applied_by_sql(watchlist_match) -> No
         calls.append((str(statement), params))
         return SimpleNamespace(scalars=lambda: iter(results))
 
-    assert (
-        repository(SimpleNamespace(execute=execute)).list_opportunities(
-            user_id="owner",
-            watchlist_match=watchlist_match,
-            consensus_direction="BULLISH",
-            strategy_code="SUPERTREND",
-            context_type="WATCHLIST",
-            context_id="watchlist",
-            limit=1,
+    repo = repository(SimpleNamespace(execute=execute))
+    repo.market_time = SimpleNamespace(
+        snapshot=lambda exchange: SimpleNamespace(
+            status=module["MarketStatus"].OPEN,
+            session=SimpleNamespace(opens_at=now - timedelta(hours=1)),
+            previous_session=None,
         )
-        == [fresh]
     )
+    assert repo.list_opportunities(
+        user_id="owner",
+        watchlist_match=watchlist_match,
+        consensus_direction="BULLISH",
+        strategy_code="SUPERTREND",
+        context_type="WATCHLIST",
+        context_id="watchlist",
+        limit=1,
+    ) == [fresh]
     statement, params = calls[0]
     assert "sp_market_screener_list_filtered_opportunities" in statement
     assert params["limit"] == 1000
@@ -332,9 +337,8 @@ def test_opportunity_filters_and_limit_are_applied_by_sql(watchlist_match) -> No
     ],
 )
 def test_get_opportunity_exposes_boolean_llm_eligibility(evidence, expected) -> None:
-    repository = runpy.run_path("market_screener/api_repository.py")[
-        "MarketScreenerApiRepository"
-    ]
+    module = runpy.run_path("market_screener/api_repository.py")
+    repository = module["MarketScreenerApiRepository"]
     now = datetime.now(UTC).isoformat()
     payload = {
         "opportunity_id": "opportunity",
@@ -342,14 +346,22 @@ def test_get_opportunity_exposes_boolean_llm_eligibility(evidence, expected) -> 
         "last_price": 10,
         "price_as_of": now,
         "last_analysis_at": now,
+        "source_exchange": "NYSE",
     }
 
     def execute(statement, params):
         return SimpleNamespace(scalar_one_or_none=lambda: payload)
 
-    result = repository(SimpleNamespace(execute=execute)).get_opportunity(
-        user_id="owner", opportunity_id="opportunity"
+    repo = repository(SimpleNamespace(execute=execute))
+    parsed_now = datetime.fromisoformat(now)
+    repo.market_time = SimpleNamespace(
+        snapshot=lambda exchange: SimpleNamespace(
+            status=module["MarketStatus"].OPEN,
+            session=SimpleNamespace(opens_at=parsed_now - timedelta(hours=1)),
+            previous_session=None,
+        )
     )
+    result = repo.get_opportunity(user_id="owner", opportunity_id="opportunity")
 
     assert result["llm_eligible"] is expected
     assert result["evidence"] is evidence
@@ -391,6 +403,36 @@ def test_opportunity_freshness_rejects_future_timestamps_and_non_finite_prices()
             "last_analysis_at": now.isoformat(),
         }
     )
+
+
+@pytest.mark.parametrize(
+    ("price_age_hours", "session_open_age_hours", "expected"),
+    [(22, 6, False), (48, 72, True)],
+)
+def test_opportunity_freshness_tracks_market_sessions(
+    price_age_hours, session_open_age_hours, expected
+) -> None:
+    module = runpy.run_path("market_screener/api_repository.py")
+    is_fresh = module["_opportunity_is_fresh"]
+    now = datetime.now(UTC)
+    latest_open = now - timedelta(hours=session_open_age_hours)
+    market_time = SimpleNamespace(
+        snapshot=lambda exchange: SimpleNamespace(
+            status=module["MarketStatus"].OPEN,
+            session=SimpleNamespace(opens_at=latest_open),
+            previous_session=None,
+        )
+    )
+
+    assert is_fresh(
+        {
+            "last_price": 10,
+            "price_as_of": (now - timedelta(hours=price_age_hours)).isoformat(),
+            "last_analysis_at": now.isoformat(),
+            "source_exchange": "NYSE",
+        },
+        market_time=market_time,
+    ) is expected
     assert not is_fresh(
         {
             "last_price": float("nan"),
