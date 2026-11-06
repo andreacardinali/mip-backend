@@ -895,6 +895,29 @@ def test_exchange_catalog_resolves_calendar_alias_only_when_timezone_matches():
     assert [item["calendar_name"] for item in payload] == ["XNYS", None, None]
 
 
+def test_exchange_catalog_continues_when_calendar_construction_fails():
+    pytest.importorskip("exchange_calendars")
+    db = Mock()
+    db.execute.return_value.scalar_one.return_value = 1
+    catalog = (
+        ExchangeReference(
+            "XBAD",
+            name="Unsupported Exchange",
+            timezone="Europe/Athens",
+            source="eulerpool",
+        ),
+    )
+
+    with patch(
+        "exchange_calendars.get_calendar",
+        side_effect=ValueError("special dates are not sessions"),
+    ):
+        assert SQLExchangeRepository(db).sync_catalog(catalog) == 1
+
+    payload = json.loads(db.execute.call_args.args[1]["payload"])
+    assert payload[0]["calendar_name"] is None
+
+
 @pytest.mark.parametrize("catalog", [(), (ExchangeReference("XNYS", source="fmp"),)])
 def test_holiday_repository_rejects_empty_or_nonauthoritative_catalog(catalog):
     db = Mock()

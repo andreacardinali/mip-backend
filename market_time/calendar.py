@@ -22,6 +22,8 @@ def resolve_calendar_name(exchange_code: str, timezone: str | None) -> str | Non
         calendar = exchange_calendars.get_calendar(exchange_code)
     except InvalidCalendarName:
         return None
+    except ValueError:
+        return None
     if str(calendar.tz) != timezone:
         return None
     return calendar.name
