@@ -13,6 +13,7 @@ from market_data.exceptions import (
 from market_data.models import InstrumentReference
 from market_data.providers.fmp import FMPProvider
 from market_data.providers.ghostfolio import GhostfolioProvider
+from market_data.providers.openfigi import OpenFigiProvider
 
 
 def _client(handler):
@@ -108,6 +109,30 @@ def test_fmp_402_is_capability_unavailable():
         provider.get_profile(InstrumentReference(symbol="LDO.MI"))
 
 
+def test_openfigi_profile_maps_exchange_code():
+    def handler(request):
+        return httpx.Response(
+            200,
+            request=request,
+            json=[
+                {
+                    "data": [
+                        {
+                            "ticker": "LDO",
+                            "name": "Leonardo SpA",
+                            "exchCode": "XMIL",
+                        }
+                    ]
+                }
+            ],
+        )
+
+    provider = OpenFigiProvider(client=_client(handler))
+    profile = provider.get_profile(InstrumentReference(symbol="LDO.MI"))
+
+    assert profile.exchange_code == "XMIL"
+
+
 def test_ghostfolio_reauthenticates_once_after_401():
     calls = []
 
@@ -132,6 +157,8 @@ def test_ghostfolio_reauthenticates_once_after_401():
                     "symbol": "LDO.MI",
                     "name": "Leonardo SpA",
                     "currency": "EUR",
+                    "exchangeCode": "XMIL",
+                    "exchangeName": "Borsa Italiana",
                 },
                 "marketData": [{"date": "2026-10-20T07:00:00Z", "marketPrice": 49.21}],
             },
@@ -144,6 +171,8 @@ def test_ghostfolio_reauthenticates_once_after_401():
     )
     profile = provider.get_profile(InstrumentReference(symbol="LDO.MI"))
     assert profile.last_price == 49.21
+    assert profile.exchange_code == "XMIL"
+    assert profile.exchange_name == "Borsa Italiana"
     assert profile.price_timestamp is not None
     assert [call[1] for call in calls].count("/api/v1/auth/anonymous") == 2
 

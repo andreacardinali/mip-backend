@@ -6,10 +6,11 @@ from http_client import RetryPolicy, get_http_status
 from http_client import testing as httpx
 from market_data.capabilities import InstrumentType
 from market_data.exceptions import CapabilityUnavailableError, ProviderRateLimitError
-from market_data.models import InstrumentReference
+from market_data.models import InstrumentProfile, InstrumentReference
 from market_data.providers import fmp
 from market_data.providers.eulerpool import EulerpoolProvider
 from market_data.providers.fmp import FMPProvider, FMPQuotaGuard, _normalize_http_error
+from market_data.service import _has_fields
 
 
 class FakeEulerpoolProvider(EulerpoolProvider):
@@ -43,6 +44,41 @@ class FakeEulerpoolProvider(EulerpoolProvider):
                 }
             ]
         raise AssertionError(path)
+
+
+def test_eulerpool_search_preserves_exchange_metadata():
+    def handler(request):
+        return httpx.Response(
+            200,
+            request=request,
+            json=[
+                {
+                    "ticker": "EXM",
+                    "name": "Example Corp",
+                    "type": "stock",
+                    "currency": "USD",
+                    "exchange_code": "XNAS",
+                    "exchangeFullName": "Nasdaq",
+                }
+            ],
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        provider = EulerpoolProvider("token", client=client)
+        result = provider.search("EXM")[0]
+
+    assert result.exchange_code == "XNAS"
+    assert result.exchange_name == "Nasdaq"
+
+
+def test_empty_exchange_does_not_satisfy_profile_completeness():
+    profile = InstrumentProfile(
+        symbol="EXM",
+        name="Example Corp",
+        exchange_code=" ",
+    )
+
+    assert not _has_fields(profile, {"exchange_code"})
 
 
 def test_equity_profile_resolves_primary_exchange():

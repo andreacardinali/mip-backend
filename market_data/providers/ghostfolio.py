@@ -64,6 +64,8 @@ class GhostfolioProvider:
                 name=str(row.get("name") or row.get("symbol") or ""),
                 instrument_type=_kind(row.get("assetSubClass")),
                 currency=row.get("currency"),
+                exchange_code=row.get("exchangeCode") or row.get("exchange"),
+                exchange_name=row.get("exchangeName") or row.get("exchangeShortName"),
                 source=self.name,
             )
             for row in (items or [])[:limit]
@@ -90,6 +92,12 @@ class GhostfolioProvider:
             name=profile.get("name") or instrument.symbol,
             instrument_type=_kind(profile.get("assetSubClass")),
             currency=profile.get("currency") or instrument.currency,
+            exchange_code=(
+                profile.get("exchangeCode")
+                or profile.get("exchangeShortName")
+                or profile.get("exchange")
+            ),
+            exchange_name=profile.get("exchangeName") or profile.get("exchange"),
             country_code=_weighted(profile.get("countries"), "code", "name"),
             figi=profile.get("figi"),
             figi_composite=profile.get("figiComposite"),

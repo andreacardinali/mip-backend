@@ -129,6 +129,18 @@ class EulerpoolProvider:
                 currency=item.get("currency") or None,
                 isin=item.get("isin") or None,
                 wkn=item.get("wkn") or None,
+                exchange_code=(
+                    item.get("exchange_code")
+                    or item.get("exchangeCode")
+                    or item.get("exchange")
+                    or None
+                ),
+                exchange_name=(
+                    item.get("exchange_name")
+                    or item.get("exchangeName")
+                    or item.get("exchangeFullName")
+                    or None
+                ),
                 source=self.name,
             )
             for item in payload[:limit]

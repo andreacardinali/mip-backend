@@ -84,6 +84,7 @@ class OpenFigiProvider:
             figi=row.get("figi"),
             figi_composite=row.get("compositeFIGI"),
             figi_share_class=row.get("shareClassFIGI"),
+            exchange_code=row.get("exchCode") or row.get("exchangeCode"),
             market_sector=row.get("marketSector"),
             source=self.name,
         )

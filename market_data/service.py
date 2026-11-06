@@ -265,7 +265,11 @@ class MarketDataService:
 
 
 def _has_fields(profile: InstrumentProfile, required: set[str]) -> bool:
-    return all(getattr(profile, field, None) is not None for field in required)
+    return all(
+        (value := getattr(profile, field, None)) is not None
+        and (not isinstance(value, str) or bool(value.strip()))
+        for field in required
+    )
 
 
 def _batch_map(items, operation):

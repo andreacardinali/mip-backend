@@ -67,6 +67,13 @@ def _has_currency(payload) -> bool:
     )
 
 
+def _has_exchange(payload) -> bool:
+    return isinstance(payload, dict) and (
+        _clean_optional(payload.get("exchange_code"))
+        or _clean_optional(payload.get("exchange"))
+    ) is not None
+
+
 def _enqueue_missing_price(db, local_payload, symbol, data_source):
     if not _has_persisted_identity(local_payload):
         return None
@@ -127,6 +134,7 @@ def import_entity(
             and local_matches
             and _has_persisted_identity(local_payload)
             and _has_currency(local_payload)
+            and _has_exchange(local_payload)
             and _has_price(local_payload)
         ):
             return {
@@ -151,6 +159,7 @@ def import_entity(
             and isinstance(local_payload, dict)
             and local_payload.get("name")
             and local_payload.get("currency")
+            and _has_exchange(local_payload)
             and not requested_isin
             and not requested_currency
             and not requested_exchange
@@ -159,19 +168,28 @@ def import_entity(
             profile_payload = dict(local_payload)
 
         if profile_payload is None:
+            cached_type = _instrument_type(
+                (local_payload or {}).get("instrument_type")
+                or (local_payload or {}).get("type")
+            )
+            profile_type = (
+                requested_type
+                if requested_type != InstrumentType.UNKNOWN
+                else cached_type
+            )
             reference = InstrumentReference(
                 symbol=symbol,
                 isin=requested_isin,
-                instrument_type=requested_type,
+                instrument_type=profile_type,
                 currency=requested_currency,
                 exchange_code=requested_exchange,
             )
+            required_profile_fields = {"name", "currency"}
+            if not requested_exchange:
+                required_profile_fields.add("exchange_code")
             profile = market_data.get_profile(
                 reference,
-                required_fields={
-                    "name",
-                    "currency",
-                },
+                required_fields=required_profile_fields,
                 include_quote=True,
             )
             profile_payload = profile.to_import_payload() if profile else None
