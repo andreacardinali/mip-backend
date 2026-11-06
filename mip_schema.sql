@@ -11364,6 +11364,8 @@ BEGIN
            OR NULLIF(btrim(item->>'name'), '') IS NULL
            OR length(item->>'name') > 255
            OR length(item->>'country') > 10
+           OR (item ? 'calendar_name' AND jsonb_typeof(item->'calendar_name') NOT IN ('string', 'null'))
+           OR length(item->>'calendar_name') > 64
            OR (NULLIF(item->>'timezone', '') IS NOT NULL AND NOT EXISTS (
                SELECT 1 FROM pg_timezone_names WHERE name = item->>'timezone'
            ))
@@ -11399,12 +11401,13 @@ BEGIN
     FOR v_item IN SELECT item FROM jsonb_array_elements(p_catalog) AS rows(item)
     LOOP
         v_code := v_item->>'code';
-        INSERT INTO public.exchanges(exchange, exchangefullname, country_code, timezone_name)
-        VALUES (v_code, btrim(v_item->>'name'), NULLIF(v_item->>'country', ''), NULLIF(v_item->>'timezone', ''))
+        INSERT INTO public.exchanges(exchange, exchangefullname, country_code, timezone_name, calendar_name)
+        VALUES (v_code, btrim(v_item->>'name'), NULLIF(v_item->>'country', ''), NULLIF(v_item->>'timezone', ''), NULLIF(v_item->>'calendar_name', ''))
         ON CONFLICT (exchange) DO UPDATE SET
             exchangefullname = EXCLUDED.exchangefullname,
             country_code = EXCLUDED.country_code,
             timezone_name = COALESCE(EXCLUDED.timezone_name, exchanges.timezone_name),
+            calendar_name = COALESCE(EXCLUDED.calendar_name, exchanges.calendar_name),
             updated_at = now();
 
         INSERT INTO public.exchange_source_mappings

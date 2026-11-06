@@ -9,6 +9,24 @@ class CalendarUnavailable(ValueError):
     pass
 
 
+def resolve_calendar_name(exchange_code: str, timezone: str | None) -> str | None:
+    if not timezone:
+        return None
+    try:
+        import exchange_calendars
+        from exchange_calendars.errors import InvalidCalendarName
+    except ImportError:
+        return None
+
+    try:
+        calendar = exchange_calendars.get_calendar(exchange_code)
+    except InvalidCalendarName:
+        return None
+    if str(calendar.tz) != timezone:
+        return None
+    return calendar.name
+
+
 class CalendarProvider(Protocol):
     def window(self, calendar_name: str, at: datetime) -> CalendarWindow: ...
 

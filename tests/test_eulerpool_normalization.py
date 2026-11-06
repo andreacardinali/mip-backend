@@ -859,9 +859,40 @@ def test_holiday_repository_syncs_full_eulerpool_catalog_through_stored_function
             "name": "Bursa Malaysia",
             "country": "MY",
             "timezone": None,
+            "calendar_name": None,
             "raw_payload": payload,
         }
     ]
+
+
+def test_exchange_catalog_resolves_calendar_alias_only_when_timezone_matches():
+    db = Mock()
+    db.execute.return_value.scalar_one.return_value = 1
+    catalog = (
+        ExchangeReference(
+            "XNAS",
+            name="Nasdaq",
+            timezone="America/New_York",
+            source="eulerpool",
+        ),
+        ExchangeReference(
+            "XDUS",
+            name="Dusseldorf Stock Exchange",
+            timezone="Europe/Berlin",
+            source="eulerpool",
+        ),
+        ExchangeReference(
+            "XATH",
+            name="Unsupported Exchange",
+            timezone="Europe/Athens",
+            source="eulerpool",
+        ),
+    )
+
+    SQLExchangeRepository(db).sync_catalog(catalog)
+
+    payload = json.loads(db.execute.call_args.args[1]["payload"])
+    assert [item["calendar_name"] for item in payload] == ["XNYS", None, None]
 
 
 @pytest.mark.parametrize("catalog", [(), (ExchangeReference("XNYS", source="fmp"),)])

@@ -4,6 +4,7 @@ from sqlalchemy import bindparam, text
 from sqlalchemy.orm import Session
 
 from market_data.models import ExchangeReference
+from market_time.calendar import resolve_calendar_name
 from market_time.holidays import HolidaySnapshot, normalize_holidays
 from market_time.models import ExchangeHours
 
@@ -60,6 +61,7 @@ class SQLExchangeRepository:
                 "name": item.name,
                 "country": item.country_code,
                 "timezone": item.timezone,
+                "calendar_name": resolve_calendar_name(item.code, item.timezone),
                 "raw_payload": item.raw_payload,
             }
             for item in exchanges
