@@ -203,6 +203,7 @@ def test_price_request_worker_uses_trusted_user(monkeypatch, scenario):
         enqueue.side_effect = RuntimeError("enqueue failed")
     monkeypatch.setattr(request, "SessionLocal", session_factory)
     monkeypatch.setattr(request, "enqueue_user_price_refreshes", enqueue)
+    monkeypatch.setattr(request, "live_price_max_age_seconds", lambda: 45)
     token = current_job_request.set(
         {
             "requested_by": None if scenario == "missing_user" else USER_ID,
@@ -226,12 +227,12 @@ def test_price_request_worker_uses_trusted_user(monkeypatch, scenario):
         else:
             assert request.run() == {
                 "status": "SUCCESS",
-                "max_age_seconds": 30,
+                "max_age_seconds": 45,
                 "enqueued_count": 2,
                 "candidates_count": 3,
             }
             db.commit.assert_called_once()
-        enqueue.assert_called_once_with(db, user_id=USER_ID, max_age_seconds=30)
+        enqueue.assert_called_once_with(db, user_id=USER_ID, max_age_seconds=45)
         db.close.assert_called_once()
     finally:
         current_job_request.reset(token)
