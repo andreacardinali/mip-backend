@@ -1,7 +1,23 @@
 from datetime import UTC, datetime
+from pathlib import Path
 
 from market_data.models import BatchResult, MarketQuote
 from services import market_price_refresh as service
+
+
+def test_scheduled_refresh_manifests_load_with_expected_cadence():
+    from scheduler_bootstrap import load_job_definition
+
+    jobs_root = Path(__file__).resolve().parents[1] / "jobs"
+    dispatcher = load_job_definition(
+        jobs_root / "market_price_refresh.job.json", timezone="UTC"
+    )
+    discovery = load_job_definition(
+        jobs_root / "market_price_refresh_discovery.job.json", timezone="UTC"
+    )
+
+    assert dispatcher["trigger"]["interval_minutes"] == 1
+    assert discovery["trigger"]["interval_minutes"] == 1440
 
 
 def test_price_refresh_batches_quotes_and_retries_only_failed_item(monkeypatch):
@@ -77,8 +93,26 @@ def test_price_refresh_batches_quotes_and_retries_only_failed_item(monkeypatch):
     }
 
 
-def test_scheduled_worker_discovers_candidates_before_processing(monkeypatch):
+def test_scheduled_worker_only_processes_queue(monkeypatch):
     from jobs.market_price_refresh import worker
+
+    events = []
+
+    monkeypatch.setattr(
+        worker,
+        "process_price_refresh_queue",
+        lambda: events.append("process")
+        or {"status": "SUCCESS", "claimed": 6},
+    )
+
+    result = worker.run()
+
+    assert events == ["process"]
+    assert result == {"status": "SUCCESS", "claimed": 6}
+
+
+def test_scheduled_discovery_commits_enqueued_candidates(monkeypatch):
+    from jobs.market_price_refresh import discovery
 
     events = []
 
@@ -92,26 +126,15 @@ def test_scheduled_worker_discovers_candidates_before_processing(monkeypatch):
         def close(self):
             events.append("close")
 
-    monkeypatch.setattr(worker, "SessionLocal", DiscoverySession)
+    monkeypatch.setattr(discovery, "SessionLocal", DiscoverySession)
     monkeypatch.setattr(
-        worker,
+        discovery,
         "enqueue_stale_market_price_refreshes",
         lambda db: events.append("discover")
         or {"candidates_count": 8, "enqueued_count": 6},
     )
-    monkeypatch.setattr(
-        worker,
-        "process_price_refresh_queue",
-        lambda: events.append("process")
-        or {"status": "SUCCESS", "claimed": 6},
-    )
 
-    result = worker.run()
+    result = discovery.run()
 
-    assert events == ["discover", "commit", "close", "process"]
-    assert result == {
-        "status": "SUCCESS",
-        "claimed": 6,
-        "candidates_discovered": 8,
-        "candidates_enqueued": 6,
-    }
+    assert events == ["discover", "commit", "close"]
+    assert result == {"candidates_count": 8, "enqueued_count": 6}

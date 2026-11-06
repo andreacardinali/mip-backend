@@ -11,6 +11,23 @@ class SchedulerRepository:
     def __init__(self, db: Session) -> None:
         self.db = db
 
+    def get_job_schedule(self, *, job_key: str) -> dict[str, Any] | None:
+        row = (
+            self.db.execute(
+                text(
+                    """
+                    SELECT trigger_type, cron_expression, interval_minutes
+                    FROM public.scheduler_jobs
+                    WHERE job_key = :job_key
+                    """
+                ),
+                {"job_key": job_key},
+            )
+            .mappings()
+            .one_or_none()
+        )
+        return dict(row) if row is not None else None
+
     def get_enabled_jobs(self) -> list[dict[str, Any]]:
         rows = self.db.execute(text("SELECT * FROM sp_get_enabled_scheduler_jobs()"))
         return [dict(row) for row in rows.mappings().all()]

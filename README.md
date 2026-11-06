@@ -65,16 +65,20 @@ installation SQL runs automatically at application startup.
 
 ## Scheduled Market Price Refresh
 
-The scheduled market-price refresh first discovers stale instruments from
-currently valid members of active market universes, portfolio positions and
-watchlists, then processes the shared refresh queue. Discovery uses the same
-30-second freshness threshold and deduplicated queue routine as user-triggered
-refreshes; the authenticated refresh endpoint remains user-scoped.
+The global discovery job runs once per day by default. It finds stale
+instruments across currently valid members of active market universes,
+portfolio positions and watchlists, then enqueues them in the shared refresh
+queue. A separate dispatcher polls that queue every minute and processes up to
+20 instruments per run. Discovery uses the same 30-second freshness threshold
+and deduplicated queue routine as user-triggered refreshes; the authenticated
+refresh endpoint remains user-scoped.
 
-Before enabling the updated scheduled worker on an existing database, manually
-apply `oneshot/install_market_price_refresh_discovery.sql`. The installer is
-temporary operational SQL and does not run on application startup. Its
-candidate and enqueue counts are reported by the scheduled job.
+Before enabling scheduled global refresh on an existing database, manually
+apply `oneshot/install_market_price_refresh_discovery.sql` and
+`oneshot/install_global_price_refresh.sql`. These temporary installers do not
+run on application startup. Administrators can change the discovery and
+dispatcher schedules through the scheduler settings; saved schedules are kept
+across backend restarts. The discovery job reports candidate and enqueue counts.
 
 For overview analysis diagnostics, review and manually apply
 `oneshot/install_screener_run_diagnostics.sql` after the execution-request
@@ -1543,12 +1547,12 @@ The runner executes DDL with `no_parameters=True`, preserving literal `%` marker
 inside PL/pgSQL without psycopg interpreting them as driver placeholders. A failed
 upgrade rolls back its transaction; rerun the corrected runner after a failure.
 
-Apply the migration before starting the updated backend. Restart the scheduler
-with the price-refresh dispatcher enabled. Also apply
+Apply the one-shot price-refresh installers before starting the updated backend.
+Restart the scheduler with the dispatcher and discovery jobs enabled. Also apply
 `oneshot/install_scheduler_execution_requests.sql` as described above:
 `/api/market-data/prices/refresh` returns HTTP 202 with a scheduler ticket for the
-global `market_price_refresh_dispatcher`. The dispatcher discovers stale prices
-across active universes, positions and watchlists for all users, then processes
+global `market_price_refresh_dispatcher`. Discovery enqueues stale prices across
+active universes, positions and watchlists for all users; the dispatcher processes
 up to 20 queued instruments per run. The frontend must be upgraded with the backend.
 Job locks use
 a dedicated database connection throughout each execution; size the connection

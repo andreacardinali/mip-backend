@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "job_key": "market_price_refresh_discovery",
+  "job_name": "Global Market Price Refresh Discovery",
+  "description": "Finds stale prices across active market universes and enqueues them for refresh.",
+  "python_module": "jobs.market_price_refresh.discovery",
+  "trigger": {
+    "type": "interval",
+    "interval_minutes": 1440
+  },
+  "enabled_by_default": true
+}

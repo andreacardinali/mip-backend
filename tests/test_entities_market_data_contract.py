@@ -84,6 +84,7 @@ def scheduler_catalog(monkeypatch):
     }
     db = MagicMock()
     repository = MagicMock()
+    repository.get_job_schedule.return_value = None
     repository.register_job.return_value = {"job_id": "defined", "action": "UNCHANGED"}
     monkeypatch.setattr(scheduler_bootstrap, "SessionLocal", lambda: db)
     monkeypatch.setattr(
@@ -114,6 +115,7 @@ def test_scheduler_catalog_prunes_only_after_registration(
     )
     repository.register_job.assert_called_once()
     assert [call[0] for call in repository.mock_calls] == [
+        "get_job_schedule",
         "register_job",
         "prune_undefined_jobs",
     ]
@@ -139,6 +141,21 @@ def test_scheduler_catalog_imports_description_on_each_bootstrap(scheduler_catal
         == definition["description"]
     )
     assert db.commit.call_count == 2
+
+
+def test_scheduler_catalog_preserves_database_schedule(scheduler_catalog):
+    bootstrap, _, repository = scheduler_catalog
+    repository.get_job_schedule.return_value = {
+        "trigger_type": "interval",
+        "cron_expression": None,
+        "interval_minutes": 90,
+    }
+
+    bootstrap.bootstrap_scheduler_jobs(jobs_root=Path("jobs"), timezone="UTC")
+
+    assert repository.register_job.call_args.kwargs["trigger_type"] == "interval"
+    assert repository.register_job.call_args.kwargs["interval_minutes"] == 90
+    assert repository.register_job.call_args.kwargs["cron_expression"] is None
 
 
 @pytest.mark.parametrize("description", [None, "", "   ", 123])

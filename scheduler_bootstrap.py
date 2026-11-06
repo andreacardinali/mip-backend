@@ -228,6 +228,15 @@ def bootstrap_scheduler_jobs(
     try:
         for path, definition in definitions:
             trigger = definition["trigger"]
+            existing_schedule = repository.get_job_schedule(
+                job_key=definition["job_key"]
+            )
+            if existing_schedule is not None:
+                trigger = {
+                    "type": existing_schedule["trigger_type"],
+                    "cron_expression": existing_schedule["cron_expression"],
+                    "interval_minutes": existing_schedule["interval_minutes"],
+                }
 
             result = repository.register_job(
                 job_key=(definition["job_key"]),
