@@ -623,7 +623,9 @@ class EulerpoolProvider:
                 )
             except HttpStatusError as error:
                 if error.response.status_code == 404:
-                    raise InstrumentNotFoundError(path) from error
+                    raise InstrumentNotFoundError(
+                        f"HTTP 404 from Eulerpool: {path}"
+                    ) from error
                 raise
             return response.json()
         finally:

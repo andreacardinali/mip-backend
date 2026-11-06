@@ -22,6 +22,20 @@ from scheduler_repository import SchedulerRepository
 from scripts.sync_exchanges import main as sync_exchanges_main
 
 
+def test_eulerpool_404_error_identifies_status_without_exposing_token():
+    def handler(request):
+        return httpx.Response(404, request=request, text="not found")
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        provider = EulerpoolProvider("secret-token", client=client)
+        with pytest.raises(InstrumentNotFoundError) as error:
+            provider._get("/market/prices/ABC")
+
+    assert "HTTP 404" in str(error.value)
+    assert "/market/prices/ABC" in str(error.value)
+    assert "secret-token" not in str(error.value)
+
+
 def test_exchange_job_commits_catalog_before_holidays_and_reuses_response():
     catalog = (ExchangeReference("XKLSE", name="Bursa Malaysia", source="eulerpool"),)
     provider = Mock()

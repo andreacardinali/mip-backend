@@ -87,6 +87,33 @@ def get_pipeline_diagnostics(
                     {"limit": limit},
                 ),
             },
+            "price_refresh": {
+                "by_status": rows(
+                    """
+                    SELECT UPPER(status) AS status,
+                           COUNT(*)::integer AS job_count,
+                           COALESCE(SUM(attempt_count), 0)::integer AS dispatcher_attempts,
+                           COUNT(*) FILTER (
+                               WHERE last_error ILIKE '%HTTP 404%'
+                           )::integer AS http_404_count,
+                           MAX(updated_at) AS latest_updated_at
+                    FROM public.market_price_refresh_queue
+                    GROUP BY UPPER(status)
+                    ORDER BY job_count DESC, status
+                    """
+                ),
+                "recent_jobs": rows(
+                    """
+                    SELECT job_id, symbol, data_source, status, attempt_count,
+                           max_attempts, next_attempt_at, last_error, created_at,
+                           updated_at, completed_at
+                    FROM public.market_price_refresh_queue
+                    ORDER BY updated_at DESC
+                    LIMIT :limit
+                    """,
+                    {"limit": limit},
+                ),
+            },
             "notifications": {
                 "by_status_channel": rows(
                     """

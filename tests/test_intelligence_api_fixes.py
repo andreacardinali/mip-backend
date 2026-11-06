@@ -852,6 +852,8 @@ def test_pipeline_diagnostics_returns_bounded_pipeline_sections(monkeypatch):
         [{"event_type": "NEWS", "stage": "ACQUIRED"}],
         [{"status": "SUCCESS", "run_count": 2}],
         [{"job_key": "market_analysis_scan", "status": "SUCCESS"}],
+        [{"status": "RETRY", "job_count": 2, "dispatcher_attempts": 4, "http_404_count": 1}],
+        [{"symbol": "ABC", "status": "RETRY", "attempt_count": 2}],
         [{"status": "SENT", "channel": "EMAIL", "notification_count": 1}],
         [{"status": "FAILED", "channel": "EMAIL", "attempt_count": 3}],
         [{"channel": "EMAIL", "configured_sources": 2, "ready_sources": 1}],
@@ -864,12 +866,15 @@ def test_pipeline_diagnostics_returns_bounded_pipeline_sections(monkeypatch):
     assert result["window_days"] == 7
     assert result["ingestion"]["recent_events"] == result_sets[1]
     assert result["processing"]["recent_runs"] == result_sets[3]
-    assert result["notifications"]["recent"] == result_sets[5]
-    assert result["notifications"]["channels"] == result_sets[6]
-    assert db.execute.call_count == 7
+    assert result["price_refresh"]["by_status"] == result_sets[4]
+    assert result["price_refresh"]["recent_jobs"] == result_sets[5]
+    assert result["notifications"]["recent"] == result_sets[7]
+    assert result["notifications"]["channels"] == result_sets[8]
+    assert db.execute.call_count == 9
     assert db.execute.call_args_list[1].args[1] == {"limit": 10}
     assert db.execute.call_args_list[3].args[1] == {"limit": 10}
     assert db.execute.call_args_list[5].args[1] == {"limit": 10}
+    assert db.execute.call_args_list[7].args[1] == {"limit": 10}
     db.close.assert_called_once()
 
 
