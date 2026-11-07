@@ -2,7 +2,7 @@ import json
 import unittest
 from contextlib import ExitStack
 from dataclasses import replace
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -40,6 +40,8 @@ from jobs.portfolio_intelligence.scoring import (
     upcoming_catalyst_severity,
 )
 from notifications.models import EnqueueResult, EnqueueStatus
+from market_data.models import MarketQuote, PriceBar
+from market_time.models import MarketClock, MarketSession, MarketStatus
 
 
 class RefactorTests(unittest.TestCase):
@@ -581,6 +583,32 @@ class SharedBranchTests(unittest.TestCase):
             data={"symbol": "AAPL", "causeFound": False, "headline": "Move"},
         )
         self.context.market_data.get_ohlcv.return_value = [1, 2]
+        quote_timestamp = int(datetime.now(UTC).timestamp())
+        self.quote_timestamp = quote_timestamp
+        session_open = datetime.fromtimestamp(quote_timestamp - 1800, UTC)
+        session_close = datetime.fromtimestamp(quote_timestamp + 1800, UTC)
+        session = MarketSession(
+            session_date=session_open.date(),
+            opens_at=session_open,
+            closes_at=session_close,
+        )
+        self.context.market_data.get_quote.return_value = MarketQuote(
+            timestamp=quote_timestamp,
+            price=106,
+        )
+        self.context.market_time.snapshot.return_value = MarketClock(
+            exchange="TEST",
+            status=MarketStatus.OPEN,
+            observed_at=session_open,
+            calendar_name="TEST",
+            timezone_name="UTC",
+            session=session,
+        )
+        self.context.market_data.get_ohlcv.return_value = [
+            PriceBar(quote_timestamp - 172800, 98, 101, 97, 99),
+            PriceBar(quote_timestamp - 86400, 99, 102, 98, 100),
+            PriceBar(quote_timestamp, 100, 110, 99, 108),
+        ]
         self.context.notification_queue.enqueue.return_value = EnqueueResult(
             EnqueueStatus.CREATED,
             notification_id="created",
@@ -622,11 +650,18 @@ class SharedBranchTests(unittest.TestCase):
                     patch(f"{module}.recent_catalysts", return_value={})
                 )
             if isinstance(branch, DailyMoverBranch):
-                snapshot = Mock(daily_change_pct=6)
-                snapshot.to_dict.return_value = {
-                    "dailyChangePct": 6,
-                    "observedDate": 1800000000,
-                }
+                from market_analysis.models import TechnicalSnapshot
+
+                snapshot = TechnicalSnapshot(
+                    market_price=108,
+                    previous_close=100,
+                    daily_change_pct=8,
+                    observed_timestamp=1_800_000_000,
+                    rsi=None,
+                    sma_50=None,
+                    sma_200=None,
+                    bollinger_band_width_pct=None,
+                )
                 stack.enter_context(
                     patch(f"{module}.analyze_price_bars", return_value=snapshot)
                 )
@@ -694,10 +729,75 @@ class SharedBranchTests(unittest.TestCase):
             for call in self.context.notification_queue.enqueue.call_args_list
         ]
         self.assertEqual([item["severity"] for item in items], ["MEDIUM", "HIGH"])
-        self.assertEqual([item["portfolioImpactPct"] for item in items], [0.06, 1.8])
+        for item, expected in zip(items, [0.06, 1.8], strict=True):
+            self.assertAlmostEqual(item["portfolioImpactPct"], expected)
         self.assertTrue(
             self.save.call_args.kwargs["event_key"].startswith("instrument|")
         )
+
+    def test_daily_mover_does_not_process_when_market_is_closed(self):
+        self.context.market_time.snapshot.return_value = replace(
+            self.context.market_time.snapshot.return_value,
+            status=MarketStatus.CLOSED,
+            session=None,
+        )
+
+        result = self.execute(DailyMoverBranch())
+
+        self.assertEqual(result.accepted_count, 0)
+        self.context.market_data.get_quote.assert_not_called()
+        self.context.market_data.get_ohlcv.assert_not_called()
+        self.context.research_llm.generate_json.assert_not_called()
+
+    def test_daily_mover_uses_live_quote_against_last_completed_close(self):
+        self.execute(DailyMoverBranch())
+
+        observed = json.loads(
+            self.context.prompts.get.return_value.render.call_args.kwargs["observed"]
+        )
+        self.assertEqual(observed["marketPrice"], 106)
+        self.assertEqual(observed["previousClose"], 100)
+        self.assertAlmostEqual(observed["dailyChangePct"], 6)
+        self.assertEqual(observed["observedDate"], self.quote_timestamp)
+
+    def test_daily_mover_requires_change_to_exceed_threshold(self):
+        self.context.market_data.get_quote.return_value = MarketQuote(
+            timestamp=self.quote_timestamp,
+            price=103,
+        )
+
+        result = self.execute(DailyMoverBranch())
+
+        self.assertEqual(result.accepted_count, 0)
+        self.context.research_llm.generate_json.assert_not_called()
+        self.save.assert_not_called()
+
+    def test_daily_mover_ignores_quote_older_than_ten_minutes(self):
+        self.context.market_data.get_quote.return_value = MarketQuote(
+            timestamp=self.quote_timestamp - 601,
+            price=106,
+        )
+
+        result = self.execute(DailyMoverBranch())
+
+        self.assertEqual(result.accepted_count, 0)
+        self.context.market_data.get_ohlcv.assert_not_called()
+        self.context.research_llm.generate_json.assert_not_called()
+
+    def test_daily_mover_event_key_only_changes_when_direction_flips(self):
+        event_keys = []
+        for price in (104, 109, 95):
+            self.context.market_data.get_quote.return_value = MarketQuote(
+                timestamp=self.quote_timestamp,
+                price=price,
+            )
+            self.execute(DailyMoverBranch())
+            event_keys.append(self.save.call_args.kwargs["event_key"])
+
+        self.assertEqual(event_keys[0], event_keys[1])
+        self.assertNotEqual(event_keys[1], event_keys[2])
+        self.assertTrue(event_keys[0].endswith("|up"))
+        self.assertTrue(event_keys[2].endswith("|down"))
 
     def test_breaking_low_confidence_is_saved_without_delivery(self):
         self.set_events([self.event(confidence=30)])
@@ -719,6 +819,40 @@ class SharedBranchTests(unittest.TestCase):
         self.assertEqual(result.notification_count, 0)
         self.recipients.assert_called_once()
         self.context.notification_queue.enqueue.assert_not_called()
+
+    def test_breaking_uses_cited_sources_for_stable_event_identity(self):
+        duplicate = self.event(fingerprint="model-fingerprint-one")
+        duplicate["sourceIndicesUsed"] = [0]
+        distinct = self.event(fingerprint="model-fingerprint-two")
+        distinct["sourceIndicesUsed"] = [1]
+        self.set_events([duplicate, distinct])
+        self.context.research_llm.generate_json.return_value.sources = [
+            {"sourceIndex": 0, "uri": "https://news.example/story?utm_source=feed"},
+            {"sourceIndex": 1, "uri": "https://news.example/another-story"},
+        ]
+
+        result = self.execute(BreakingCatalystBranch())
+
+        self.assertEqual(result.accepted_count, 2)
+        self.assertEqual(self.save.call_count, 2)
+        first_key, second_key = [
+            call.kwargs["event_key"] for call in self.save.call_args_list
+        ]
+        self.assertNotEqual(first_key, second_key)
+        self.assertEqual(
+            self.save.call_args_list[0].kwargs["payload"]["sources"],
+            [{"sourceIndex": 0, "uri": "https://news.example/story?utm_source=feed"}],
+        )
+
+        repeated = self.event(fingerprint="model-fingerprint-changed")
+        repeated["sourceIndicesUsed"] = [0]
+        self.set_events([duplicate, repeated])
+        self.context.research_llm.generate_json.return_value.sources = [
+            {"sourceIndex": 0, "uri": "https://news.example/story"},
+            {"sourceIndex": 1, "uri": "https://news.example/another-story"},
+        ]
+        self.execute(BreakingCatalystBranch())
+        self.assertEqual(self.save.call_count, 1)
 
     def test_upcoming_outside_window_is_saved_without_delivery(self):
         self.set_events([self.event(event_date=date.today() + timedelta(days=30))])

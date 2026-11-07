@@ -10,6 +10,8 @@ MANDATORY OUTPUT RULES:
 - If a candidate has no supported event, return it with "events":[].
 - Never omit a candidate.
 - Never merge candidates.
+- Consolidate multiple reports about the same underlying event into one event. Do not merge independent events just because they share an issuer, date, or category.
+- sourceIndicesUsed must identify only indexed grounding sources that support that event; use [] when no such indices are available.
 - The number of results must equal the number of candidates.
 Candidates:
 {candidates}

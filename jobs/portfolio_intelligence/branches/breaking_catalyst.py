@@ -1,6 +1,8 @@
+import hashlib
 import json
 import logging
 from datetime import UTC, datetime
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from job_runtime.collections import batched
 from job_runtime.progress import BatchProgress
@@ -18,8 +20,46 @@ from jobs.portfolio_intelligence.repositories.entities import (
 )
 from jobs.portfolio_intelligence.scoring import breaking_catalyst_severity
 from llm.base import LLMRequest
+from llm.evidence import select_sources
 
 logger = logging.getLogger(__name__)
+
+
+def _source_identity(sources):
+    uris = set()
+    for source in sources:
+        uri = source.get("uri")
+        if not isinstance(uri, str):
+            continue
+        try:
+            parsed = urlsplit(uri.strip())
+            hostname = parsed.hostname
+            port = parsed.port
+        except ValueError:
+            continue
+        scheme = parsed.scheme.lower()
+        if scheme not in {"http", "https"} or not hostname:
+            continue
+        query = urlencode(
+            sorted(
+                (key, value)
+                for key, value in parse_qsl(parsed.query)
+                if not key.lower().startswith("utm_")
+                and key.lower() not in {"gclid", "fbclid"}
+            )
+        )
+        netloc = hostname.lower()
+        if port and port != (80 if scheme == "http" else 443):
+            netloc = f"{netloc}:{port}"
+        uris.add(
+            urlunsplit(
+                (scheme, netloc, parsed.path.rstrip("/"), query, "")
+            )
+        )
+    if not uris:
+        return None
+    identity = "\n".join(sorted(uris)).encode("utf-8")
+    return hashlib.sha256(identity).hexdigest()
 
 
 class BreakingCatalystBranch:
@@ -74,8 +114,12 @@ class BreakingCatalystBranch:
                         result.add_error(f"{source.symbol}: {exc}")
                         batch_failures += 1
                         continue
+                    event_sources = select_sources(
+                        event.payload.get("sourceIndicesUsed"), response.sources
+                    )
                     category = "NEWS" if event.event_type == "NEWS" else self.name
-                    event_key = f"{source.entity_id}|{event.event_type}|{event.event_day}|{event.fingerprint}"
+                    fingerprint = _source_identity(event_sources) or event.fingerprint
+                    event_key = f"{source.entity_id}|{event.event_type}|{event.event_day}|{fingerprint}"
                     item = {
                         **event.payload,
                         "notificationCategory": category,
@@ -83,7 +127,7 @@ class BreakingCatalystBranch:
                         "symbol": source.symbol,
                         "name": source.name,
                         "eventKey": event_key,
-                        "sources": response.sources,
+                        "sources": event_sources,
                         "relatedSymbols": source.related_symbols,
                     }
                     try:
@@ -96,7 +140,7 @@ class BreakingCatalystBranch:
                                 "marketEvidence": payload[batch.index(source)][
                                     "marketEvidence"
                                 ],
-                                "sources": response.sources,
+                                "sources": event_sources,
                             },
                             decorate=lambda recipient, confidence=event.confidence: {
                                 "severity": breaking_catalyst_severity(

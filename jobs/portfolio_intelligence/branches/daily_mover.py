@@ -1,6 +1,7 @@
 import json
 import logging
-from datetime import UTC, datetime
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 
 from job_runtime.progress import BatchProgress
 from jobs.portfolio_intelligence.delivery import CollectionEventPublisher
@@ -19,6 +20,7 @@ from llm.base import LLMRequest
 from llm.evidence import select_sources
 from market_analysis.technical import analyze_price_bars
 from market_data.models import HistoryRequest
+from market_time.models import MarketStatus
 
 logger = logging.getLogger(__name__)
 
@@ -45,22 +47,70 @@ class DailyMoverBranch:
         for entity in entities:
             failed = 0
             try:
+                reference = instrument_reference(entity)
+                market_clock = context.market_time.snapshot(entity.exchange)
+                if market_clock.status != MarketStatus.OPEN or not market_clock.session:
+                    progress.complete_batch(1)
+                    progress.log_progress(logger)
+                    continue
+
+                quote = context.market_data.get_quote(reference)
+                quote_at = datetime.fromtimestamp(int(quote.timestamp), UTC)
+                quote_age = datetime.now(UTC) - quote_at
+                if quote_age < timedelta(0) or quote_age > timedelta(minutes=10):
+                    progress.complete_batch(1)
+                    progress.log_progress(logger)
+                    continue
+                quote_clock = context.market_time.snapshot(entity.exchange, at=quote_at)
+                if (
+                    quote_clock.status != MarketStatus.OPEN
+                    or not quote_clock.session
+                    or quote_clock.session.session_date
+                    != market_clock.session.session_date
+                ):
+                    progress.complete_batch(1)
+                    progress.log_progress(logger)
+                    continue
+
                 bars = context.market_data.get_ohlcv(
                     HistoryRequest(
-                        instrument=instrument_reference(entity),
+                        instrument=reference,
                         period=context.config.history_range,
                         interval=context.config.history_interval,
                     )
                 )
-                if len(bars) < context.config.min_history_rows:
+                completed_bars = sorted(
+                    (
+                        bar
+                        for bar in bars
+                        if bar.timestamp
+                        < int(market_clock.session.opens_at.timestamp())
+                    ),
+                    key=lambda bar: bar.timestamp,
+                )
+                if (
+                    len(bars) < context.config.min_history_rows
+                    or len(completed_bars) < 2
+                ):
                     progress.complete_batch(1)
                     progress.log_progress(logger)
                     continue
-                snapshot = analyze_price_bars(bars)
+                snapshot = analyze_price_bars(completed_bars)
+                previous_close = completed_bars[-1].close if completed_bars else None
+                if snapshot is not None and previous_close:
+                    snapshot = replace(
+                        snapshot,
+                        market_price=quote.price,
+                        previous_close=previous_close,
+                        daily_change_pct=(quote.price - previous_close)
+                        / previous_close
+                        * 100,
+                        observed_timestamp=quote.timestamp,
+                    )
                 if (
                     snapshot is None
                     or abs(snapshot.daily_change_pct)
-                    < context.config.daily_move_min_pct
+                    <= context.config.daily_move_min_pct
                 ):
                     progress.complete_batch(1)
                     progress.log_progress(logger)
@@ -111,10 +161,9 @@ class DailyMoverBranch:
                         validation.source_indices, research.sources
                     ),
                 }
-                observed_day = (
-                    datetime.fromtimestamp(item["observedDate"], UTC).date().isoformat()
-                )
-                event_key = f"{entity.instrument_id}|{observed_day}|{round(item['dailyChangePct'], 1)}"
+                observed_day = market_clock.session.session_date.isoformat()
+                direction = "up" if item["dailyChangePct"] > 0 else "down"
+                event_key = f"{entity.instrument_id}|{observed_day}|{direction}"
                 result.notification_count += publisher.publish(
                     entity,
                     event_key=event_key,

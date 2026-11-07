@@ -13,6 +13,9 @@ from llm.factory import create_provider
 from market_data.config import MarketDataConfig
 from market_data.factory import create_market_data_service
 from market_data.service import MarketDataService
+from market_time.calendar import ExchangeCalendarsProvider
+from market_time.repository import SQLExchangeHoursRepository
+from market_time.service import MarketTimeService
 from notifications.queue import NotificationQueue
 from prompting.repository import FileSystemPromptRepository
 
@@ -26,6 +29,7 @@ class IntelligenceContext:
     research_llm: LLMProvider
     validation_llm: LLMProvider
     market_data: MarketDataService
+    market_time: MarketTimeService
     notification_queue: NotificationQueue
     prompts: FileSystemPromptRepository
 
@@ -45,6 +49,10 @@ def build_context(db: Session) -> IntelligenceContext:
         validation_llm=create_provider(config.validation_llm),
         market_data=create_market_data_service(
             MarketDataConfig.from_settings(settings)
+        ),
+        market_time=MarketTimeService(
+            SQLExchangeHoursRepository(db),
+            ExchangeCalendarsProvider(),
         ),
         notification_queue=NotificationQueue(
             db,
